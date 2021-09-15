@@ -1,6 +1,6 @@
 
-local mm = require'webb_xapp'.app'mm'
-require'x_auth'
+local mm = require'xapp'.app'mm'
+require'xauth'
 
 mm.title = 'Many Machines'
 
@@ -38,16 +38,6 @@ function mm.install()
 	]]
 
 end
-
-js[[
-
-on_dom_load(function() {
-	init_components()
-	init_auth()
-	init_action()
-})
-
-]]
 
 html[[
 <div class=header>
