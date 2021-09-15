@@ -1,6 +1,10 @@
 
 local mm = require'xapp'.app'mm'
-require'xauth'
+
+fontfile'OpenSans-Regular.ttf'
+fontfile'OpenSans-SemiBold.ttf'
+fontfile'OpenSansCondensed-Light.ttf'
+fontfile'OpenSansCondensed-Bold.ttf'
 
 mm.title = 'Many Machines'
 
