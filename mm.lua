@@ -45,12 +45,17 @@ body {
 	display: flex;
 	flex-flow: column;
 }
+
 .header {
 	display: flex;
 	border-bottom: 1px solid #ccc;
 	align-items: baseline;
 	justify-content: space-between;
 	padding: 0 .5em;
+}
+
+body[theme=dark] .sign-in-logo {
+	filter: invert(1);
 }
 ]]
 
