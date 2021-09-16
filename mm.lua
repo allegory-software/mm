@@ -1,12 +1,8 @@
 
 local mm = require'xapp'.app'mm'
 
-fontfile'OpenSans-Regular.ttf'
-fontfile'OpenSans-SemiBold.ttf'
-fontfile'OpenSansCondensed-Light.ttf'
-fontfile'OpenSansCondensed-Bold.ttf'
-
 mm.title = 'Many Machines'
+mm.font = 'opensans'
 
 config('db_port', 3307)
 config('db_pass', 'abcd12')
@@ -43,11 +39,30 @@ function mm.install()
 
 end
 
+css[[
+body {
+	/* layout content: center limited-width body to window */
+	display: flex;
+	flex-flow: column;
+}
+.header {
+	display: flex;
+	border-bottom: 1px solid #ccc;
+	align-items: baseline;
+	justify-content: space-between;
+	padding: 0 .5em;
+}
+]]
+
+js[[
+sign_in_options = {
+	logo: 'sign-in-logo.png',
+}
+]]
+
 html[[
 <div class=header>
-	<div class=logo>
-		<a href=/>Many Machines</a>
-	</div>
+	<div class=logo b>MANY MACHINES</div>
 	<x-settings-button></x-settings-button>
 </div>
 <x-grid rowset_name=machines></x-grid>
