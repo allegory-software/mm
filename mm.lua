@@ -48,7 +48,7 @@ body {
 
 .header {
 	display: flex;
-	border-bottom: 1px solid #ccc;
+	border-bottom: 1px solid var(--x-smoke);
 	align-items: baseline;
 	justify-content: space-between;
 	padding: 0 .5em;
@@ -66,7 +66,7 @@ sign_in_options = {
 ]]
 
 html[[
-<div class=header>
+<div class=header theme=dark>
 	<div class=logo b>MANY MACHINES</div>
 	<x-settings-button></x-settings-button>
 </div>
