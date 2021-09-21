@@ -184,11 +184,15 @@ local function ssh(ip, cmd_and_args, stdin_contents)
 	local main_thread = coroutine.running()
 	local main_thread_suspended
 	local threads = 0
-	local stderr
+	local stderr, err
 	if capture_stderr then
 		sock.thread(function()
 			threads = threads + 1
-			stderr = assert(p:read_stderr'*a')
+			stderr, err = p:read_stderr'*a'
+			if not stderr then
+				p:kill()
+				assert(stderr, err)
+			end
 			threads = threads - 1
 			if main_thread_suspended then
 				resume(main_thread)
@@ -210,10 +214,13 @@ local function ssh(ip, cmd_and_args, stdin_contents)
 			end
 		end)
 	end
+	local stdout, err
 	if capture_stdout then
-		local stdout, err = p:read_stdout'*a'
-		p:kill()
-		assert(stdout, err)
+		stdout, err = p:read_stdout'*a'
+		if not stdout then
+			p:kill()
+			assert(stdout, err)
+		end
 	end
 	while threads > 0 do
 		main_thread_suspended = true
@@ -342,4 +349,5 @@ function cmd.on(ip, script)
 end
 
 --return mm.run('on', '10.0.0.20', 'install')
-return mm.run('on', '45.13.136.150', 'install')
+--return mm.run('on', '45.13.136.150', 'install')
+return mm.run(...)
