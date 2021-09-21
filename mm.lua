@@ -166,6 +166,8 @@ rowset.deploys = sql_rowset{
 --ssh rpc --------------------------------------------------------------------
 
 local function ssh(ip, cmd_and_args, stdin_contents)
+	local capture_stdout = true
+	local capture_stderr = true
 	local ip = first_row('select public_ip from machine where machine = ?', ip) or ip
 	local p = assert(proc.popen_async{
 		command = 'ssh',
@@ -175,22 +177,24 @@ local function ssh(ip, cmd_and_args, stdin_contents)
 			'root@'..ip,
 			unpack(cmd_and_args)
 		},
-		open_stdout = true,
-		open_stderr = true,
+		open_stdout = capture_stdout,
+		open_stderr = capture_stderr,
 		open_stdin = stdin_contents and true or false,
 	})
 	local main_thread = coroutine.running()
 	local main_thread_suspended
 	local threads = 0
 	local stderr
-	sock.thread(function()
-		threads = threads + 1
-		stderr = assert(p:read_stderr'*a')
-		threads = threads - 1
-		if main_thread_suspended then
-			resume(main_thread)
-		end
-	end)
+	if capture_stderr then
+		sock.thread(function()
+			threads = threads + 1
+			stderr = assert(p:read_stderr'*a')
+			threads = threads - 1
+			if main_thread_suspended then
+				resume(main_thread)
+			end
+		end)
+	end
 	if stdin_contents then
 		sock.thread(function()
 			threads = threads + 1
@@ -206,13 +210,16 @@ local function ssh(ip, cmd_and_args, stdin_contents)
 			end
 		end)
 	end
-	local stdout, err = p:read_stdout'*a'
-	p:kill()
-	assert(stdout, err)
+	if capture_stdout then
+		local stdout, err = p:read_stdout'*a'
+		p:kill()
+		assert(stdout, err)
+	end
 	while threads > 0 do
 		main_thread_suspended = true
 		suspend()
 	end
+	p:forget()
 	return stdout, stderr
 end
 
@@ -250,9 +257,9 @@ ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTt
 bash.install = function()
 	return [=[
 
-echo Installing...
+say() { echo -e "\n# $@\n" >&2; }
 
-# install public key for passwordless access
+say "Installing ssh public key for passwordless access"
 mkdir -p /root/.ssh
 cat << 'EOF' > /root/.ssh/authorized_keys
 ]=]..assert(readfile('mm_pub.key'))..[=[
@@ -260,14 +267,14 @@ cat << 'EOF' > /root/.ssh/authorized_keys
 EOF
 chmod 400 /root/.ssh/authorized_keys
 
-# lock root password
+say "Locking root password"
 passwd -l root
 
-# install ubuntu packages
+say "Installing ubuntu packages"
 apt-get -y update
 apt-get -y install htop mc mysql-server jq
 
-# install `git up`
+say "Installing 'git up' command"
 git_up=/usr/lib/git-core/git-up
 cat << 'EOF' > $git_up
 msg="$1"; [ "$msg" ] || msg="unimportant"
@@ -277,18 +284,18 @@ git push -u origin master
 EOF
 chmod +x $git_up
 
-# auth github.com for ssh
+say "Adding github.com's public key to ~/.ssh/known_hosts"
 cat << 'EOF' > /root/.ssh/known_hosts
 github.com ]=]..github_pub_key..[=[
 
 EOF
 chmod 400 /root/.ssh/known_hosts
 
-# install mgit
+say "Installing mgit"
 git clone git@github.com:capr/multigit.git
 ln -sf /root/multigit/mgit /usr/local/bin/mgit
 
-# install pushing to github
+say "Adding private key for pushing to github"
 git config --global user.email "cosmin@allegory.ro"
 git config --global user.name "Cosmin Apreutesei"
 cat << 'EOF' > /root/.ssh/id_rsa
@@ -297,7 +304,7 @@ cat << 'EOF' > /root/.ssh/id_rsa
 EOF
 chmod 400 /root/.ssh/id_rsa
 
-# reset mysql root password (can only connect with root as root, so it's ok)
+say "Resetting mysql root password"
 mysql -e "alter user 'root'@'localhost' identified by '';"
 
 ]=]
