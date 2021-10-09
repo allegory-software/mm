@@ -7,8 +7,14 @@ local xapp = require'xapp'
 
 local mm = xapp(daemon(...))
 
+logging.filter[''] = true
+require'http'.logging = logging
+require'http_server'.logging = logging
+require'mysql_client'.logging = logging
+
+config('db_host', '10.0.0.5')
 config('db_port', 3307)
-config('db_pass', 'abcd12')
+config('db_pass', 'root')
 config('var_dir', '.')
 config('session_secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('pass_salt'     , 'is9v09z-@^%@s!0~ckl0827ScZpx92kldsufy')
@@ -105,8 +111,10 @@ html[[
 		</x-listbox>
 	</div>
 	<x-switcher nav_id=actions_listbox>
-		<x-grid action=machines rowset_name=machines></x-grid>
-		<x-grid action=deploys rowset_name=deploys></x-grid>
+		<x-vsplit action=machines>
+			<x-grid id=machines_grid rowset_name=machines></x-grid>
+			<x-grid rowset_name=deploys param_nav_id=machines_grid params=machine></x-grid>
+		</x-vsplit>
 	</x-switcher>
 </x-split>
 ]]
@@ -150,9 +158,10 @@ rowset.deploys = sql_rowset{
 			version,
 			status
 		from
-		deploy
+			deploy
 	]],
 	pk = 'deploy',
+	where_all = 'machine in (:param:filter)',
 	insert_row = function(row)
 		row.deploy = insert_row('deploy', row, 'machine repo version')
 	end,
@@ -317,7 +326,7 @@ EOF
 chmod 400 /root/.ssh/id_rsa
 
 say "Resetting mysql root password"
-mysql -e "alter user 'root'@'localhost' identified by '';"
+mysql -e "alter user 'root'@'localhost' identified by 'root';"
 
 ]=])
 	end)
