@@ -1,10 +1,11 @@
 
-require'$'
+require'$daemon'
+
 local proc = require'proc'
-local fs = require'fs'
 local sock = require'sock'
-local ffi = require'ffi'
-local mm = require'xapp'.app'mm'
+local xapp = require'xapp'
+
+local mm = xapp(daemon(...))
 
 config('db_port', 3307)
 config('db_pass', 'abcd12')
@@ -163,71 +164,65 @@ rowset.deploys = sql_rowset{
 	end,
 }
 
---ssh rpc --------------------------------------------------------------------
+--async exec -----------------------------------------------------------------
 
-local function ssh(ip, cmd_and_args, stdin_contents)
-	local capture_stdout = true
-	local capture_stderr = true
-	local ip = first_row('select public_ip from machine where machine = ?', ip) or ip
-	local p = assert(proc.popen_async{
-		command = 'ssh',
-		args = {
-			'-o', 'StrictHostKeyChecking=no',
-			'-i', 'mm.key',
-			'root@'..ip,
-			unpack(cmd_and_args)
-		},
-		open_stdout = capture_stdout,
-		open_stderr = capture_stderr,
-		open_stdin = stdin_contents and true or false,
+local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
+
+	local p = assert(proc.exec{
+		cmd = cmd,
+		async = true,
+		stdout = capture_stdout,
+		stderr = capture_stderr,
+		stdin = stdin_contents and true or false,
 	})
-	local main_thread = coroutine.running()
-	local main_thread_suspended
-	local threads = 0
-	local stderr, err
-	if capture_stderr then
+
+	if p.stdin then
 		sock.thread(function()
-			threads = threads + 1
-			stderr, err = p:read_stderr'*a'
-			if not stderr then
-				p:kill()
-				assert(stderr, err)
-			end
-			threads = threads - 1
-			if main_thread_suspended then
-				resume(main_thread)
-			end
-		end)
-	end
-	if stdin_contents then
-		sock.thread(function()
-			threads = threads + 1
-			local ok, err, errno = p:write_stdin(stdin_contents)
+			local ok, err = p.stdin:write(stdin_contents)
 			if not ok then
-				p:kill()
-				assert(ok, err)
+				p:forget()
+				error(err)
 			end
-			p:write_stdin() --eof
-			threads = threads - 1
-			if main_thread_suspended then
-				resume(main_thread)
-			end
+			p.stdin:close() --signal eof
 		end)
 	end
-	local stdout, err
-	if capture_stdout then
-		stdout, err = p:read_stdout'*a'
-		if not stdout then
-			p:kill()
-			assert(stdout, err)
-		end
+
+	local stdout
+	if p.stdout then
+		sock.thread(function()
+			local s, err = glue.readall(p.stdout.read, p.stdout)
+			if not s then
+				p:forget()
+				error(err)
+			end
+			stdout = ffi.string(s, err)
+		end)
 	end
-	while threads > 0 do
-		main_thread_suspended = true
-		suspend()
+
+	local stderr
+	if p.stderr then
+		sock.thread(function()
+			local s, err = glue.readall(p.stderr.read, p.stderr)
+			if not s then
+				p:forget()
+				error(err)
+			end
+			stderr = ffi.string(s, err)
+		end)
 	end
-	p:forget()
-	return stdout, stderr
+
+	local exit_code = assert(p:wait())
+	return stdout, stderr, exit_code
+end
+
+local function ssh(ip, args, stdin_contents, capture_stdout, capture_stderr)
+	local ip = first_row('select public_ip from machine where machine = ?', ip) or ip
+	return exec(extend({
+			'ssh',
+			'-o', 'BatchMode=yes',
+			'-i', 'home.key',
+			'root@'..ip,
+		}, args), stdin_contents, capture_stdout, capture_stderr)
 end
 
 --passing both the script and the script's expected stdin contents through
@@ -235,14 +230,21 @@ end
 --that only bash can muster: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
 --feed in stdin_contents right after that. worse-is-better at its finest.
-local function ssh_bash(ip, script, stdin_contents)
+function ssh_bash(ip, script, stdin_contents, capture_stdout, capture_stderr)
 	local s = '{\n'..script..'\n}; exit'..(stdin_contents or '')
-	return ssh(ip, {'bash', '-s'}, s)
+	return ssh(ip, {'bash', '-s'}, s, capture_stdout, capture_stderr)
 end
 
-bash = {} --{name->script}
+-- commands ------------------------------------------------------------------
 
-bash.info = [=[
+function machine_ip(ip)
+	return first_row('select public_ip from machine where machine = ?', ip) or ip
+end
+
+function cmd.info(ip)
+	webb.run(function()
+		ip = machine_ip(ip)
+		ssh_bash(ip, [=[
 query() { mysql -u root -N -B -e "$@"; }
 
 echo "os_ver        $(lsb_release -sd)"
@@ -255,21 +257,24 @@ echo "ram_gb        $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf
 echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
 echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
-]=]
+]=])
+	end)
+end
 
-local github_pub_key = [[
-ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
+local github_keyscan = [[
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
 ]]
 
-bash.install = function()
-	return [=[
-
+function cmd.install_machine(ip)
+	webb.run(function()
+		ip = machine_ip(ip)
+		ssh_bash(ip, [=[
 say() { echo -e "\n# $@\n" >&2; }
 
 say "Installing ssh public key for passwordless access"
 mkdir -p /root/.ssh
 cat << 'EOF' > /root/.ssh/authorized_keys
-]=]..assert(readfile('mm_pub.key'))..[=[
+]=]..assert(readfile('home.key.pub'))..[=[
 
 EOF
 chmod 400 /root/.ssh/authorized_keys
@@ -279,7 +284,7 @@ passwd -l root
 
 say "Installing ubuntu packages"
 apt-get -y update
-apt-get -y install htop mc mysql-server jq
+apt-get -y install htop mc mysql-server
 
 say "Installing 'git up' command"
 git_up=/usr/lib/git-core/git-up
@@ -291,9 +296,9 @@ git push -u origin master
 EOF
 chmod +x $git_up
 
-say "Adding github.com's public key to ~/.ssh/known_hosts"
+say "Adding github.com's public key"
 cat << 'EOF' > /root/.ssh/known_hosts
-github.com ]=]..github_pub_key..[=[
+]=]..github_keyscan..[=[
 
 EOF
 chmod 400 /root/.ssh/known_hosts
@@ -302,11 +307,11 @@ say "Installing mgit"
 git clone git@github.com:capr/multigit.git
 ln -sf /root/multigit/mgit /usr/local/bin/mgit
 
-say "Adding private key for pushing to github"
+say "Adding private key for pulling and pushing on github"
 git config --global user.email "cosmin@allegory.ro"
 git config --global user.name "Cosmin Apreutesei"
 cat << 'EOF' > /root/.ssh/id_rsa
-]=]..assert(readfile('mm.key'))..[=[
+]=]..assert(readfile('mm-github.key'))..[=[
 
 EOF
 chmod 400 /root/.ssh/id_rsa
@@ -314,40 +319,61 @@ chmod 400 /root/.ssh/id_rsa
 say "Resetting mysql root password"
 mysql -e "alter user 'root'@'localhost' identified by '';"
 
-]=]
-end
-
-bash.deploy = function()
-
-end
-
---cmdline --------------------------------------------------------------------
-
-function cmd.help()
-	print('Usage: mm '..concat(keys(cmd, true), ' | '))
-	return 1
-end
-
-function cmd.on(ip, script)
-	if not script then
-		ip = srun(function()
-			return first_row('select public_ip from machine where machine = ?', ip) or ip
-		end)
-		return os.execute('ssh -o StrictHostKeyChecking=no -i mm.key root@'..ip)
-	end
-	script = bash[script]
-	if not script then
-		return usage()
-	end
-	if type(script) == 'function' then
-		machine = ip
-		script = script()
-	end
-	srun(function()
-		print(ssh_bash(ip, script))
+]=])
 	end)
 end
 
+function cmd.update_keys()
+	webb.run(function()
+		os.execute('ssh-keygen')
+		os.execute('ssh-keygen -f x:/luapower/home.key -t rsa -b 2048 -C "home" -q -N ""')
+
+		ip = machine_ip(ip)
+		ssh_bash(ip, [=[
+say() { echo "# $1." >&2; }
+
+say "Setting up ssh access"
+mkdir -p /root/.ssh
+cat << 'EOF' > /root/.ssh/authorized_keys
+]=]..assert(readfile('home.key.pub'))..[=[
+
+EOF
+chmod 400 /root/.ssh/authorized_keys
+
+say "Setting up github access"
+cat << 'EOF' > /root/.ssh/known_hosts
+]=]..github_keyscan..[=[
+
+EOF
+chmod 400 /root/.ssh/known_hosts
+
+cat << 'EOF' > /root/.ssh/id_rsa
+]=]..assert(readfile('mm-github.key'))..[=[
+
+EOF
+chmod 400 /root/.ssh/id_rsa
+
+]=])
+	end)
+end
+
+cmd.deploy = function(ip, deploy)
+	webb.run(function()
+		ip = machine_ip(ip)
+		ssh_bash(ip, [=[
+
+]=])
+	end)
+end
+
+function cmd.ssh(ip)
+	ip = webb.run(function() return machine_ip(ip) end)
+	return os.execute('ssh -i home.key root@'..ip)
+end
+
 --return mm.run('on', '10.0.0.20', 'install')
---return mm.run('on', '45.13.136.150', 'install')
-return mm.run(...)
+--return mm.run('install-machine', '45.13.136.150')
+--return mm.run('update-keys', '45.13.136.150')
+--return mm:run('info', '45.13.136.150')
+return mm:run('start')
+--return mm.run(...)
