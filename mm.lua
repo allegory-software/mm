@@ -120,6 +120,7 @@ html[[
 		<x-listbox id=actions_listbox>
 			<div action=machines>Machines</div>
 			<div action=deploys>Deployments</div>
+			<div action=tasks>Tasks</div>
 		</x-listbox>
 	</div>
 	<x-switcher id=main_switcher nav_id=actions_listbox>
@@ -128,7 +129,8 @@ html[[
 		</x-vsplit>
 		<x-vsplit action=deploys>
 			<x-grid id=ee rowset_name=deploys></x-grid>
-			<x-textedit nav_id=ee col=machine></x-textedit>
+			<x-textedit nav_id=ee col=deploy></x-textedit>
+			<x-grid rowset_name=tasks></x-grid>
 		</x-vsplit>
 	</x-switcher>
 </x-split>
@@ -196,15 +198,36 @@ rowset.deploys = sql_rowset{
 
 --async exec -----------------------------------------------------------------
 
+mm.tasks = {}
+local last_task_id = 0
+
 local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 
-	local p = assert(proc.exec{
+	last_task_id = last_task_id + 1
+	local task = {
+		id = last_task_id,
+		cmd = cmd,
+		start_time = time(),
+		status = 'new',
+	}
+	mm.tasks[task] = true
+
+	local p, err = proc.exec{
 		cmd = cmd,
 		async = true,
 		stdout = capture_stdout,
 		stderr = capture_stderr,
 		stdin = stdin_contents and true or false,
-	})
+	}
+
+	if not p then
+		task.error = err
+		logerror('mm', 'exec', err)
+		return
+	end
+
+	task.status = 'running'
+	task.p = p
 
 	if p.stdin then
 		sock.thread(function()
@@ -217,36 +240,49 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		end)
 	end
 
-	local stdout
+	task.stdout = {}
 	if p.stdout then
 		sock.thread(function()
-			local s, err = glue.readall(p.stdout.read, p.stdout)
-			if not s then
-				p:forget()
-				error(err)
+			local buf, sz = u8a(4096), 4096
+			while true do
+				local len, err = p.stdout:read(buf, sz)
+				if not len then
+					p:forget()
+					error(err)
+				end
+				add(task.stdout, ffi.string(buf, len))
 			end
-			stdout = ffi.string(s, err)
 		end)
 	end
 
-	local stderr
+	task.stderr = {}
 	if p.stderr then
 		sock.thread(function()
-			local s, err = glue.readall(p.stderr.read, p.stderr)
-			if not s then
+			local buf, sz = u8a(4096), 4096
+			local len, err = p.stderr:read(buf, sz)
+			if not len then
 				p:forget()
 				error(err)
 			end
-			stderr = ffi.string(s, err)
+			add(task.stderr, ffi.string(buf, len))
 		end)
 	end
 
-	local exit_code = assert(p:wait())
-	return stdout, stderr, exit_code
+	sock.thread(function()
+		task.exit_code = assert(p:wait())
+		task.end_time = time()
+		task.status = 'finished'
+	end)
+
+	return task
+end
+
+function machine_ip(ip)
+	return first_row('select public_ip from machine where machine = ?', ip) or ip
 end
 
 local function ssh(ip, args, stdin_contents, capture_stdout, capture_stderr)
-	local ip = first_row('select public_ip from machine where machine = ?', ip) or ip
+	local ip = machine_ip(ip)
 	return exec(extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
@@ -265,11 +301,65 @@ function ssh_bash(ip, script, stdin_contents, capture_stdout, capture_stderr)
 	return ssh(ip, {'bash', '-s'}, s, capture_stdout, capture_stderr)
 end
 
--- commands ------------------------------------------------------------------
+rowset.tasks = virtual_rowset(function(self, ...)
 
-function machine_ip(ip)
-	return first_row('select public_ip from machine where machine = ?', ip) or ip
+	self.fields = {
+		{name = 'id', type = 'number'},
+		{name = 'status'},
+		{name = 'start_time', type = 'number'},
+		{name = 'duration', type = 'number'},
+		{name = 'command'},
+		{name = 'stdout'},
+		{name = 'stderr'},
+		{name = 'exit_code', type = 'number'},
+		{name = 'error'},
+	}
+	self.pk = 'id'
+
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local now = time()
+		for task in pairs(mm.tasks) do
+			if task.end_time and task.end_time + 10 < time() then
+				mm.tasks[task] = nil
+			else
+				local row = {
+					task.id,
+					task.status,
+					task.start_time,
+					(task.end_time or now) - task.start_time,
+					concat(task.cmd, ' '),
+					concat(task.stdout),
+					concat(task.stderr),
+					task.exit_code,
+					task.error,
+				}
+				add(rs.rows, row)
+			end
+		end
+	end
+
+end)
+
+action.test_tasks = function()
+
+	setmime'txt'
+	outpp(ssh_bash('sp-prod', [[
+
+		for i in {1..10}; do
+
+			echo sleeping $i ...
+			sleep 1
+
+		done
+
+		echo Exiting now...
+
+	]], nil))
+
 end
+
+-- commands ------------------------------------------------------------------
 
 function cmd.info(ip)
 	webb.run(function()
