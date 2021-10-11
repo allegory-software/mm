@@ -7,7 +7,7 @@ local xapp = require'xapp'
 
 local mm = xapp(daemon(...))
 
-logging.filter[''] = true
+--logging.filter[''] = true
 require'http'.logging = logging
 require'http_server'.logging = logging
 require'mysql_client'.logging = logging
@@ -60,6 +60,11 @@ function mm.install()
 		local_ip = '10.0.0.20',
 	}, 'machine local_ip')
 
+	insert_row('machine', {
+		machine = 'sp-prod',
+		public_ip = '45.13.136.150',
+	}, 'machine public_ip')
+
 end
 
 --admin ui -------------------------------------------------------------------
@@ -96,6 +101,13 @@ js[[
 sign_in_options = {
 	logo: 'sign-in-logo.png',
 }
+
+on_dom_load(function() {
+	main_switcher.match_item = function(item, vals) {
+		return item.attr('action') == vals.f0.attr('action')
+	}
+})
+
 ]]
 
 html[[
@@ -110,10 +122,13 @@ html[[
 			<div action=deploys>Deployments</div>
 		</x-listbox>
 	</div>
-	<x-switcher nav_id=actions_listbox>
+	<x-switcher id=main_switcher nav_id=actions_listbox>
 		<x-vsplit action=machines>
 			<x-grid id=machines_grid rowset_name=machines></x-grid>
-			<x-grid rowset_name=deploys param_nav_id=machines_grid params=machine></x-grid>
+		</x-vsplit>
+		<x-vsplit action=deploys>
+			<x-grid id=ee rowset_name=deploys></x-grid>
+			<x-textedit nav_id=ee col=machine></x-textedit>
 		</x-vsplit>
 	</x-switcher>
 </x-split>
@@ -138,13 +153,13 @@ rowset.machines = sql_rowset{
 			pos, ctime
 	]],
 	pk = 'machine',
-	insert_row = function(row)
+	insert_row = function(self, row)
 		insert_row('machine', row, 'machine public_ip local_ip')
 	end,
-	update_row = function(row)
+	update_row = function(self, row)
 		update_row('machine', row, 'machine public_ip local_ip')
 	end,
-	delete_row = function(row)
+	delete_row = function(self, row)
 		delete_row('machine', row, 'machine')
 	end,
 }
@@ -161,14 +176,20 @@ rowset.deploys = sql_rowset{
 			deploy
 	]],
 	pk = 'deploy',
-	where_all = 'machine in (:param:filter)',
-	insert_row = function(row)
-		row.deploy = insert_row('deploy', row, 'machine repo version')
+	field_attrs = {
+		machine = {
+			--lookup_rowset_name = 'machines',
+			--lookup_col = 'machine',
+			--display_col = 'machine',
+		},
+	},
+	insert_row = function(self, row)
+		row.deploy = insert_row('deploy', row, 'deploy machine repo version')
 	end,
-	update_row = function(row)
+	update_row = function(self, row)
 		update_row('deploy', row, 'machine repo version')
 	end,
-	delete_row = function(row)
+	delete_row = function(self, row)
 		delete_row('deploy', row, 'deploy')
 	end,
 }
@@ -385,4 +406,5 @@ end
 --return mm.run('update-keys', '45.13.136.150')
 --return mm:run('info', '45.13.136.150')
 return mm:run('start')
+--mm:run'install'
 --return mm.run(...)
