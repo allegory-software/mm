@@ -142,7 +142,7 @@ html[[
 		</x-vsplit>
 		<x-vsplit action=tasks>
 			<x-grid id=tasks_grid rowset_name=tasks></x-grid>
-			<x-textarea nav_id=tasks_grid col=stdout></x-textarea>
+			<x-textarea mono nav_id=tasks_grid col=stdout></x-textarea>
 		</x-vsplit>
 	</x-switcher>
 </x-split>
