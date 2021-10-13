@@ -7,6 +7,8 @@ local xapp = require'xapp'
 
 local mm = xapp(daemon(...))
 
+config('http_addr', '*')
+
 --logging.filter[''] = true
 require'http'.logging = logging
 require'http_server'.logging = logging
@@ -18,6 +20,13 @@ config('db_pass', 'root')
 config('var_dir', '.')
 config('session_secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('pass_salt'     , 'is9v09z-@^%@s!0~ckl0827ScZpx92kldsufy')
+
+if ffi.abi'win' then
+	--
+else
+	--because stupid ssh wants 0600 on home.key and we can't do that with vboxfs.
+	mm.home_key = '/root/home.key'
+end
 
 function mm.install()
 
@@ -130,7 +139,10 @@ html[[
 		<x-vsplit action=deploys>
 			<x-grid id=ee rowset_name=deploys></x-grid>
 			<x-textedit nav_id=ee col=deploy></x-textedit>
-			<x-grid rowset_name=tasks></x-grid>
+		</x-vsplit>
+		<x-vsplit action=tasks>
+			<x-grid id=tasks_grid rowset_name=tasks></x-grid>
+			<x-textarea nav_id=tasks_grid col=stdout></x-textarea>
 		</x-vsplit>
 	</x-switcher>
 </x-split>
@@ -200,6 +212,7 @@ rowset.deploys = sql_rowset{
 
 mm.tasks = {}
 local last_task_id = 0
+local task_changed --fw. decl.
 
 local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 
@@ -209,6 +222,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		cmd = cmd,
 		start_time = time(),
 		status = 'new',
+		errors = {},
 	}
 	mm.tasks[task] = true
 
@@ -221,7 +235,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 	}
 
 	if not p then
-		task.error = err
+		add(task.errors, 'exec error: '..err)
 		logerror('mm', 'exec', err)
 		return
 	end
@@ -230,11 +244,11 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 	task.p = p
 
 	if p.stdin then
-		sock.thread(function()
+		thread(function()
 			local ok, err = p.stdin:write(stdin_contents)
 			if not ok then
-				p:forget()
-				error(err)
+				add(task.errors, 'stdin write error: '..err)
+				task_changed()
 			end
 			p.stdin:close() --signal eof
 		end)
@@ -242,36 +256,59 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 
 	task.stdout = {}
 	if p.stdout then
-		sock.thread(function()
+		thread(function()
 			local buf, sz = u8a(4096), 4096
 			while true do
 				local len, err = p.stdout:read(buf, sz)
 				if not len then
-					p:forget()
-					error(err)
+					add(task.errors, 'stdout read error: '..err)
+					break
+				elseif len == 0 then
+					break
 				end
 				add(task.stdout, ffi.string(buf, len))
+				task_changed()
 			end
+			p.stdout:close()
+			task_changed()
 		end)
 	end
 
 	task.stderr = {}
 	if p.stderr then
-		sock.thread(function()
+		thread(function()
 			local buf, sz = u8a(4096), 4096
-			local len, err = p.stderr:read(buf, sz)
-			if not len then
-				p:forget()
-				error(err)
+			while true do
+				local len, err = p.stderr:read(buf, sz)
+				if not len then
+					add(task.errors, 'stderr read error: '..err)
+					break
+				elseif len == 0 then
+					break
+				end
+				add(task.stderr, ffi.string(buf, len))
+				task_changed()
 			end
-			add(task.stderr, ffi.string(buf, len))
+			p.stderr:close()
+			task_changed()
 		end)
 	end
 
-	sock.thread(function()
-		task.exit_code = assert(p:wait())
+	thread(function()
+		local exit_code, err = p:wait()
+		if exit_code then
+			task.exit_code = exit_code
+		else
+			add(task.errors, 'wait error: '..err)
+		end
 		task.end_time = time()
 		task.status = 'finished'
+		task_changed()
+		while not (p.stdin:closed() and p.stdout:closed() and p.stderr:closed()) do
+			sleep(.1)
+		end
+		p:forget()
+		task_changed()
 	end)
 
 	return task
@@ -286,7 +323,7 @@ local function ssh(ip, args, stdin_contents, capture_stdout, capture_stderr)
 	return exec(extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
-			'-i', 'home.key',
+			'-i', mm.home_key or 'home.key',
 			'root@'..ip,
 		}, args), stdin_contents, capture_stdout, capture_stderr)
 end
@@ -306,13 +343,13 @@ rowset.tasks = virtual_rowset(function(self, ...)
 	self.fields = {
 		{name = 'id', type = 'number'},
 		{name = 'status'},
-		{name = 'start_time', type = 'number'},
-		{name = 'duration', type = 'number'},
+		{name = 'start_time', type = 'timestamp'},
+		{name = 'duration', type = 'number', decimals = 2},
 		{name = 'command'},
-		{name = 'stdout'},
-		{name = 'stderr'},
-		{name = 'exit_code', type = 'number'},
-		{name = 'error'},
+		{name = 'stdout', hidden = true},
+		{name = 'stderr', hidden = true},
+		{name = 'exit_code', type = 'number', w = 20},
+		{name = 'errors'},
 	}
 	self.pk = 'id'
 
@@ -320,7 +357,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		rs.rows = {}
 		local now = time()
 		for task in pairs(mm.tasks) do
-			if task.end_time and task.end_time + 10 < time() then
+			if task.end_time and task.end_time + 10000 < time() then
 				mm.tasks[task] = nil
 			else
 				local row = {
@@ -332,7 +369,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 					concat(task.stdout),
 					concat(task.stderr),
 					task.exit_code,
-					task.error,
+					concat(task.errors, '\n'),
 				}
 				add(rs.rows, row)
 			end
@@ -340,6 +377,37 @@ rowset.tasks = virtual_rowset(function(self, ...)
 	end
 
 end)
+
+local task_events_thread
+
+action['task_changed.events'] = function()
+	setheader('cache-control', 'no-cache')
+	while true do
+		task_events_thread = currentthread()
+		suspend()
+		task_events_thread = nil
+		assert(not out_buffering())
+		out'data: task_changed'
+		out'\n\n'
+	end
+end
+
+--[[local]] function task_changed()
+	if task_events_thread then
+		resume(task_events_thread)
+	end
+end
+
+js[[
+
+on_dom_load(function() {
+	let es = new EventSource('/task_changed.events')
+	es.onmessage = function(e) {
+		tasks_grid.reload()
+	}
+})
+
+]]
 
 action.test_tasks = function()
 
@@ -355,7 +423,7 @@ action.test_tasks = function()
 
 		echo Exiting now...
 
-	]], nil))
+	]], nil, true, true))
 
 end
 
@@ -446,7 +514,7 @@ end
 function cmd.update_keys()
 	webb.run(function()
 		os.execute('ssh-keygen')
-		os.execute('ssh-keygen -f x:/luapower/home.key -t rsa -b 2048 -C "home" -q -N ""')
+		os.execute('ssh-keygen -f home.key -t rsa -b 2048 -C "home" -q -N ""')
 
 		ip = machine_ip(ip)
 		ssh_bash(ip, [=[
