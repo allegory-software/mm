@@ -305,9 +305,13 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		task.status = 'finished'
 		task_changed()
 		while not (p.stdin:closed() and p.stdout:closed() and p.stderr:closed()) do
+			print('waiting for close', p.stdin:closed(), p.stdout:closed(), p.stderr:closed())
 			sleep(.1)
 		end
 		p:forget()
+		task_changed()
+		sleep(1)
+		mm.tasks[task] = nil
 		task_changed()
 	end)
 
@@ -356,23 +360,19 @@ rowset.tasks = virtual_rowset(function(self, ...)
 	function self:load_rows(rs, params)
 		rs.rows = {}
 		local now = time()
-		for task in pairs(mm.tasks) do
-			if task.end_time and task.end_time + 10000 < time() then
-				mm.tasks[task] = nil
-			else
-				local row = {
-					task.id,
-					task.status,
-					task.start_time,
-					(task.end_time or now) - task.start_time,
-					concat(task.cmd, ' '),
-					concat(task.stdout),
-					concat(task.stderr),
-					task.exit_code,
-					concat(task.errors, '\n'),
-				}
-				add(rs.rows, row)
-			end
+		for task in sortedpairs(mm.tasks, function(t1, t2) return t1.start_time < t2.start_time end) do
+			local row = {
+				task.id,
+				task.status,
+				task.start_time,
+				(task.end_time or now) - task.start_time,
+				concat(task.cmd, ' '),
+				concat(task.stdout),
+				concat(task.stderr),
+				task.exit_code,
+				concat(task.errors, '\n'),
+			}
+			add(rs.rows, row)
 		end
 	end
 
@@ -414,7 +414,7 @@ action.test_tasks = function()
 	setmime'txt'
 	outpp(ssh_bash('sp-prod', [[
 
-		for i in {1..10}; do
+		for i in {1..5}; do
 
 			echo sleeping $i ...
 			sleep 1
