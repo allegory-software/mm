@@ -212,7 +212,7 @@ rowset.deploys = sql_rowset{
 
 mm.tasks = {}
 local last_task_id = 0
-local task_changed --fw. decl.
+local task_events_thread
 
 local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 
@@ -221,10 +221,18 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		id = last_task_id,
 		cmd = cmd,
 		start_time = time(),
+		duration = 0,
 		status = 'new',
 		errors = {},
 	}
 	mm.tasks[task] = true
+
+	local function task_changed()
+		task.duration = time() - task.start_time
+		if task_events_thread then
+			resume(task_events_thread)
+		end
+	end
 
 	local p, err = proc.exec{
 		cmd = cmd,
@@ -237,6 +245,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 	if not p then
 		add(task.errors, 'exec error: '..err)
 		logerror('mm', 'exec', err)
+		task_changed()
 		return
 	end
 
@@ -295,6 +304,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 	end
 
 	thread(function()
+		task_changed()
 		local exit_code, err = p:wait()
 		if exit_code then
 			task.exit_code = exit_code
@@ -348,7 +358,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		{name = 'id', type = 'number'},
 		{name = 'status'},
 		{name = 'start_time', type = 'timestamp'},
-		{name = 'duration', type = 'number', decimals = 2},
+		{name = 'duration', type = 'number', decimals = 2, hint = 'Duration till last change in input, output or status'},
 		{name = 'command'},
 		{name = 'stdout', hidden = true},
 		{name = 'stderr', hidden = true},
@@ -359,13 +369,12 @@ rowset.tasks = virtual_rowset(function(self, ...)
 
 	function self:load_rows(rs, params)
 		rs.rows = {}
-		local now = time()
 		for task in sortedpairs(mm.tasks, function(t1, t2) return t1.start_time < t2.start_time end) do
 			local row = {
 				task.id,
 				task.status,
 				task.start_time,
-				(task.end_time or now) - task.start_time,
+				task.duration,
 				concat(task.cmd, ' '),
 				concat(task.stdout),
 				concat(task.stderr),
@@ -378,23 +387,16 @@ rowset.tasks = virtual_rowset(function(self, ...)
 
 end)
 
-local task_events_thread
-
 action['task_changed.events'] = function()
 	setheader('cache-control', 'no-cache')
 	while true do
 		task_events_thread = currentthread()
 		suspend()
+		assert(task_events_thread == currentthread())
 		task_events_thread = nil
 		assert(not out_buffering())
 		out'data: task_changed'
 		out'\n\n'
-	end
-end
-
---[[local]] function task_changed()
-	if task_events_thread then
-		resume(task_events_thread)
 	end
 end
 
@@ -403,7 +405,9 @@ js[[
 on_dom_load(function() {
 	let es = new EventSource('/task_changed.events')
 	es.onmessage = function(e) {
-		tasks_grid.reload()
+		if (tasks_grid)
+			if (!tasks_grid.load_request)
+				tasks_grid.reload()
 	}
 })
 
