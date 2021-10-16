@@ -110,13 +110,6 @@ js[[
 sign_in_options = {
 	logo: 'sign-in-logo.png',
 }
-
-on_dom_load(function() {
-	main_switcher.match_item = function(item, vals) {
-		return item.attr('action') == vals.f0.attr('action')
-	}
-})
-
 ]]
 
 html[[
@@ -146,6 +139,28 @@ html[[
 		</x-vsplit>
 	</x-switcher>
 </x-split>
+]]
+
+js[[
+
+function ping(machine) {
+	ajax('/ping', machine)
+}
+
+function task_grid_init_cmenu_items(e, items) {
+	let row = e.focused_row
+	items.push({
+		text: S('ping', 'Ping'),
+		disabled: !row,
+		action: function(item) {
+			let machine = e.cell_val(row, 'machine')
+			ping(machine)
+		},
+	})
+}
+document.on('machines_grid.bind', function(e, on) {
+	e.on('init_context_menu_items', task_grid_init_cmenu_items, on)
+})
 ]]
 
 rowset.machines = sql_rowset{
@@ -229,9 +244,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 
 	local function task_changed()
 		task.duration = time() - task.start_time
-		if task_events_thread then
-			resume(task_events_thread)
-		end
+		rowset_changed'tasks'
 	end
 
 	local p, err = proc.exec{
@@ -315,7 +328,6 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		task.status = 'finished'
 		task_changed()
 		while not (p.stdin:closed() and p.stdout:closed() and p.stderr:closed()) do
-			print('waiting for close', p.stdin:closed(), p.stdout:closed(), p.stderr:closed())
 			sleep(.1)
 		end
 		p:forget()
@@ -387,31 +399,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 
 end)
 
-action['task_changed.events'] = function()
-	setheader('cache-control', 'no-cache')
-	while true do
-		task_events_thread = currentthread()
-		suspend()
-		assert(task_events_thread == currentthread())
-		task_events_thread = nil
-		assert(not out_buffering())
-		out'data: task_changed'
-		out'\n\n'
-	end
-end
-
-js[[
-
-on_dom_load(function() {
-	let es = new EventSource('/task_changed.events')
-	es.onmessage = function(e) {
-		if (tasks_grid)
-			if (!tasks_grid.load_request)
-				tasks_grid.reload()
-	}
-})
-
-]]
+------------------------------------------------------------------------------
 
 action.test_tasks = function()
 
