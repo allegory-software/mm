@@ -325,6 +325,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		task_changed()
 	end)
 
+	print'task made'
 	return task
 end
 
@@ -415,8 +416,10 @@ on_dom_load(function() {
 
 action.test_tasks = function()
 
+	print('test_tasks_thread', cx().req.uri, cx().req.thread, currentthread(), cx().req.http.tcp)
+
 	setmime'txt'
-	outpp(ssh_bash('sp-prod', [[
+	local task = ssh_bash('sp-prod', [[
 
 		for i in {1..5}; do
 
@@ -427,7 +430,11 @@ action.test_tasks = function()
 
 		echo Exiting now...
 
-	]], nil, true, true))
+	]], nil, true, true)
+
+	print('test_tasks_thread', cx().req.uri, cx().req.thread, currentthread(), cx().req.http.tcp)
+
+	outpp(task)
 
 end
 
