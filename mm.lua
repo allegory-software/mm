@@ -157,15 +157,36 @@ function task_grid_init_cmenu_items(e, items) {
 document.on('machines_grid.bind', function(e, on) {
 	e.on('init_context_menu_items', task_grid_init_cmenu_items, on)
 })
+
+rowset_field_attrs['machines.refresh'] = {
+	type: 'button',
+	w: 30,
+	format: function(val, row) {
+		let machine = this.nav.cell_val(row, 'machine')
+		return button({
+			icon: 'fa fa-sync',
+			bare: true,
+			text: '',
+			action: function() {
+				ajax({
+					url: ['', 'update_machine_info', machine],
+					notify: this,
+				})
+			},
+		})
+	},
+}
+
 ]]
 
 rowset.machines = sql_rowset{
 	select = [[
 		select
+			'refresh' as refresh,
 			machine,
 			public_ip,
 			local_ip,
-			last_seen,
+			unix_timestamp(last_seen) as last_seen,
 			cpu,
 			cores,
 			ram_gb,
@@ -183,7 +204,7 @@ rowset.machines = sql_rowset{
 	field_attrs = {
 		public_ip   = {name = 'Public IP Address'},
 		local_ip    = {name = 'Local IP Address'},
-		last_seen   = {editable = false},
+		last_seen   = {type = 'timestamp', editable = false},
 		cpu         = {editable = false, name = 'CPU'},
 		cores       = {editable = false, w = 20},
 		ram_gb      = {editable = false, w = 40, decimals = 1, name = 'RAM (GB)'},
