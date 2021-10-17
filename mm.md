@@ -49,7 +49,4 @@ You can now go to http://localhost/ and add your machines.
 Any machine you add must be preconfigured to allow root access using
 `home.key`. For that you need to put the contents of `home.key.pub`
 in `/root/.ssh/authorized_keys` (don't forget to chmod the file to `0600`
-if you had to create it). Then connect to it manually from the MM machine
-so that the host can be added to `~/.ssh/authorized_hosts`, oherwise MM
-won't be allowed to run commands on it.
-
+if you had to create it).
