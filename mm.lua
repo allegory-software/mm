@@ -143,10 +143,6 @@ html[[
 
 js[[
 
-function ping(machine) {
-	ajax('/ping', machine)
-}
-
 function task_grid_init_cmenu_items(e, items) {
 	let row = e.focused_row
 	items.push({
@@ -154,7 +150,7 @@ function task_grid_init_cmenu_items(e, items) {
 		disabled: !row,
 		action: function(item) {
 			let machine = e.cell_val(row, 'machine')
-			ping(machine)
+			get(['', 'update_machine_info', machine])
 		},
 	})
 }
@@ -171,9 +167,11 @@ rowset.machines = sql_rowset{
 			local_ip,
 			last_seen,
 			cpu,
-			ram_gb,
-			hdd_gb,
 			cores,
+			ram_gb,
+			ram_free_gb,
+			hdd_gb,
+			hdd_free_gb,
 			os_ver,
 			mysql_ver
 		from
@@ -182,6 +180,19 @@ rowset.machines = sql_rowset{
 			pos, ctime
 	]],
 	pk = 'machine',
+	field_attrs = {
+		public_ip   = {name = 'Public IP Address'},
+		local_ip    = {name = 'Local IP Address'},
+		last_seen   = {editable = false},
+		cpu         = {editable = false, name = 'CPU'},
+		cores       = {editable = false, w = 20},
+		ram_gb      = {editable = false, w = 40, decimals = 1, name = 'RAM (GB)'},
+		ram_free_gb = {editable = false, w = 40, decimals = 1, name = 'RAM/free (GB)'},
+		hdd_gb      = {editable = false, w = 40, decimals = 1, name = 'HDD (GB)'},
+		hdd_free_gb = {editable = false, w = 40, decimals = 1, name = 'HDD/free (GB)'},
+		os_ver      = {editable = false, name = 'Operating System'},
+		mysql_ver   = {editable = false, name = 'MySQL Version'},
+	},
 	insert_row = function(self, row)
 		insert_row('machine', row, 'machine public_ip local_ip')
 	end,
@@ -316,21 +327,21 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		end)
 	end
 
+	task_changed()
+	local exit_code, err = p:wait()
+	if exit_code then
+		task.exit_code = exit_code
+	else
+		add(task.errors, 'wait error: '..err)
+	end
+	task.end_time = time()
+	task.status = 'finished'
+	task_changed()
+	while not (p.stdin:closed() and p.stdout:closed() and p.stderr:closed()) do
+		sleep(.1)
+	end
+	p:forget()
 	thread(function()
-		task_changed()
-		local exit_code, err = p:wait()
-		if exit_code then
-			task.exit_code = exit_code
-		else
-			add(task.errors, 'wait error: '..err)
-		end
-		task.end_time = time()
-		task.status = 'finished'
-		task_changed()
-		while not (p.stdin:closed() and p.stdout:closed() and p.stderr:closed()) do
-			sleep(.1)
-		end
-		p:forget()
 		task_changed()
 		sleep(1)
 		mm.tasks[task] = nil
@@ -349,6 +360,7 @@ local function ssh(ip, args, stdin_contents, capture_stdout, capture_stderr)
 	return exec(extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
+			'-o', 'ConnectTimeout=2',
 			'-i', mm.home_key or 'home.key',
 			'root@'..ip,
 		}, args), stdin_contents, capture_stdout, capture_stderr)
@@ -401,6 +413,54 @@ end)
 
 ------------------------------------------------------------------------------
 
+local function get_machine_info(machine)
+	local ip = machine_ip(machine)
+	local task = ssh_bash(ip, [=[
+
+query() { mysql -u root -N -B -e "$@"; }
+
+echo "os_ver        $(lsb_release -sd)"
+echo "mysql_ver     $(query 'select version();')"
+echo "cpu           $(lscpu | sed -n 's/^Model name:\s*\(.*\)/\1/p')"
+               cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
+           sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
+echo "cores         $(expr $sockets \* $cps)"
+echo "ram_gb        $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf "%.2f",$2}')"
+echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
+echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
+echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
+
+]=], nil, true, true)
+	assert(task.status == 'finished', concat(task.errors, '\n'))
+	local stderr = concat(task.stderr)
+	local stdout = concat(task.stdout)
+	local t = {['machine:old'] = machine, last_seen = time()}
+	dbg('mm', 'infoerr', stderr)
+	dbg('mm', 'infoout', stdout)
+	assert(stderr == '', stderr)
+	for s in stdout:trim():lines() do
+		local k,v = assert(s:match'^(.-)%s+(.*)')
+		t[k] = v
+	end
+	return t
+end
+
+function action.update_machine_info(ip)
+	t = assert(get_machine_info(ip))
+	assert(update_row('machine', t, [[
+		os_ver
+		mysql_ver
+		cpu
+		cores
+		ram_gb
+		ram_free_gb
+		hdd_gb
+		hdd_free_gb
+		last_seen
+	]]).affected_rows == 1)
+	rowset_changed'machines'
+end
+
 action.test_tasks = function()
 
 	setmime'txt'
@@ -424,23 +484,7 @@ end
 -- commands ------------------------------------------------------------------
 
 function cmd.info(ip)
-	webb.run(function()
-		ip = machine_ip(ip)
-		ssh_bash(ip, [=[
-query() { mysql -u root -N -B -e "$@"; }
-
-echo "os_ver        $(lsb_release -sd)"
-echo "mysql_ver     $(query 'select version();')"
-echo "cpu           $(lscpu | sed -n 's/^Model name:\s*\(.*\)/\1/p')"
-               cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
-           sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
-echo "cores         $(expr $sockets \* $cps)"
-echo "ram_gb        $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf "%.2f",$2}')"
-echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
-echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
-echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
-]=])
-	end)
+	webb.run()
 end
 
 local github_keyscan = [[
