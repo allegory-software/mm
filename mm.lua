@@ -160,7 +160,7 @@ document.on('machines_grid.bind', function(e, on) {
 
 rowset_field_attrs['machines.refresh'] = {
 	type: 'button',
-	w: 30,
+	w: 40,
 	format: function(val, row) {
 		let machine = this.nav.cell_val(row, 'machine')
 		return button({
@@ -202,17 +202,17 @@ rowset.machines = sql_rowset{
 	]],
 	pk = 'machine',
 	field_attrs = {
-		public_ip   = {name = 'Public IP Address'},
-		local_ip    = {name = 'Local IP Address'},
+		public_ip   = {text = 'Public IP Address'},
+		local_ip    = {text = 'Local IP Address'},
 		last_seen   = {type = 'timestamp', editable = false},
-		cpu         = {editable = false, name = 'CPU'},
+		cpu         = {editable = false, text = 'CPU'},
 		cores       = {editable = false, w = 20},
-		ram_gb      = {editable = false, w = 40, decimals = 1, name = 'RAM (GB)'},
-		ram_free_gb = {editable = false, w = 40, decimals = 1, name = 'RAM/free (GB)'},
-		hdd_gb      = {editable = false, w = 40, decimals = 1, name = 'HDD (GB)'},
-		hdd_free_gb = {editable = false, w = 40, decimals = 1, name = 'HDD/free (GB)'},
-		os_ver      = {editable = false, name = 'Operating System'},
-		mysql_ver   = {editable = false, name = 'MySQL Version'},
+		ram_gb      = {editable = false, w = 40, decimals = 1, text = 'RAM (GB)'},
+		ram_free_gb = {editable = false, w = 40, decimals = 1, text = 'RAM/free (GB)'},
+		hdd_gb      = {editable = false, w = 40, decimals = 1, text = 'HDD (GB)'},
+		hdd_free_gb = {editable = false, w = 40, decimals = 1, text = 'HDD/free (GB)'},
+		os_ver      = {editable = false, text = 'Operating System'},
+		mysql_ver   = {editable = false, text = 'MySQL Version'},
 	},
 	insert_row = function(self, row)
 		insert_row('machine', row, 'machine public_ip local_ip')
