@@ -173,6 +173,11 @@ rowset_field_attrs['machines.refresh'] = {
 					notify: this,
 				})
 			},
+			on: {
+				load: function(ev) {
+					this.icon_box.class('fa-spin', ev == 'start')
+				},
+			},
 		})
 	},
 }
@@ -197,10 +202,9 @@ rowset.machines = sql_rowset{
 			mysql_ver
 		from
 			machine
-		order by
-			pos, ctime
 	]],
 	pk = 'machine',
+	order_by = 'pos, ctime',
 	field_attrs = {
 		public_ip   = {text = 'Public IP Address'},
 		local_ip    = {text = 'Local IP Address'},
