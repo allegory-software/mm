@@ -187,6 +187,7 @@ rowset_field_attrs['machines.refresh'] = {
 rowset.machines = sql_rowset{
 	select = [[
 		select
+			pos,
 			'refresh' as refresh,
 			machine,
 			public_ip,
@@ -219,10 +220,10 @@ rowset.machines = sql_rowset{
 		mysql_ver   = {editable = false, text = 'MySQL Version'},
 	},
 	insert_row = function(self, row)
-		insert_row('machine', row, 'machine public_ip local_ip')
+		insert_row('machine', row, 'machine public_ip local_ip pos')
 	end,
 	update_row = function(self, row)
-		update_row('machine', row, 'machine public_ip local_ip')
+		update_row('machine', row, 'machine public_ip local_ip pos')
 	end,
 	delete_row = function(self, row)
 		delete_row('machine', row, 'machine')
