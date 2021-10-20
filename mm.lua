@@ -161,24 +161,9 @@ document.on('machines_grid.bind', function(e, on) {
 rowset_field_attrs['machines.refresh'] = {
 	type: 'button',
 	w: 40,
-	format: function(val, row) {
-		let machine = this.nav.cell_val(row, 'machine')
-		return button({
-			icon: 'fa fa-sync',
-			bare: true,
-			text: '',
-			action: function() {
-				ajax({
-					url: ['', 'update_machine_info', machine],
-					notify: this,
-				})
-			},
-			on: {
-				load: function(ev) {
-					this.icon_box.class('fa-spin', ev == 'start')
-				},
-			},
-		})
+	button_options: {icon: 'fa fa-sync', bare: true, text: '', load_spin: true},
+	action: function(machine) {
+		this.load(['', 'update_machine_info', machine])
 	},
 }
 
@@ -188,7 +173,7 @@ rowset.machines = sql_rowset{
 	select = [[
 		select
 			pos,
-			'refresh' as refresh,
+			machine as refresh,
 			machine,
 			public_ip,
 			local_ip,
@@ -250,7 +235,7 @@ rowset.deploys = sql_rowset{
 		},
 	},
 	insert_row = function(self, row)
-		row.deploy = insert_row('deploy', row, 'deploy machine repo version')
+		insert_row('deploy', row, 'deploy machine repo version')
 	end,
 	update_row = function(self, row)
 		update_row('deploy', row, 'machine repo version')
