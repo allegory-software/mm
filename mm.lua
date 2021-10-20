@@ -28,6 +28,18 @@ else
 	mm.home_key = '/root/home.key'
 end
 
+mm.github_keyscan = [[
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
+]]
+
+local function cmdcheck(s, usage)
+	if not s then
+		cmd.help(usage)
+		os.exit(1)
+	end
+	return s
+end
+
 function mm.install()
 
 	auth_create_tables()
@@ -55,12 +67,19 @@ function mm.install()
 	]]
 
 	query[[
+	$table repo (
+
+	);
+	]]
+
+	query[[
 	$table deploy (
 		deploy      $strpk,
 		machine     $strid not null, $fk(deploy, machine),
 		repo        $url not null,
 		version     $name not null,
-		status      $name
+		status      $name,
+		pos         $pos
 	);
 	]]
 
@@ -130,8 +149,10 @@ html[[
 			<x-grid id=machines_grid rowset_name=machines></x-grid>
 		</x-vsplit>
 		<x-vsplit action=deploys>
-			<x-grid id=ee rowset_name=deploys></x-grid>
-			<x-textedit nav_id=ee col=deploy></x-textedit>
+			<x-grid id=deploys_grid rowset_name=deploys></x-grid>
+			<div>
+				<x-button id=deploy_button text="Deploy"></x-button>
+			</div>
 		</x-vsplit>
 		<x-vsplit action=tasks>
 			<x-grid id=tasks_grid rowset_name=tasks></x-grid>
@@ -143,21 +164,6 @@ html[[
 
 js[[
 
-function task_grid_init_cmenu_items(e, items) {
-	let row = e.focused_row
-	items.push({
-		text: S('ping', 'Ping'),
-		disabled: !row,
-		action: function(item) {
-			let machine = e.cell_val(row, 'machine')
-			get(['', 'update_machine_info', machine])
-		},
-	})
-}
-document.on('machines_grid.bind', function(e, on) {
-	e.on('init_context_menu_items', task_grid_init_cmenu_items, on)
-})
-
 rowset_field_attrs['machines.refresh'] = {
 	type: 'button',
 	w: 40,
@@ -166,6 +172,14 @@ rowset_field_attrs['machines.refresh'] = {
 		this.load(['', 'update_machine_info', machine])
 	},
 }
+
+document.on('deploy_button.bind', function(e, on) {
+	if (on)
+		e.action = function() {
+			let deploy = deploys_grid.focused_row_cell_val('deploy')
+			this.load(['', 'deploy', deploy])
+		}
+})
 
 ]]
 
@@ -218,6 +232,7 @@ rowset.machines = sql_rowset{
 rowset.deploys = sql_rowset{
 	select = [[
 		select
+			pos,
 			deploy,
 			machine,
 			repo,
@@ -235,10 +250,10 @@ rowset.deploys = sql_rowset{
 		},
 	},
 	insert_row = function(self, row)
-		insert_row('deploy', row, 'deploy machine repo version')
+		insert_row('deploy', row, 'deploy machine repo version pos')
 	end,
 	update_row = function(self, row)
-		update_row('deploy', row, 'machine repo version')
+		update_row('deploy', row, 'deploy machine repo version pos')
 	end,
 	delete_row = function(self, row)
 		delete_row('deploy', row, 'deploy')
@@ -310,7 +325,9 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 				elseif len == 0 then
 					break
 				end
-				add(task.stdout, ffi.string(buf, len))
+				local s = ffi.string(buf, len)
+				add(task.stdout, s)
+				out(s)
 				task_changed()
 			end
 			p.stdout:close()
@@ -330,7 +347,9 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 				elseif len == 0 then
 					break
 				end
-				add(task.stderr, ffi.string(buf, len))
+				local s = ffi.string(buf, len)
+				add(task.stderr, s)
+				out(s)
 				task_changed()
 			end
 			p.stderr:close()
@@ -362,8 +381,8 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 	return task
 end
 
-function machine_ip(ip)
-	return first_row('select public_ip from machine where machine = ?', ip) or ip
+function machine_ip(machine)
+	return first_row('select public_ip from machine where machine = ?', machine) or machine
 end
 
 local function ssh(ip, args, stdin_contents, capture_stdout, capture_stderr)
@@ -374,7 +393,7 @@ local function ssh(ip, args, stdin_contents, capture_stdout, capture_stderr)
 			'-o', 'ConnectTimeout=2',
 			'-i', mm.home_key or 'home.key',
 			'root@'..ip,
-		}, args), stdin_contents, capture_stdout, capture_stderr)
+		}, args), stdin_contents, true, true)
 end
 
 --passing both the script and the script's expected stdin contents through
@@ -382,9 +401,9 @@ end
 --that only bash can muster: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
 --feed in stdin_contents right after that. worse-is-better at its finest.
-function ssh_bash(ip, script, stdin_contents, capture_stdout, capture_stderr)
+function ssh_bash(ip, script, stdin_contents)
 	local s = '{\n'..script..'\n}; exit'..(stdin_contents or '')
-	return ssh(ip, {'bash', '-s'}, s, capture_stdout, capture_stderr)
+	return ssh(ip, {'bash', '-s'}, s)
 end
 
 rowset.tasks = virtual_rowset(function(self, ...)
@@ -422,13 +441,12 @@ rowset.tasks = virtual_rowset(function(self, ...)
 
 end)
 
-------------------------------------------------------------------------------
+--commands -------------------------------------------------------------------
 
-local function get_machine_info(machine)
-	local ip = machine_ip(machine)
-	local task = ssh_bash(ip, [=[
+function mm.get_machine_info(machine)
+	local task = ssh_bash(machine, [=[
 
-query() { mysql -u root -N -B -e "$@"; }
+query() { MYSQL_PWD=root mysql -u root -N -B -e "$@"; }
 
 echo "os_ver        $(lsb_release -sd)"
 echo "mysql_ver     $(query 'select version();')"
@@ -441,7 +459,7 @@ echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; pr
 echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-]=], nil, true, true)
+]=])
 	assert(task.status == 'finished', concat(task.errors, '\n'))
 	local stderr = concat(task.stderr)
 	local stdout = concat(task.stdout)
@@ -456,8 +474,8 @@ echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 	return t
 end
 
-function action.update_machine_info(ip)
-	t = assert(get_machine_info(ip))
+function action.update_machine_info(machine)
+	t = assert(mm.get_machine_info(machine))
 	assert(update_row('machine', t, [[
 		os_ver
 		mysql_ver
@@ -472,43 +490,17 @@ function action.update_machine_info(ip)
 	rowset_changed'machines'
 end
 
-action.test_tasks = function()
-
-	setmime'txt'
-	local task = ssh_bash('sp-prod', [[
-
-		for i in {1..5}; do
-
-			echo sleeping $i ...
-			sleep 1
-
-		done
-
-		echo Exiting now...
-
-	]], nil, true, true)
-
-	outpp(task)
-
-end
-
--- commands ------------------------------------------------------------------
-
-function cmd.info(ip)
-	webb.run()
-end
-
-local github_keyscan = [[
-github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
-]]
-
-function cmd.install_machine(ip)
+function cmd.info(machine)
 	webb.run(function()
-		ip = machine_ip(ip)
-		ssh_bash(ip, [=[
+		mm.get_machine_info(cmdcheck(machine, 'info MACHINE'))
+	end)
+end
+
+function mm.install_machine(machine)
+	ssh_bash(machine, [=[
 say() { echo -e "\n# $@\n" >&2; }
 
-say "Installing ssh public key for passwordless access"
+say "Installing SSH public key for passwordless access"
 mkdir -p /root/.ssh
 cat << 'EOF' > /root/.ssh/authorized_keys
 ]=]..assert(readfile('home.key.pub'))..[=[
@@ -519,7 +511,7 @@ chmod 400 /root/.ssh/authorized_keys
 say "Locking root password"
 passwd -l root
 
-say "Installing ubuntu packages"
+say "Installing Ubuntu packages"
 apt-get -y update
 apt-get -y install htop mc mysql-server
 
@@ -535,7 +527,7 @@ chmod +x $git_up
 
 say "Adding github.com's public key"
 cat << 'EOF' > /root/.ssh/known_hosts
-]=]..github_keyscan..[=[
+]=]..mm.github_keyscan..[=[
 
 EOF
 chmod 400 /root/.ssh/known_hosts
@@ -553,12 +545,69 @@ cat << 'EOF' > /root/.ssh/id_rsa
 EOF
 chmod 400 /root/.ssh/id_rsa
 
+[client]
+user=myuser
+password=mypassword
+
 say "Resetting mysql root password"
 mysql -e "alter user 'root'@'localhost' identified by 'root';"
 
 ]=])
+end
+
+action['install_machine.txt'] = function(machine)
+	machine = checkfound(str_arg(machine), 'machine required')
+	setcompress(false)
+	setheader('cache-control', 'no-cache')
+	mm.install_machine(machine)
+end
+
+function cmd.install_machine(machine)
+	webb.run(function()
+		cmdcheck(str_arg(machine), 'install_machine MACHINE')
+		mm.install_machine(machine)
 	end)
 end
+
+function mm.deploy(deploy)
+	local d = first_row([[
+		select
+			d.repo,
+			d.version,
+			m.public_ip
+		from
+			deploy d
+			inner join machine m on d.machine = m.machine
+		where
+			deploy = ?
+	]], deploy)
+end
+
+function action.deploy(deploy)
+	mm.deploy(deploy)
+end
+
+action.test_tasks = function()
+
+	setmime'txt'
+	local task = ssh_bash('sp-prod', [[
+
+		for i in {1..5}; do
+
+			echo sleeping $i ...
+			sleep 1
+
+		done
+
+		echo Exiting now...
+
+	]])
+
+	outpp(task)
+
+end
+
+--cmdline --------------------------------------------------------------------
 
 function cmd.update_keys()
 	webb.run(function()
@@ -579,7 +628,7 @@ chmod 400 /root/.ssh/authorized_keys
 
 say "Setting up github access"
 cat << 'EOF' > /root/.ssh/known_hosts
-]=]..github_keyscan..[=[
+]=]..mm.github_keyscan..[=[
 
 EOF
 chmod 400 /root/.ssh/known_hosts
@@ -608,10 +657,10 @@ function cmd.ssh(ip)
 	return os.execute('ssh -i home.key root@'..ip)
 end
 
---return mm.run('on', '10.0.0.20', 'install')
---return mm.run('install-machine', '45.13.136.150')
---return mm.run('update-keys', '45.13.136.150')
---return mm:run('info', '45.13.136.150')
-return mm:run('start')
---mm:run'install'
---return mm.run(...)
+function cmd.update()
+	webb.run(function()
+		add_column('deploy', 'pos', '$pos')
+	end)
+end
+
+return mm:run(...)
