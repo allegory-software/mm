@@ -14,9 +14,9 @@ mm.home_key_file     = indir(var_dir, 'home.key')
 mm.home_key_pub_file = indir(var_dir, 'home.key.pub')
 mm.github_key_file   = indir(var_dir, 'mm-github.key')
 
-mm.home_key          = load(mm.home_key_file)
+mm.home_key          = checkexists(mm.home_key_file)
 mm.home_key_pub      = load(mm.home_key_pub_file)
-mm.github_key        = canopen(mm.github_key_file) and load(mm.github_key_file)
+mm.github_key        = load(mm.github_key_file, false)
 
 config('http_addr', '*')
 
@@ -142,6 +142,14 @@ body[theme=dark] .header {
 .x-textarea[console] {
 	opacity: 1;
 }
+
+#config_form.maxcols1 {
+	grid-template-rows: auto minmax(0, 1fr);
+	grid-template-areas:
+		"hom"
+	;
+}
+
 ]]
 
 js[[
@@ -160,10 +168,11 @@ html[[
 		<x-listbox id=actions_listbox>
 			<div action=machines>Machines</div>
 			<div action=deploys>Deployments</div>
+			<div action=config>Configuration</div>
 		</x-listbox>
 	</div>
 	<x-vsplit fixed_side=second>
-		<x-switcher id=main_switcher nav_id=actions_listbox>
+		<x-switcher nav_id=actions_listbox>
 			<x-vsplit action=machines>
 				<x-grid id=machines_grid rowset_name=machines></x-grid>
 			</x-vsplit>
@@ -173,12 +182,18 @@ html[[
 					<x-button id=deploy_button text="Deploy"></x-button>
 				</div>
 			</x-vsplit>
+			<div action=config class="x-container x-flex x-stretched">
+				<x-bare-nav id=config_nav rowset_name=config></x-bare-nav>
+				<x-form nav_id=config_nav id=config_form>
+					<x-textedit       col=home_key_pub      infomode=under></x-textedit>
+				</x-form>
+			</div>
 		</x-switcher>
 		<x-split action=tasks fixed_side=second fixed_size=600>
 			<x-grid id=tasks_grid rowset_name=tasks></x-grid>
 			<x-pagelist>
-				<x-textarea mono console title="OUT/ERR" id=task_out_textarea nav_id=tasks_grid col=out></x-textarea>
-				<x-textarea mono console title="STDIN" id=task_stdin_textarea nav_id=tasks_grid col=stdin></x-textarea>
+				<x-textarea theme=dark mono console class=x-stretched title="OUT/ERR" id=task_out_textarea nav_id=tasks_grid col=out></x-textarea>
+				<x-textarea theme=dark mono console class=x-stretched title="STDIN" id=task_stdin_textarea nav_id=tasks_grid col=stdin></x-textarea>
 			</x-pagelist>
 		</x-split>
 	</x-vsplit>
@@ -272,15 +287,15 @@ rowset.machines = sql_rowset{
 	field_attrs = {
 		public_ip   = {text = 'Public IP Address'},
 		local_ip    = {text = 'Local IP Address'},
-		last_seen   = {type = 'timestamp', editable = false},
-		cpu         = {editable = false, text = 'CPU'},
-		cores       = {editable = false, w = 20},
-		ram_gb      = {editable = false, w = 40, decimals = 1, text = 'RAM (GB)'},
-		ram_free_gb = {editable = false, w = 40, decimals = 1, text = 'RAM/free (GB)'},
-		hdd_gb      = {editable = false, w = 40, decimals = 1, text = 'HDD (GB)'},
-		hdd_free_gb = {editable = false, w = 40, decimals = 1, text = 'HDD/free (GB)'},
-		os_ver      = {editable = false, text = 'Operating System'},
-		mysql_ver   = {editable = false, text = 'MySQL Version'},
+		last_seen   = {type = 'timestamp', readonly = true},
+		cpu         = {readonly = true, text = 'CPU'},
+		cores       = {readonly = true, w = 20},
+		ram_gb      = {readonly = true, w = 40, decimals = 1, text = 'RAM (GB)'},
+		ram_free_gb = {readonly = true, w = 40, decimals = 1, text = 'RAM/free (GB)'},
+		hdd_gb      = {readonly = true, w = 40, decimals = 1, text = 'HDD (GB)'},
+		hdd_free_gb = {readonly = true, w = 40, decimals = 1, text = 'HDD/free (GB)'},
+		os_ver      = {readonly = true, text = 'Operating System'},
+		mysql_ver   = {readonly = true, text = 'MySQL Version'},
 	},
 	insert_row = function(self, row)
 		insert_row('machine', row, 'machine public_ip local_ip pos')
@@ -324,9 +339,25 @@ rowset.deploys = sql_rowset{
 	end,
 }
 
+rowset.config = virtual_rowset(function(self, ...)
+
+	self.fields = {
+		{name = 'config_id', type = 'number'},
+		{name = 'home_key_pub', text = 'MM\'s Public Key'},
+	}
+	self.pk = 'config_id'
+
+	function self:load_rows(rs, params)
+		local row = {1, mm.home_key_pub}
+		rs.rows = {row}
+	end
+
+end)
+
 --async exec -----------------------------------------------------------------
 
 mm.tasks = {}
+mm.tasks_by_id = {}
 local last_task_id = 0
 local task_events_thread
 
@@ -344,6 +375,7 @@ local function exec(cmd, stdin_contents, opt)
 		stdin = stdin_contents,
 	}
 	mm.tasks[task] = true
+	mm.tasks_by_id[task.id] = task
 
 	local function task_changed()
 		task.duration = time() - task.start_time
@@ -453,7 +485,11 @@ local function exec(cmd, stdin_contents, opt)
 	thread(function()
 		task_changed()
 		sleep(10)
+		while task.pinned do
+			sleep(1)
+		end
 		mm.tasks[task] = nil
+		mm.tasks_by_id[task.id] = nil
 		task_changed()
 	end)
 
@@ -491,7 +527,8 @@ end
 rowset.tasks = virtual_rowset(function(self, ...)
 
 	self.fields = {
-		{name = 'id', type = 'number'},
+		{name = 'id', type = 'number', w = 20},
+		{name = 'pinned', type = 'bool'},
 		{name = 'status'},
 		{name = 'start_time', type = 'timestamp'},
 		{name = 'duration', type = 'number', decimals = 2, hint = 'Duration till last change in input, output or status'},
@@ -503,23 +540,38 @@ rowset.tasks = virtual_rowset(function(self, ...)
 	}
 	self.pk = 'id'
 
+	local function task_row(task)
+		return {
+			task.id,
+			task.pinned or false,
+			task.status,
+			task.start_time,
+			task.duration,
+			concat(task.cmd, ' '),
+			task.stdin,
+			concat(task.out),
+			task.exit_code,
+			concat(task.errors, '\n'),
+		}
+	end
+
 	function self:load_rows(rs, params)
 		local filter = params['param:filter']
 		rs.rows = {}
 		for task in sortedpairs(mm.tasks, function(t1, t2) return t1.start_time < t2.start_time end) do
-			local row = {
-				task.id,
-				task.status,
-				task.start_time,
-				task.duration,
-				concat(task.cmd, ' '),
-				task.stdin,
-				concat(task.out),
-				task.exit_code,
-				concat(task.errors, '\n'),
-			}
-			add(rs.rows, row)
+			add(rs.rows, task_row(task))
 		end
+	end
+
+	function self:load_row(vals)
+		local task = mm.tasks_by_id[vals['id:old']]
+		return task and task_row(task)
+	end
+
+	function self:update_row(vals)
+		local task = mm.tasks_by_id[vals['id:old']]
+		if not task then return end
+		task.pinned = vals.pinned
 	end
 
 end)
@@ -662,6 +714,7 @@ say "Installing mgit"
 git clone git@github.com:capr/multigit.git
 ln -sf /root/multigit/mgit /usr/local/bin/mgit
 
+]=]..(mm.github_key and [=[
 say "Adding private key for pulling and pushing on github"
 git config --global user.email "cosmin@allegory.ro"
 git config --global user.name "Cosmin Apreutesei"
@@ -670,6 +723,7 @@ cat << 'EOF' > /root/.ssh/id_rsa
 
 EOF
 chmod 400 /root/.ssh/id_rsa
+]=])..[=[
 
 say "Resetting mysql root password"
 mysql -e "alter user 'root'@'localhost' identified by 'root'; flush privileges;"
