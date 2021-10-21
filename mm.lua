@@ -7,6 +7,17 @@ local xapp = require'xapp'
 
 local mm = xapp(daemon(...))
 
+--config ---------------------------------------------------------------------
+
+mm.known_hosts_file  = indir(var_dir, 'known_hosts')
+mm.home_key_file     = indir(var_dir, 'home.key')
+mm.home_key_pub_file = indir(var_dir, 'home.key.pub')
+mm.github_key_file   = indir(var_dir, 'mm-github.key')
+
+mm.home_key          = load(mm.home_key_file)
+mm.home_key_pub      = load(mm.home_key_pub_file)
+mm.github_key        = canopen(mm.github_key_file) and load(mm.github_key_file)
+
 config('http_addr', '*')
 
 --logging.filter[''] = true
@@ -21,16 +32,19 @@ config('var_dir', '.')
 config('session_secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('pass_salt'     , 'is9v09z-@^%@s!0~ckl0827ScZpx92kldsufy')
 
-if ffi.abi'win' then
-	--
-else
+if not ffi.abi'win' then
 	--because stupid ssh wants 0600 on home.key and we can't do that with vboxfs.
-	mm.home_key = '/root/home.key'
+	local f = '/root/home.key'
+	cp(mm.home_key_file, f)
+	mm.home_key_file = f
+	chmod(f, '0600')
 end
 
-mm.github_keyscan = [[
+mm.github_fingerprint = [[
 github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
 ]]
+
+--database -------------------------------------------------------------------
 
 local function cmdcheck(s, usage)
 	if not s then
@@ -52,6 +66,7 @@ function mm.install()
 		machine     $strpk,
 		public_ip   $name,
 		local_ip    $name,
+		fingerprint $b64key,
 		last_seen   timestamp,
 		os_ver      $name,
 		mysql_ver   $name,
@@ -123,6 +138,10 @@ body[theme=dark] .sign-in-logo {
 body[theme=dark] .header {
 	background-color: #111;
 }
+
+.x-textarea[console] {
+	opacity: 1;
+}
 ]]
 
 js[[
@@ -141,24 +160,28 @@ html[[
 		<x-listbox id=actions_listbox>
 			<div action=machines>Machines</div>
 			<div action=deploys>Deployments</div>
-			<div action=tasks>Tasks</div>
 		</x-listbox>
 	</div>
-	<x-switcher id=main_switcher nav_id=actions_listbox>
-		<x-vsplit action=machines>
-			<x-grid id=machines_grid rowset_name=machines></x-grid>
-		</x-vsplit>
-		<x-vsplit action=deploys>
-			<x-grid id=deploys_grid rowset_name=deploys></x-grid>
-			<div>
-				<x-button id=deploy_button text="Deploy"></x-button>
-			</div>
-		</x-vsplit>
-		<x-vsplit action=tasks>
+	<x-vsplit fixed_side=second>
+		<x-switcher id=main_switcher nav_id=actions_listbox>
+			<x-vsplit action=machines>
+				<x-grid id=machines_grid rowset_name=machines></x-grid>
+			</x-vsplit>
+			<x-vsplit action=deploys>
+				<x-grid id=deploys_grid rowset_name=deploys></x-grid>
+				<div>
+					<x-button id=deploy_button text="Deploy"></x-button>
+				</div>
+			</x-vsplit>
+		</x-switcher>
+		<x-split action=tasks fixed_side=second fixed_size=600>
 			<x-grid id=tasks_grid rowset_name=tasks></x-grid>
-			<x-textarea mono nav_id=tasks_grid col=stdout></x-textarea>
-		</x-vsplit>
-	</x-switcher>
+			<x-pagelist>
+				<x-textarea mono console title="OUT/ERR" id=task_out_textarea nav_id=tasks_grid col=out></x-textarea>
+				<x-textarea mono console title="STDIN" id=task_stdin_textarea nav_id=tasks_grid col=stdin></x-textarea>
+			</x-pagelist>
+		</x-split>
+	</x-vsplit>
 </x-split>
 ]]
 
@@ -171,6 +194,47 @@ rowset_field_attrs['machines.refresh'] = {
 	action: function(machine) {
 		this.load(['', 'update_machine_info', machine])
 	},
+}
+
+document.on('task_out_textarea.init', function(e) {
+	e.do_after('do_update_val', function() {
+		let te = e.$1('textarea')
+		if (te)
+			te.scroll(0, te.scrollHeight)
+	})
+})
+
+{
+let init_context_menu_items = function(e, items) {
+
+	items.last.separator = true
+
+	items.push({
+		text: S('update_host_fingerprint', 'Update host fingerprint'),
+		action: function() {
+			let machine = e.focused_row_cell_val('machine')
+			if (machine)
+				get(['', 'update_host_fingerprint', machine], function(s) {
+					notify(s, 'info')
+				})
+		},
+	})
+
+	items.push({
+		text: S('prepare_machine', 'Prepare machine'),
+		action: function() {
+			let machine = e.focused_row_cell_val('machine')
+			if (machine)
+				get(['', 'prepare_machine', machine], function(s) {
+					notify(s, 'info')
+				})
+		},
+	})
+
+}
+document.on('machines_grid.bind', function(e, on) {
+	e.on('init_context_menu_items', init_context_menu_items, on)
+})
 }
 
 document.on('deploy_button.bind', function(e, on) {
@@ -266,7 +330,8 @@ mm.tasks = {}
 local last_task_id = 0
 local task_events_thread
 
-local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
+local function exec(cmd, stdin_contents, opt)
+	opt = opt or empty
 
 	last_task_id = last_task_id + 1
 	local task = {
@@ -276,6 +341,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		duration = 0,
 		status = 'new',
 		errors = {},
+		stdin = stdin_contents,
 	}
 	mm.tasks[task] = true
 
@@ -283,6 +349,9 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 		task.duration = time() - task.start_time
 		rowset_changed'tasks'
 	end
+
+	local capture_stdout = opt.capture_stdout ~= false
+	local capture_stderr = opt.capture_stderr ~= false
 
 	local p, err = proc.exec{
 		cmd = cmd,
@@ -304,6 +373,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 
 	if p.stdin then
 		thread(function()
+			dbg('mm', 'execin', '%s', stdin_contents)
 			local ok, err = p.stdin:write(stdin_contents)
 			if not ok then
 				add(task.errors, 'stdin write error: '..err)
@@ -312,6 +382,8 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 			p.stdin:close() --signal eof
 		end)
 	end
+
+	task.out = {} --combined stdout & stderr
 
 	task.stdout = {}
 	if p.stdout then
@@ -327,7 +399,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 				end
 				local s = ffi.string(buf, len)
 				add(task.stdout, s)
-				out(s)
+				add(task.out, s)
 				task_changed()
 			end
 			p.stdout:close()
@@ -349,7 +421,7 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 				end
 				local s = ffi.string(buf, len)
 				add(task.stderr, s)
-				out(s)
+				add(task.out, s)
 				task_changed()
 			end
 			p.stderr:close()
@@ -367,13 +439,20 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 	task.end_time = time()
 	task.status = 'finished'
 	task_changed()
-	while not (p.stdin:closed() and p.stdout:closed() and p.stderr:closed()) do
+	while not (
+		    (not p.stdin or p.stdin:closed())
+		and (not p.stdout or p.stdout:closed())
+		and (not p.stderr or p.stderr:closed())
+	) do
 		sleep(.1)
 	end
 	p:forget()
+	if #task.out > 0 then
+		dbg('mm', 'execout', '%s', concat(task.out))
+	end
 	thread(function()
 		task_changed()
-		sleep(1)
+		sleep(10)
 		mm.tasks[task] = nil
 		task_changed()
 	end)
@@ -382,18 +461,21 @@ local function exec(cmd, stdin_contents, capture_stdout, capture_stderr)
 end
 
 function machine_ip(machine)
-	return first_row('select public_ip from machine where machine = ?', machine) or machine
+	if not machine then return nil, 'Machine required' end
+	local ip = first_row('select public_ip from machine where machine = ?', machine)
+	if ip then return ip end
+	return nil, 'Machine not found: '..machine
 end
 
-local function ssh(ip, args, stdin_contents, capture_stdout, capture_stderr)
-	local ip = machine_ip(ip)
+local function ssh(ip, args, stdin_contents, opt)
 	return exec(extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
+			'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
 			'-o', 'ConnectTimeout=2',
-			'-i', mm.home_key or 'home.key',
+			'-i', mm.home_key_file,
 			'root@'..ip,
-		}, args), stdin_contents, true, true)
+		}, args), stdin_contents, opt)
 end
 
 --passing both the script and the script's expected stdin contents through
@@ -401,9 +483,9 @@ end
 --that only bash can muster: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
 --feed in stdin_contents right after that. worse-is-better at its finest.
-function ssh_bash(ip, script, stdin_contents)
+function ssh_bash(ip, script, stdin_contents, opt)
 	local s = '{\n'..script..'\n}; exit'..(stdin_contents or '')
-	return ssh(ip, {'bash', '-s'}, s)
+	return ssh(ip, {'bash', '-s'}, s, opt)
 end
 
 rowset.tasks = virtual_rowset(function(self, ...)
@@ -414,14 +496,15 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		{name = 'start_time', type = 'timestamp'},
 		{name = 'duration', type = 'number', decimals = 2, hint = 'Duration till last change in input, output or status'},
 		{name = 'command'},
-		{name = 'stdout', hidden = true},
-		{name = 'stderr', hidden = true},
+		{name = 'stdin', hidden = true, maxlen = 16*1024^2},
+		{name = 'out', hidden = true, maxlen = 16*1024^2},
 		{name = 'exit_code', type = 'number', w = 20},
 		{name = 'errors'},
 	}
 	self.pk = 'id'
 
 	function self:load_rows(rs, params)
+		local filter = params['param:filter']
 		rs.rows = {}
 		for task in sortedpairs(mm.tasks, function(t1, t2) return t1.start_time < t2.start_time end) do
 			local row = {
@@ -430,8 +513,8 @@ rowset.tasks = virtual_rowset(function(self, ...)
 				task.start_time,
 				task.duration,
 				concat(task.cmd, ' '),
-				concat(task.stdout),
-				concat(task.stderr),
+				task.stdin,
+				concat(task.out),
 				task.exit_code,
 				concat(task.errors, '\n'),
 			}
@@ -443,10 +526,57 @@ end)
 
 --commands -------------------------------------------------------------------
 
-function mm.get_machine_info(machine)
-	local task = ssh_bash(machine, [=[
+function mm.gen_known_hosts_file()
+	local t = {}
+	for i, ip, fp in each_row_vals[[
+		select public_ip, fingerprint
+		from machine
+		where fingerprint is not null
+		order by pos, ctime
+	]] do
+		add(t, fp)
+	end
+	save(concat(t, '\n'), mm.known_hosts_file)
+end
 
-query() { MYSQL_PWD=root mysql -u root -N -B -e "$@"; }
+local function checknostderr(task)
+	assert(task.status == 'finished', concat(task.errors, '\n'))
+	local stderr = concat(task.stderr)
+	local stdout = concat(task.stdout)
+	check500(stderr == '', stderr)
+	return stdout
+end
+
+local function checkout(task)
+	assert(task.status == 'finished', concat(task.errors, '\n'))
+	return concat(task.out)
+end
+
+function mm.update_host_fingerprint(ip, machine)
+	local fp = checknostderr(exec({'ssh-keyscan', '-H', ip}, nil, {capture_stderr = false}))
+	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
+	mm.gen_known_hosts_file()
+end
+
+function action.update_host_fingerprint(machine)
+	local machine = str_arg(machine)
+	local ip = checkfound(machine_ip(machine), 'machine not found')
+	mm.update_host_fingerprint(ip, machine)
+	out'Fingerprint updated for '; out(machine)
+end
+
+function cmd.update_host_fingerprint(machine)
+	webb.run(function()
+		local machine = str_arg(machine)
+		local ip = cmdcheck(machine_ip(machine), 'update-host-fingerprint MACHINE')
+		mm.update_host_fingerprint(ip, machine)
+	end)
+end
+
+function mm.get_machine_info(ip)
+		local stdout = checknostderr(ssh_bash(ip, [=[
+
+query() { which mysql >/dev/null && MYSQL_PWD=root mysql -u root -N -B -e "$@"; }
 
 echo "os_ver        $(lsb_release -sd)"
 echo "mysql_ver     $(query 'select version();')"
@@ -459,14 +589,8 @@ echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; pr
 echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-]=])
-	assert(task.status == 'finished', concat(task.errors, '\n'))
-	local stderr = concat(task.stderr)
-	local stdout = concat(task.stdout)
-	local t = {['machine:old'] = machine, last_seen = time()}
-	dbg('mm', 'infoerr', stderr)
-	dbg('mm', 'infoout', stdout)
-	assert(stderr == '', stderr)
+]=]))
+	local t = {last_seen = time()}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^(.-)%s+(.*)')
 		t[k] = v
@@ -475,7 +599,9 @@ echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 end
 
 function action.update_machine_info(machine)
-	t = assert(mm.get_machine_info(machine))
+	local ip = checkfound(machine_ip(str_arg(machine)))
+	t = assert(mm.get_machine_info(ip))
+	t['machine:old'] = machine
 	assert(update_row('machine', t, [[
 		os_ver
 		mysql_ver
@@ -490,20 +616,20 @@ function action.update_machine_info(machine)
 	rowset_changed'machines'
 end
 
-function cmd.info(machine)
+function cmd.machine_info(machine)
 	webb.run(function()
-		mm.get_machine_info(cmdcheck(machine, 'info MACHINE'))
+		mm.get_machine_info(cmdcheck(machine_ip(str_arg(machine)), 'info MACHINE'))
 	end)
 end
 
-function mm.install_machine(machine)
-	ssh_bash(machine, [=[
+function mm.prepare_machine(machine, opt)
+	return checkout(ssh_bash(machine, [=[
 say() { echo -e "\n# $@\n" >&2; }
 
 say "Installing SSH public key for passwordless access"
 mkdir -p /root/.ssh
 cat << 'EOF' > /root/.ssh/authorized_keys
-]=]..assert(readfile('home.key.pub'))..[=[
+]=]..mm.home_key_pub..[=[
 
 EOF
 chmod 400 /root/.ssh/authorized_keys
@@ -527,7 +653,7 @@ chmod +x $git_up
 
 say "Adding github.com's public key"
 cat << 'EOF' > /root/.ssh/known_hosts
-]=]..mm.github_keyscan..[=[
+]=]..mm.github_fingerprint..[=[
 
 EOF
 chmod 400 /root/.ssh/known_hosts
@@ -540,33 +666,67 @@ say "Adding private key for pulling and pushing on github"
 git config --global user.email "cosmin@allegory.ro"
 git config --global user.name "Cosmin Apreutesei"
 cat << 'EOF' > /root/.ssh/id_rsa
-]=]..assert(readfile('mm-github.key'))..[=[
+]=]..mm.github_key..[=[
 
 EOF
 chmod 400 /root/.ssh/id_rsa
 
-[client]
-user=myuser
-password=mypassword
-
 say "Resetting mysql root password"
-mysql -e "alter user 'root'@'localhost' identified by 'root';"
+mysql -e "alter user 'root'@'localhost' identified by 'root'; flush privileges;"
+
+]=], nil, opt))
+end
+
+function action.prepare_machine(machine)
+	local ip = checkfound(machine_ip(str_arg(machine)))
+	mm.prepare_machine(ip)
+	out(_('Machine %s prepared', machine))
+end
+
+function cmd.prepare_machine(machine)
+	webb.run(function()
+		local ip = cmdcheck(machine_ip(str_arg(machine)), 'prepare-machine MACHINE')
+		mm.prepare_machine(ip, {capture_stdout = false, capture_stderr = false})
+	end)
+end
+
+function mm.update_keys(ip)
+	ssh_bash(ip, [=[
+say() { echo "# $1." >&2; }
+
+say "Setting up ssh access"
+mkdir -p /root/.ssh
+cat << 'EOF' > /root/.ssh/authorized_keys
+]=]..mm.home_key_pub..[=[
+
+EOF
+chmod 400 /root/.ssh/authorized_keys
+
+say "Setting up github access"
+cat << 'EOF' > /root/.ssh/known_hosts
+]=]..mm.github_fingerprint..[=[
+
+EOF
+chmod 400 /root/.ssh/known_hosts
+
+cat << 'EOF' > /root/.ssh/id_rsa
+]=]..mm.github_key..[=[
+
+EOF
+chmod 400 /root/.ssh/id_rsa
 
 ]=])
 end
 
-action['install_machine.txt'] = function(machine)
-	machine = checkfound(str_arg(machine), 'machine required')
-	setcompress(false)
-	setheader('cache-control', 'no-cache')
-	mm.install_machine(machine)
-end
-
-function cmd.install_machine(machine)
-	webb.run(function()
-		cmdcheck(str_arg(machine), 'install_machine MACHINE')
-		mm.install_machine(machine)
-	end)
+function mm.change_keys()
+	cp(mm.home_key_file    , mm.home_key_file    ..'.old')
+	cp(mm.home_key_pub_file, mm.home_key_pub_file..'.old')
+	os.execute(_('ssh-keygen -f %s -t rsa -b 2048 -C "home" -q -N ""', mm.home_key_file))
+	mm.home_key     = load(mm.home_key_file)
+	mm.home_key_pub = load(mm.home_key_pub_file)
+	for _,ip in each_row_vals'select public_ip from machine' do
+		mm.update_keys(ip)
+	end
 end
 
 function mm.deploy(deploy)
@@ -587,61 +747,7 @@ function action.deploy(deploy)
 	mm.deploy(deploy)
 end
 
-action.test_tasks = function()
-
-	setmime'txt'
-	local task = ssh_bash('sp-prod', [[
-
-		for i in {1..5}; do
-
-			echo sleeping $i ...
-			sleep 1
-
-		done
-
-		echo Exiting now...
-
-	]])
-
-	outpp(task)
-
-end
-
 --cmdline --------------------------------------------------------------------
-
-function cmd.update_keys()
-	webb.run(function()
-		os.execute('ssh-keygen')
-		os.execute('ssh-keygen -f home.key -t rsa -b 2048 -C "home" -q -N ""')
-
-		ip = machine_ip(ip)
-		ssh_bash(ip, [=[
-say() { echo "# $1." >&2; }
-
-say "Setting up ssh access"
-mkdir -p /root/.ssh
-cat << 'EOF' > /root/.ssh/authorized_keys
-]=]..assert(readfile('home.key.pub'))..[=[
-
-EOF
-chmod 400 /root/.ssh/authorized_keys
-
-say "Setting up github access"
-cat << 'EOF' > /root/.ssh/known_hosts
-]=]..mm.github_keyscan..[=[
-
-EOF
-chmod 400 /root/.ssh/known_hosts
-
-cat << 'EOF' > /root/.ssh/id_rsa
-]=]..assert(readfile('mm-github.key'))..[=[
-
-EOF
-chmod 400 /root/.ssh/id_rsa
-
-]=])
-	end)
-end
 
 cmd.deploy = function(ip, deploy)
 	webb.run(function()
@@ -652,9 +758,12 @@ cmd.deploy = function(ip, deploy)
 	end)
 end
 
-function cmd.ssh(ip)
-	ip = webb.run(function() return machine_ip(ip) end)
-	return os.execute('ssh -i home.key root@'..ip)
+function cmd.ssh(machine)
+	local ip = webb.run(function()
+		return cmdcheck(machine_ip(str_arg(machine)), 'ssh MACHINE')
+	end)
+	local cmd = _('ssh -i home.key -o UserKnownHostsFile=%s root@%s', mm.known_hosts_file, ip)
+	return os.execute(cmd)
 end
 
 function cmd.update()
