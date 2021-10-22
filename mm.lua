@@ -1,5 +1,6 @@
 
 require'$daemon'
+require'xmodule'
 
 local proc = require'proc'
 local sock = require'sock'
@@ -213,6 +214,16 @@ html[[
 ]]
 
 js[[
+
+init_xmodule({
+	modules: {
+		user: {icon: 'user'},
+	},
+	slots: {
+		user: {color: '#99f', icon: 'user'},
+	},
+	layers: [],
+})
 
 // machines gre / refresh button field attrs & action
 rowset_field_attrs['machines.refresh'] = {
