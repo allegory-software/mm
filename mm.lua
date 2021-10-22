@@ -503,7 +503,7 @@ function mm.exec(cmd, stdin_contents, opt)
 		mm.tasks_by_id[task.id] = nil
 		task_changed()
 	end
-	if opt and opt.nowait then
+	if opt and opt.nowait or cx().fake then
 		free_task()
 	else
 		thread(function()
@@ -675,8 +675,7 @@ echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 	return t
 end
 
-function action.update_machine_info(machine)
-	local ip = checkfound(machine_ip(str_arg(machine)))
+function mm.update_machine_info(ip, machine)
 	t = assert(mm.get_machine_info(ip))
 	t['machine:old'] = machine
 	assert(update_row('machine', t, [[
@@ -693,9 +692,16 @@ function action.update_machine_info(machine)
 	rowset_changed'machines'
 end
 
-function cmd.machine_info(machine)
+function action.update_machine_info(machine)
+	local ip = checkfound(machine_ip(str_arg(machine)))
+	mm.update_machine_info(ip, machine)
+end
+
+function cmd.update_machine_info(machine)
 	webb.run(function()
-		mm.get_machine_info(cmdcheck(machine_ip(str_arg(machine)), 'info MACHINE'))
+		local machine = str_arg(machine)
+		local ip = cmdcheck(machine_ip(machine), 'info MACHINE')
+		mm.update_machine_info(ip, machine)
 	end)
 end
 
@@ -897,12 +903,6 @@ function cmd.ssh_all(command)
 					nil, {capture_stdout = false, capture_stderr = false, nowait = true})
 			end)
 		end
-	end)
-end
-
-function cmd.update()
-	webb.run(function()
-		add_column('deploy', 'pos', '$pos')
 	end)
 end
 
