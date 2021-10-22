@@ -387,7 +387,7 @@ mm.tasks_by_id = {}
 local last_task_id = 0
 local task_events_thread
 
-function mm.exec(cmd, stdin_contents, opt)
+function mm.exec(cmd, opt)
 	opt = opt or empty
 
 	last_task_id = last_task_id + 1
@@ -398,7 +398,7 @@ function mm.exec(cmd, stdin_contents, opt)
 		duration = 0,
 		status = 'new',
 		errors = {},
-		stdin = stdin_contents,
+		stdin = opt.stdin,
 		script = opt.script,
 	}
 	mm.tasks[task] = true
@@ -417,7 +417,7 @@ function mm.exec(cmd, stdin_contents, opt)
 		async = true,
 		stdout = capture_stdout,
 		stderr = capture_stderr,
-		stdin = stdin_contents and true or false,
+		stdin = opt.stdin and true or false,
 	}
 
 	if not p then
@@ -432,8 +432,8 @@ function mm.exec(cmd, stdin_contents, opt)
 
 	if p.stdin then
 		thread(function()
-			dbg('mm', 'execin', '%s', stdin_contents)
-			local ok, err = p.stdin:write(stdin_contents)
+			dbg('mm', 'execin', '%s', opt.stdin)
+			local ok, err = p.stdin:write(opt.stdin)
 			if not ok then
 				add(task.errors, 'stdin write error: '..err)
 				task_changed()
@@ -537,7 +537,7 @@ function machine_ip(machine)
 	return nil, 'Machine not found: '..machine
 end
 
-function mm.ssh(ip, args, stdin_contents, opt)
+function mm.ssh(ip, args, opt)
 	return mm.exec(extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
@@ -545,17 +545,18 @@ function mm.ssh(ip, args, stdin_contents, opt)
 			'-o', 'ConnectTimeout=2',
 			'-i', mm.mm_key_file,
 			'root@'..ip,
-		}, args), stdin_contents, opt)
+		}, args), opt)
 end
 
 --passing both the script and the script's expected stdin contents through
 --ssh's stdin at the same time is only possible due to a ridiculous behavior
 --that only bash can muster: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
---feed in stdin_contents right after that. worse-is-better at its finest.
-function mm.ssh_bash(ip, script, stdin_contents, opt)
-	local s = '{\n'..script..'\n}; exit'..(stdin_contents or '')
-	return mm.ssh(ip, {'bash', '-s'}, s, opt)
+--feed in stdin right after that. worse-is-better at its finest.
+function mm.ssh_bash(ip, script, opt)
+	opt = opt or {}
+	opt.stdin = '{\n'..script..'\n}; exit'..(opt.stdin or '')
+	return mm.ssh(ip, {'bash', '-s'}, opt)
 end
 
 rowset.tasks = virtual_rowset(function(self, ...)
@@ -563,10 +564,10 @@ rowset.tasks = virtual_rowset(function(self, ...)
 	self.fields = {
 		{name = 'id'        , type = 'number', w = 20},
 		{name = 'pinned'    , type = 'bool'},
+		{name = 'script'    , },
 		{name = 'status'    , },
 		{name = 'start_time', type = 'timestamp'},
 		{name = 'duration'  , type = 'number', decimals = 2, hint = 'Duration till last change in input, output or status'},
-		{name = 'script'    , },
 		{name = 'command'   , hidden = true},
 		{name = 'stdin'     , hidden = true, maxlen = 16*1024^2},
 		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
@@ -579,10 +580,10 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		return {
 			task.id,
 			task.pinned or false,
+			task.script,
 			task.status,
 			task.start_time,
 			task.duration,
-			task.script,
 			concat(task.cmd, ' '),
 			task.stdin,
 			concat(task.out),
@@ -641,7 +642,8 @@ local function checkout(task)
 end
 
 function mm.update_host_fingerprint(ip, machine)
-	local fp = checknostderr(mm.exec({'ssh-keyscan', '-H', ip}, nil, {capture_stderr = false}))
+	local fp = checknostderr(mm.exec({'ssh-keyscan', '-H', ip},
+		{script = 'get_host_fingerprint', capture_stderr = false}))
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
@@ -677,7 +679,7 @@ echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; pr
 echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-]=]))
+]=], {script = 'get_machine_info'}))
 	local t = {last_seen = time()}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^(.-)%s+(.*)')
@@ -771,7 +773,7 @@ chmod 400 /root/.ssh/id_rsa
 say "Resetting mysql root password"
 mysql -e "alter user 'root'@'localhost' identified by 'root'; flush privileges;"
 
-]=], nil, opt))
+]=], update({script = 'prepare_machine'}, opt)))
 end
 
 function action.prepare_machine(machine)
@@ -819,7 +821,7 @@ EOF
 chmod 400 /root/.ssh/id_rsa
 ]=])..[=[
 
-]=])
+]=], {script = 'update_keys'})
 end
 
 function mm.gen_mm_key()
@@ -868,7 +870,7 @@ cmd.deploy = function(ip, deploy)
 		ip = machine_ip(ip)
 		mm.ssh_bash(ip, [=[
 
-]=])
+]=], {script = 'deploy'})
 	end)
 end
 
@@ -901,7 +903,7 @@ function cmd.ssh(machine, command)
 	webb.run(function()
 		local ip = cmdcheck(machine_ip(str_arg(machine)), 'ssh MACHINE')
 		mm.ssh(ip, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
-			nil, {capture_stdout = false, capture_stderr = false, nowait = true})
+			{capture_stdout = false, capture_stderr = false, nowait = true})
 	end)
 end
 
@@ -911,7 +913,7 @@ function cmd.ssh_all(command)
 			thread(function()
 				print('Executing on '..machine..'...')
 				mm.ssh(ip, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
-					nil, {capture_stdout = false, capture_stderr = false, nowait = true})
+					{capture_stdout = false, capture_stderr = false, nowait = true})
 			end)
 		end
 	end)
