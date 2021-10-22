@@ -10,12 +10,11 @@ local mm = xapp(daemon(...))
 --config ---------------------------------------------------------------------
 
 mm.known_hosts_file  = indir(var_dir, 'known_hosts')
-mm.home_key_file     = indir(var_dir, 'home.key')
-mm.home_key_pub_file = indir(var_dir, 'home.key.pub')
+mm.mm_key_file       = indir(var_dir, 'mm.key')
 mm.github_key_file   = indir(var_dir, 'mm-github.key')
 
-mm.home_key          = checkexists(mm.home_key_file)
-mm.home_key_pub      = load(mm.home_key_pub_file)
+mm.mm_key            = checkexists(mm.mm_key_file)
+mm.mm_key_pub        = load(mm.mm_key_file..'.pub')
 mm.github_key        = load(mm.github_key_file, false)
 
 config('http_addr', '*')
@@ -33,10 +32,10 @@ config('session_secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('pass_salt'     , 'is9v09z-@^%@s!0~ckl0827ScZpx92kldsufy')
 
 if not ffi.abi'win' then
-	--because stupid ssh wants 0600 on home.key and we can't do that with vboxfs.
-	local f = '/root/home.key'
-	cp(mm.home_key_file, f)
-	mm.home_key_file = f
+	--because stupid ssh wants 0600 on mm.key and we can't do that with vboxfs.
+	local f = '/root/mm.key'
+	cp(mm.mm_key_file, f)
+	mm.mm_key_file = f
 	chmod(f, '0600')
 end
 
@@ -113,7 +112,7 @@ end
 --admin ui -------------------------------------------------------------------
 
 mm.title = 'Many Machines'
-mm.font = 'opensans'
+--mm.font = 'opensans'
 
 css[[
 body {
@@ -121,6 +120,14 @@ body {
 	display: flex;
 	flex-flow: column;
 }
+
+body { font-family: sans-serif; font-size: 13px; }
+.x-grid-header-cell { font-size: 13px; }
+
+/*
+body { font-family: monospace; font-size: 12px; }
+.x-grid-header-cell { font-size: 13px; }
+*/
 
 .header {
 	display: flex;
@@ -144,9 +151,10 @@ body[theme=dark] .header {
 }
 
 #config_form.maxcols1 {
-	grid-template-rows: auto minmax(0, 1fr);
+	max-width: 400px;
 	grid-template-areas:
-		"hom"
+		"mm_"
+		"regen"
 	;
 }
 
@@ -179,21 +187,25 @@ html[[
 			<x-vsplit action=deploys>
 				<x-grid id=deploys_grid rowset_name=deploys></x-grid>
 				<div>
-					<x-button id=deploy_button text="Deploy"></x-button>
+					<x-button action_name=deploy_button_action text="Deploy"></x-button>
 				</div>
 			</x-vsplit>
-			<div action=config class="x-container x-flex x-stretched">
+			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
 				<x-bare-nav id=config_nav rowset_name=config></x-bare-nav>
 				<x-form nav_id=config_nav id=config_form>
-					<x-textedit       col=home_key_pub      infomode=under></x-textedit>
+					<x-textedit col=mm_key_pub infomode=under
+						info="This is the SSH key used to log in as root on all machines."></x-textedit>
+					<x-button danger action_name=gen_mm_key_button_action style="grid-area: regen"
+						text="Generate new key & upload it to all machines" icon="fa fa-key">
+					</x-button>
 				</x-form>
 			</div>
 		</x-switcher>
 		<x-split action=tasks fixed_side=second fixed_size=600>
-			<x-grid id=tasks_grid rowset_name=tasks></x-grid>
+			<x-grid id=tasks_grid rowset_name=tasks save_row_on=input></x-grid>
 			<x-pagelist>
-				<x-textarea theme=dark mono console class=x-stretched title="OUT/ERR" id=task_out_textarea nav_id=tasks_grid col=out></x-textarea>
-				<x-textarea theme=dark mono console class=x-stretched title="STDIN" id=task_stdin_textarea nav_id=tasks_grid col=stdin></x-textarea>
+				<x-textarea mono console class=x-stretched title="OUT/ERR" id=task_out_textarea nav_id=tasks_grid col=out></x-textarea>
+				<x-textarea mono console class=x-stretched title="STDIN" id=task_stdin_textarea nav_id=tasks_grid col=stdin></x-textarea>
 			</x-pagelist>
 		</x-split>
 	</x-vsplit>
@@ -202,6 +214,7 @@ html[[
 
 js[[
 
+// machines gre / refresh button field attrs & action
 rowset_field_attrs['machines.refresh'] = {
 	type: 'button',
 	w: 40,
@@ -211,6 +224,7 @@ rowset_field_attrs['machines.refresh'] = {
 	},
 }
 
+// output textarea auto-scroll.
 document.on('task_out_textarea.init', function(e) {
 	e.do_after('do_update_val', function() {
 		let te = e.$1('textarea')
@@ -219,46 +233,47 @@ document.on('task_out_textarea.init', function(e) {
 	})
 })
 
-{
-let init_context_menu_items = function(e, items) {
+// machines grid context menu items.
+document.on('machines_grid.init', function(e) {
 
-	items.last.separator = true
+	e.on('init_context_menu_items', function(items) {
 
-	items.push({
-		text: S('update_host_fingerprint', 'Update host fingerprint'),
-		action: function() {
-			let machine = e.focused_row_cell_val('machine')
-			if (machine)
-				get(['', 'update_host_fingerprint', machine], function(s) {
-					notify(s, 'info')
-				})
-		},
+		items.last.separator = true
+
+		items.push({
+			text: S('update_host_fingerprint', 'Update host fingerprint'),
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					get(['', 'update_host_fingerprint', machine], function(s) {
+						notify(s, 'info')
+					})
+			},
+		})
+
+		items.push({
+			text: S('prepare_machine', 'Prepare machine'),
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					get(['', 'prepare_machine', machine], function(s) {
+						notify(s, 'info')
+					})
+			},
+		})
+
 	})
 
-	items.push({
-		text: S('prepare_machine', 'Prepare machine'),
-		action: function() {
-			let machine = e.focused_row_cell_val('machine')
-			if (machine)
-				get(['', 'prepare_machine', machine], function(s) {
-					notify(s, 'info')
-				})
-		},
-	})
-
-}
-document.on('machines_grid.bind', function(e, on) {
-	e.on('init_context_menu_items', init_context_menu_items, on)
 })
+
+function deploy_button_action() {
+	let deploy = deploys_grid.focused_row_cell_val('deploy')
+	this.load(['', 'deploy', deploy])
 }
 
-document.on('deploy_button.bind', function(e, on) {
-	if (on)
-		e.action = function() {
-			let deploy = deploys_grid.focused_row_cell_val('deploy')
-			this.load(['', 'deploy', deploy])
-		}
-})
+function gen_mm_key_button_action() {
+	this.load(['', 'gen_mm_key'])
+}
 
 ]]
 
@@ -343,12 +358,12 @@ rowset.config = virtual_rowset(function(self, ...)
 
 	self.fields = {
 		{name = 'config_id', type = 'number'},
-		{name = 'home_key_pub', text = 'MM\'s Public Key'},
+		{name = 'mm_key_pub', text = 'MM\'s Public Key'},
 	}
 	self.pk = 'config_id'
 
 	function self:load_rows(rs, params)
-		local row = {1, mm.home_key_pub}
+		local row = {1, mm.mm_key_pub}
 		rs.rows = {row}
 	end
 
@@ -361,7 +376,7 @@ mm.tasks_by_id = {}
 local last_task_id = 0
 local task_events_thread
 
-local function exec(cmd, stdin_contents, opt)
+function mm.exec(cmd, stdin_contents, opt)
 	opt = opt or empty
 
 	last_task_id = last_task_id + 1
@@ -373,6 +388,7 @@ local function exec(cmd, stdin_contents, opt)
 		status = 'new',
 		errors = {},
 		stdin = stdin_contents,
+		script = opt.script,
 	}
 	mm.tasks[task] = true
 	mm.tasks_by_id[task.id] = task
@@ -482,16 +498,23 @@ local function exec(cmd, stdin_contents, opt)
 	if #task.out > 0 then
 		dbg('mm', 'execout', '%s', concat(task.out))
 	end
-	thread(function()
-		task_changed()
-		sleep(10)
-		while task.pinned do
-			sleep(1)
-		end
+	local function free_task()
 		mm.tasks[task] = nil
 		mm.tasks_by_id[task.id] = nil
 		task_changed()
-	end)
+	end
+	if opt and opt.nowait then
+		free_task()
+	else
+		thread(function()
+			task_changed()
+			sleep(10)
+			while task.pinned do
+				sleep(1)
+			end
+			free_task()
+		end)
+	end
 
 	return task
 end
@@ -503,13 +526,13 @@ function machine_ip(machine)
 	return nil, 'Machine not found: '..machine
 end
 
-local function ssh(ip, args, stdin_contents, opt)
-	return exec(extend({
+function mm.ssh(ip, args, stdin_contents, opt)
+	return mm.exec(extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
 			'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
 			'-o', 'ConnectTimeout=2',
-			'-i', mm.home_key_file,
+			'-i', mm.mm_key_file,
 			'root@'..ip,
 		}, args), stdin_contents, opt)
 end
@@ -519,24 +542,25 @@ end
 --that only bash can muster: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
 --feed in stdin_contents right after that. worse-is-better at its finest.
-function ssh_bash(ip, script, stdin_contents, opt)
+function mm.ssh_bash(ip, script, stdin_contents, opt)
 	local s = '{\n'..script..'\n}; exit'..(stdin_contents or '')
-	return ssh(ip, {'bash', '-s'}, s, opt)
+	return mm.ssh(ip, {'bash', '-s'}, s, opt)
 end
 
 rowset.tasks = virtual_rowset(function(self, ...)
 
 	self.fields = {
-		{name = 'id', type = 'number', w = 20},
-		{name = 'pinned', type = 'bool'},
-		{name = 'status'},
+		{name = 'id'        , type = 'number', w = 20},
+		{name = 'pinned'    , type = 'bool'},
+		{name = 'status'    , },
 		{name = 'start_time', type = 'timestamp'},
-		{name = 'duration', type = 'number', decimals = 2, hint = 'Duration till last change in input, output or status'},
-		{name = 'command'},
-		{name = 'stdin', hidden = true, maxlen = 16*1024^2},
-		{name = 'out', hidden = true, maxlen = 16*1024^2},
-		{name = 'exit_code', type = 'number', w = 20},
-		{name = 'errors'},
+		{name = 'duration'  , type = 'number', decimals = 2, hint = 'Duration till last change in input, output or status'},
+		{name = 'script'    , },
+		{name = 'command'   , hidden = true},
+		{name = 'stdin'     , hidden = true, maxlen = 16*1024^2},
+		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
+		{name = 'exit_code' , type = 'number', w = 20},
+		{name = 'errors'    , },
 	}
 	self.pk = 'id'
 
@@ -547,6 +571,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 			task.status,
 			task.start_time,
 			task.duration,
+			task.script,
 			concat(task.cmd, ' '),
 			task.stdin,
 			concat(task.out),
@@ -605,7 +630,7 @@ local function checkout(task)
 end
 
 function mm.update_host_fingerprint(ip, machine)
-	local fp = checknostderr(exec({'ssh-keyscan', '-H', ip}, nil, {capture_stderr = false}))
+	local fp = checknostderr(mm.exec({'ssh-keyscan', '-H', ip}, nil, {capture_stderr = false}))
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
@@ -626,7 +651,7 @@ function cmd.update_host_fingerprint(machine)
 end
 
 function mm.get_machine_info(ip)
-		local stdout = checknostderr(ssh_bash(ip, [=[
+		local stdout = checknostderr(mm.ssh_bash(ip, [=[
 
 query() { which mysql >/dev/null && MYSQL_PWD=root mysql -u root -N -B -e "$@"; }
 
@@ -675,13 +700,13 @@ function cmd.machine_info(machine)
 end
 
 function mm.prepare_machine(machine, opt)
-	return checkout(ssh_bash(machine, [=[
+	return checkout(mm.ssh_bash(machine, [=[
 say() { echo -e "\n# $@\n" >&2; }
 
 say "Installing SSH public key for passwordless access"
 mkdir -p /root/.ssh
 cat << 'EOF' > /root/.ssh/authorized_keys
-]=]..mm.home_key_pub..[=[
+]=]..mm.mm_key_pub..[=[
 
 EOF
 chmod 400 /root/.ssh/authorized_keys
@@ -703,8 +728,9 @@ git push -u origin master
 EOF
 chmod +x $git_up
 
-say "Adding github.com's public key"
-cat << 'EOF' > /root/.ssh/known_hosts
+say "Adding github.com fingerprint to /root/.ssh/known_hosts (for pulling)"
+ssh-keygen -R github.com
+cat << 'EOF' >> /root/.ssh/known_hosts
 ]=]..mm.github_fingerprint..[=[
 
 EOF
@@ -715,7 +741,7 @@ git clone git@github.com:capr/multigit.git
 ln -sf /root/multigit/mgit /usr/local/bin/mgit
 
 ]=]..(mm.github_key and [=[
-say "Adding private key for pulling and pushing on github"
+say "Putting github.com private key in /root/.ssh/id_rsa (for pushing)"
 git config --global user.email "cosmin@allegory.ro"
 git config --global user.name "Cosmin Apreutesei"
 cat << 'EOF' > /root/.ssh/id_rsa
@@ -744,44 +770,63 @@ function cmd.prepare_machine(machine)
 	end)
 end
 
+--command: gen & update keys -------------------------------------------------
+
 function mm.update_keys(ip)
-	ssh_bash(ip, [=[
+	mm.ssh_bash(ip, [=[
 say() { echo "# $1." >&2; }
 
-say "Setting up ssh access"
+say "Adding mm public key to /root/.ssh/authorized_keys (for SSH access)"
 mkdir -p /root/.ssh
-cat << 'EOF' > /root/.ssh/authorized_keys
-]=]..mm.home_key_pub..[=[
+sed -i '/ mm/d' /root/.ssh/authorized_keys
+cat << 'EOF' >> /root/.ssh/authorized_keys
+]=]..load(mm.mm_key_file..'.new.pub')..[=[
 
 EOF
 chmod 400 /root/.ssh/authorized_keys
 
-say "Setting up github access"
-cat << 'EOF' > /root/.ssh/known_hosts
+say "Adding github.com fingerprint to /root/.ssh/known_hosts (for pulling)"
+ssh-keygen -R github.com
+cat << 'EOF' >> /root/.ssh/known_hosts
 ]=]..mm.github_fingerprint..[=[
 
 EOF
 chmod 400 /root/.ssh/known_hosts
 
+]=]..(mm.github_key and [=[
+say "Putting github.com private key in /root/.ssh/id_rsa (for pushing)"
 cat << 'EOF' > /root/.ssh/id_rsa
 ]=]..mm.github_key..[=[
 
 EOF
 chmod 400 /root/.ssh/id_rsa
+]=])..[=[
 
 ]=])
 end
 
-function mm.change_keys()
-	cp(mm.home_key_file    , mm.home_key_file    ..'.old')
-	cp(mm.home_key_pub_file, mm.home_key_pub_file..'.old')
-	os.execute(_('ssh-keygen -f %s -t rsa -b 2048 -C "home" -q -N ""', mm.home_key_file))
-	mm.home_key     = load(mm.home_key_file)
-	mm.home_key_pub = load(mm.home_key_pub_file)
-	for _,ip in each_row_vals'select public_ip from machine' do
-		mm.update_keys(ip)
+function mm.gen_mm_key()
+	rm(mm.mm_key_file..'.new')
+	rm(mm.mm_key_file..'.new.pub')
+	os.execute(_('ssh-keygen -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.mm_key_file..'.new'))
+	for _, ip, machine in each_row_vals'select public_ip, machine from machine' do
+		thread(function()
+			print('Updating keys for '..machine..'...')
+			mm.update_keys(ip)
+		end)
 	end
+	mv(mm.mm_key_file..'.new'    , mm.mm_key_file)
+	mv(mm.mm_key_file..'.new.pub', mm.mm_key_file..'.pub')
+	mm.mm_key_pub = load(mm.mm_key_file..'.pub')
 end
+
+function cmd.update_keys()
+	webb.run(function()
+		mm.gen_mm_key()
+	end)
+end
+
+--command: deploy ------------------------------------------------------------
 
 function mm.deploy(deploy)
 	local d = first_row([[
@@ -801,23 +846,58 @@ function action.deploy(deploy)
 	mm.deploy(deploy)
 end
 
---cmdline --------------------------------------------------------------------
-
 cmd.deploy = function(ip, deploy)
 	webb.run(function()
 		ip = machine_ip(ip)
-		ssh_bash(ip, [=[
+		mm.ssh_bash(ip, [=[
 
 ]=])
 	end)
 end
 
-function cmd.ssh(machine)
-	local ip = webb.run(function()
-		return cmdcheck(machine_ip(str_arg(machine)), 'ssh MACHINE')
+--cmdline --------------------------------------------------------------------
+
+function cmd.ls()
+	webb.run(function()
+		local to_lua = require'mysql_client'.to_lua
+		pqr(query({
+			compact=1,
+			field_attrs = {last_seen = {to_lua = glue.timeago}},
+		}, [[
+			select
+				machine,
+				public_ip,
+				unix_timestamp(last_seen) as last_seen,
+				cores,
+				ram_gb, ram_free_gb,
+				hdd_gb, hdd_free_gb,
+				cpu,
+				os_ver,
+				mysql_ver
+			from machine
+			order by pos, ctime
+		]]))
 	end)
-	local cmd = _('ssh -i home.key -o UserKnownHostsFile=%s root@%s', mm.known_hosts_file, ip)
-	return os.execute(cmd)
+end
+
+function cmd.ssh(machine, command)
+	webb.run(function()
+		local ip = cmdcheck(machine_ip(str_arg(machine)), 'ssh MACHINE')
+		mm.ssh(ip, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
+			nil, {capture_stdout = false, capture_stderr = false, nowait = true})
+	end)
+end
+
+function cmd.ssh_all(command)
+	webb.run(function()
+		for _, ip, machine in each_row_vals'select public_ip, machine from machine' do
+			thread(function()
+				print('Executing on '..machine..'...')
+				mm.ssh(ip, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
+					nil, {capture_stdout = false, capture_stderr = false, nowait = true})
+			end)
+		end
+	end)
 end
 
 function cmd.update()
