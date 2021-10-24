@@ -6,16 +6,39 @@ local proc = require'proc'
 local sock = require'sock'
 local xapp = require'xapp'
 
-local mm = xapp(daemon(...))
+local mm = daemon(...)
+if Linux then
+	var_dir = _('/root/%s-var', app_name)
+end
+mm:init()
+xapp(mm)
+
+--tools ----------------------------------------------------------------------
+
+function mm.keyfile(machine, suffix, ext)
+	local file = 'mm'..(machine and '-'..machine or '')
+		..(suffix and '.'..suffix or '')..'.'..(ext or 'key')
+	return indir(var_dir, file)
+end
+
+function mm.pubkey(machine, prefix)
+	return exec('ssh-keygen -y -f "'..mm.keyfile(machine, prefix)..'"')
+end
+
+function mm.gen_ppk(machine, suffix)
+	local key = mm.keyfile(machine, suffix)
+	local ppk = mm.keyfile(machine, suffix, 'ppk')
+	os.execute(_('winscp.com /keygen %s /output=%s', key, ppk))
+end
+
+function cmd.gen_ppk()
+	mm.gen_ppk()
+end
 
 --config ---------------------------------------------------------------------
 
 mm.known_hosts_file  = indir(var_dir, 'known_hosts')
-mm.mm_key_file       = indir(var_dir, 'mm.key')
-mm.github_key_file   = indir(var_dir, 'mm-github.key')
-
-mm.mm_key            = checkexists(mm.mm_key_file)
-mm.mm_key_pub        = load(mm.mm_key_file..'.pub')
+mm.github_key_file   = indir(var_dir, 'mm_github.key')
 mm.github_key        = load(mm.github_key_file, false)
 
 config('http_addr', '*')
@@ -31,14 +54,6 @@ config('db_pass', 'root')
 config('var_dir', '.')
 config('session_secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('pass_salt'     , 'is9v09z-@^%@s!0~ckl0827ScZpx92kldsufy')
-
-if not ffi.abi'win' then
-	--because stupid ssh wants 0600 on mm.key and we can't do that with vboxfs.
-	local f = '/root/mm.key'
-	cp(mm.mm_key_file, f)
-	mm.mm_key_file = f
-	chmod(f, '0600')
-end
 
 mm.github_fingerprint = [[
 github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
@@ -67,6 +82,7 @@ function mm.install()
 		public_ip   $name,
 		local_ip    $name,
 		fingerprint $b64key,
+		ssh_key     $b64key,
 		last_seen   timestamp,
 		os_ver      $name,
 		mysql_ver   $name,
@@ -194,9 +210,10 @@ html[[
 			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
 				<x-bare-nav id=config_nav rowset_name=config></x-bare-nav>
 				<x-form nav_id=config_nav id=config_form>
-					<x-textedit col=mm_key_pub infomode=under
-						info="This is the SSH key used to log in as root on all machines."></x-textedit>
-					<x-button danger action_name=gen_mm_key_button_action style="grid-area: regen"
+					<x-textarea rows=8 col=mm_pub infomode=under
+						info="This is the SSH key used to log in as root on all machines.">
+					</x-textarea>
+					<x-button danger action_name=update_keys_button_action style="grid-area: regen"
 						text="Generate new key & upload it to all machines" icon="fa fa-key">
 					</x-button>
 				</x-form>
@@ -282,8 +299,8 @@ function deploy_button_action() {
 	this.load(['', 'deploy', deploy])
 }
 
-function gen_mm_key_button_action() {
-	this.load(['', 'gen_mm_key'])
+function update_keys_button_action() {
+	this.load(['', 'update-keys'])
 }
 
 ]]
@@ -369,12 +386,12 @@ rowset.config = virtual_rowset(function(self, ...)
 
 	self.fields = {
 		{name = 'config_id', type = 'number'},
-		{name = 'mm_key_pub', text = 'MM\'s Public Key'},
+		{name = 'mm_pub', text = 'MM\'s Public Key'},
 	}
 	self.pk = 'config_id'
 
 	function self:load_rows(rs, params)
-		local row = {1, mm.mm_key_pub}
+		local row = {1, mm.pubkey()}
 		rs.rows = {row}
 	end
 
@@ -382,122 +399,82 @@ end)
 
 --async exec -----------------------------------------------------------------
 
-mm.tasks = {}
-mm.tasks_by_id = {}
-local last_task_id = 0
-local task_events_thread
-
 function mm.exec(cmd, opt)
 	opt = opt or empty
-
-	last_task_id = last_task_id + 1
-	local task = {
-		id = last_task_id,
-		cmd = cmd,
-		start_time = time(),
-		duration = 0,
-		status = 'new',
-		errors = {},
-		stdin = opt.stdin,
-		script = opt.script,
-	}
-	mm.tasks[task] = true
-	mm.tasks_by_id[task.id] = task
-
-	local function task_changed()
-		task.duration = time() - task.start_time
-		rowset_changed'tasks'
-	end
 
 	local capture_stdout = opt.capture_stdout ~= false
 	local capture_stderr = opt.capture_stderr ~= false
 
+	local task = mm.task(opt)
+
 	local p, err = proc.exec{
 		cmd = cmd,
 		async = true,
+		autokill = true,
 		stdout = capture_stdout,
 		stderr = capture_stderr,
 		stdin = opt.stdin and true or false,
 	}
 
 	if not p then
-		add(task.errors, 'exec error: '..err)
-		logerror('mm', 'exec', err)
-		task_changed()
+		task:logerror('exec', '%s', err)
 		return
 	end
 
-	task.status = 'running'
-	task.p = p
+	task.process = p
+	task:setstatus'running'
 
 	if p.stdin then
 		thread(function()
 			dbg('mm', 'execin', '%s', opt.stdin)
 			local ok, err = p.stdin:write(opt.stdin)
 			if not ok then
-				add(task.errors, 'stdin write error: '..err)
-				task_changed()
+				task:logerror('stdinwr', '%s', err)
 			end
 			p.stdin:close() --signal eof
 		end)
 	end
 
-	task.out = {} --combined stdout & stderr
-
-	task.stdout = {}
 	if p.stdout then
 		thread(function()
 			local buf, sz = u8a(4096), 4096
 			while true do
 				local len, err = p.stdout:read(buf, sz)
 				if not len then
-					add(task.errors, 'stdout read error: '..err)
+					task:logerror('stdoutrd', '%s', err)
 					break
 				elseif len == 0 then
 					break
 				end
 				local s = ffi.string(buf, len)
-				add(task.stdout, s)
-				add(task.out, s)
-				task_changed()
+				task:out(s)
 			end
 			p.stdout:close()
-			task_changed()
 		end)
 	end
 
-	task.stderr = {}
 	if p.stderr then
 		thread(function()
 			local buf, sz = u8a(4096), 4096
 			while true do
 				local len, err = p.stderr:read(buf, sz)
 				if not len then
-					add(task.errors, 'stderr read error: '..err)
+					task:logerror('stderrrd', '%s', err)
 					break
 				elseif len == 0 then
 					break
 				end
 				local s = ffi.string(buf, len)
-				add(task.stderr, s)
-				add(task.out, s)
-				task_changed()
+				task:err(s)
 			end
 			p.stderr:close()
-			task_changed()
 		end)
 	end
 
-	task_changed()
 	local exit_code, err = p:wait()
-	if exit_code then
-		task.exit_code = exit_code
-	else
-		add(task.errors, 'wait error: '..err)
+	if not exit_code then
+		task:logerror('procwait', '%s', err)
 	end
-	task.end_time = time()
-	task.status = 'finished'
-	task_changed()
 	while not (
 		    (not p.stdin or p.stdin:closed())
 		and (not p.stdout or p.stdout:closed())
@@ -506,45 +483,36 @@ function mm.exec(cmd, opt)
 		sleep(.1)
 	end
 	p:forget()
-	if #task.out > 0 then
-		dbg('mm', 'execout', '%s', concat(task.out))
-	end
-	local function free_task()
-		mm.tasks[task] = nil
-		mm.tasks_by_id[task.id] = nil
-		task_changed()
-	end
-	if opt and opt.nowait or cx().fake then
-		free_task()
+	task:finish(exit_code)
+	if opt and cx().fake then
+		task:free()
 	else
 		thread(function()
-			task_changed()
 			sleep(10)
 			while task.pinned do
 				sleep(1)
 			end
-			free_task()
+			task:free()
 		end)
 	end
 
 	return task
 end
 
-function machine_ip(machine)
-	if not machine then return nil, 'Machine required' end
+function mm.ip(machine)
+	local machine = checkarg(str_arg(machine), 'machine required')
 	local ip = first_row('select public_ip from machine where machine = ?', machine)
-	if ip then return ip end
-	return nil, 'Machine not found: '..machine
+	return checkfound(ip, 'machine not found')
 end
 
-function mm.ssh(ip, args, opt)
+function mm.ssh(machine, args, opt)
 	return mm.exec(extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
 			'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
 			'-o', 'ConnectTimeout=2',
-			'-i', mm.mm_key_file,
-			'root@'..ip,
+			'-i', mm.keyfile(machine),
+			'root@'..mm.ip(machine),
 		}, args), opt)
 end
 
@@ -553,11 +521,88 @@ end
 --that only bash can muster: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
 --feed in stdin right after that. worse-is-better at its finest.
-function mm.ssh_bash(ip, script, opt)
+function mm.ssh_bash(machine, script, opt)
 	opt = opt or {}
 	opt.stdin = '{\n'..script..'\n}; exit'..(opt.stdin or '')
-	return mm.ssh(ip, {'bash', '-s'}, opt)
+	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
+
+--tasks ----------------------------------------------------------------------
+
+mm.tasks = {}
+mm.tasks_by_id = {}
+local last_task_id = 0
+local task_events_thread
+
+local task = {}
+
+function mm.task(opt)
+	last_task_id = last_task_id + 1
+	local self = inherit({
+		id = last_task_id,
+		cmd = cmd,
+		start_time = time(),
+		duration = 0,
+		status = 'new',
+		errors = {},
+		stdin = opt.stdin,
+		script = opt.script,
+		_out = {},
+		_err = {},
+		_outerr = {},
+	}, task)
+	mm.tasks[self] = true
+	mm.tasks_by_id[self.id] = self
+	return self
+end
+
+function task:free()
+	mm.tasks[self] = nil
+	mm.tasks_by_id[self.id] = nil
+	rowset_changed'tasks'
+end
+
+function task:changed()
+	self.duration = (self.end_time or time()) - self.start_time
+	rowset_changed'tasks'
+end
+
+function task:setstatus(s, exit_code)
+	self.status = s
+	self:changed()
+end
+
+function task:finish(exit_code)
+	self.end_time = time()
+	self.exit_code = exit_code
+	self:setstatus'finished'
+	local s = self:stdouterr()
+	if s ~= '' then
+		dbg('mm', 'taskout', '%d,%s\n%s', self.id, self.script, s)
+	end
+end
+
+function task:logerror(event, ...)
+	add(self.errors, _(...))
+	logerror('mm', event, ...)
+	self:changed()
+end
+
+function task:out(s)
+	add(self._out, s)
+	add(self._outerr, s)
+	self:changed()
+end
+
+function task:err(s)
+	add(self._err, s)
+	add(self._outerr, s)
+	self:changed()
+end
+
+function task:stdout    () return concat(self._out) end
+function task:stderr    () return concat(self._err) end
+function task:stdouterr () return concat(self._outerr) end
 
 rowset.tasks = virtual_rowset(function(self, ...)
 
@@ -567,7 +612,8 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		{name = 'script'    , },
 		{name = 'status'    , },
 		{name = 'start_time', type = 'timestamp'},
-		{name = 'duration'  , type = 'number', decimals = 2, hint = 'Duration till last change in input, output or status'},
+		{name = 'duration'  , type = 'number', decimals = 2,  w = 20,
+			hint = 'Duration till last change in input, output or status'},
 		{name = 'command'   , hidden = true},
 		{name = 'stdin'     , hidden = true, maxlen = 16*1024^2},
 		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
@@ -586,7 +632,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 			task.duration,
 			concat(task.cmd, ' '),
 			task.stdin,
-			concat(task.out),
+			task:stdouterr(),
 			task.exit_code,
 			concat(task.errors, '\n'),
 		}
@@ -613,7 +659,22 @@ rowset.tasks = virtual_rowset(function(self, ...)
 
 end)
 
---commands -------------------------------------------------------------------
+--command helpers ------------------------------------------------------------
+
+local function checknostderr(task)
+	assert(task.status == 'finished', concat(task.errors, '\n'))
+	local stderr = task:stderr()
+	local stdout = task:stdout()
+	check500(stderr == '', stderr)
+	return stdout
+end
+
+local function checkout(task)
+	assert(task.status == 'finished', concat(task.errors, '\n'))
+	return task:stdouterr()
+end
+
+--command: update_host_fingerprint -------------------------------------------
 
 function mm.gen_known_hosts_file()
 	local t = {}
@@ -625,46 +686,30 @@ function mm.gen_known_hosts_file()
 	]] do
 		add(t, fp)
 	end
-	save(concat(t, '\n'), mm.known_hosts_file)
+	save(mm.known_hosts_file, concat(t, '\n'))
 end
 
-local function checknostderr(task)
-	assert(task.status == 'finished', concat(task.errors, '\n'))
-	local stderr = concat(task.stderr)
-	local stdout = concat(task.stdout)
-	check500(stderr == '', stderr)
-	return stdout
-end
-
-local function checkout(task)
-	assert(task.status == 'finished', concat(task.errors, '\n'))
-	return concat(task.out)
-end
-
-function mm.update_host_fingerprint(ip, machine)
-	local fp = checknostderr(mm.exec({'ssh-keyscan', '-H', ip},
+function mm.update_host_fingerprint(machine)
+	local fp = checknostderr(mm.exec({'ssh-keyscan', '-H', mm.ip(machine)},
 		{script = 'get_host_fingerprint', capture_stderr = false}))
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
 
 function action.update_host_fingerprint(machine)
-	local machine = str_arg(machine)
-	local ip = checkfound(machine_ip(machine), 'machine not found')
-	mm.update_host_fingerprint(ip, machine)
+	mm.update_host_fingerprint(machine)
 	out'Fingerprint updated for '; out(machine)
 end
 
 function cmd.update_host_fingerprint(machine)
-	webb.run(function()
-		local machine = str_arg(machine)
-		local ip = cmdcheck(machine_ip(machine), 'update-host-fingerprint MACHINE')
-		mm.update_host_fingerprint(ip, machine)
-	end)
+	mm.update_host_fingerprint(machine)
+	out'Fingerprint updated for '; out(machine)
 end
 
-function mm.get_machine_info(ip)
-		local stdout = checknostderr(mm.ssh_bash(ip, [=[
+--command: update_machine_info -----------------------------------------------
+
+function mm.get_machine_info(machine)
+		local stdout = checknostderr(mm.ssh_bash(machine, [=[
 
 query() { which mysql >/dev/null && MYSQL_PWD=root mysql -u root -N -B -e "$@"; }
 
@@ -688,8 +733,8 @@ echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 	return t
 end
 
-function mm.update_machine_info(ip, machine)
-	t = assert(mm.get_machine_info(ip))
+function mm.update_machine_info(machine)
+	t = assert(mm.get_machine_info(machine))
 	t['machine:old'] = machine
 	assert(update_row('machine', t, [[
 		os_ver
@@ -706,26 +751,24 @@ function mm.update_machine_info(ip, machine)
 end
 
 function action.update_machine_info(machine)
-	local ip = checkfound(machine_ip(str_arg(machine)))
-	mm.update_machine_info(ip, machine)
+	mm.update_machine_info(machine)
 end
 
 function cmd.update_machine_info(machine)
-	webb.run(function()
-		local machine = str_arg(machine)
-		local ip = cmdcheck(machine_ip(machine), 'info MACHINE')
-		mm.update_machine_info(ip, machine)
-	end)
+	mm.update_machine_info(machine)
 end
 
+--command: prepare_machine ---------------------------------------------------
+
 function mm.prepare_machine(machine, opt)
-	return checkout(mm.ssh_bash(machine, [=[
+	cp(mm.keyfile(), mm.keyfile(machine))
+	checkout(mm.ssh_bash(machine, [=[
 say() { echo -e "\n# $@\n" >&2; }
 
 say "Installing SSH public key for passwordless access"
 mkdir -p /root/.ssh
 cat << 'EOF' > /root/.ssh/authorized_keys
-]=]..mm.mm_key_pub..[=[
+]=]..mm.pubkey()..[=[
 
 EOF
 chmod 400 /root/.ssh/authorized_keys
@@ -777,29 +820,27 @@ mysql -e "alter user 'root'@'localhost' identified by 'root'; flush privileges;"
 end
 
 function action.prepare_machine(machine)
-	local ip = checkfound(machine_ip(str_arg(machine)))
-	mm.prepare_machine(ip)
+	mm.prepare_machine(machine)
 	out(_('Machine %s prepared', machine))
 end
 
 function cmd.prepare_machine(machine)
-	webb.run(function()
-		local ip = cmdcheck(machine_ip(str_arg(machine)), 'prepare-machine MACHINE')
-		mm.prepare_machine(ip, {capture_stdout = false, capture_stderr = false})
-	end)
+	mm.prepare_machine(machine, {capture_stdout = false, capture_stderr = false})
 end
 
 --command: gen & update keys -------------------------------------------------
 
-function mm.update_keys(ip)
-	mm.ssh_bash(ip, [=[
+function mm.update_keys_on(machine)
+	note('mm', 'updkeys', '%s', machine)
+	local pubkey = mm.pubkey()
+	local stored_pubkey = mm.ssh_bash(machine, [=[
 say() { echo "# $1." >&2; }
 
 say "Adding mm public key to /root/.ssh/authorized_keys (for SSH access)"
 mkdir -p /root/.ssh
 sed -i '/ mm/d' /root/.ssh/authorized_keys
 cat << 'EOF' >> /root/.ssh/authorized_keys
-]=]..load(mm.mm_key_file..'.new.pub')..[=[
+]=]..pubkey..[=[
 
 EOF
 chmod 400 /root/.ssh/authorized_keys
@@ -821,28 +862,36 @@ EOF
 chmod 400 /root/.ssh/id_rsa
 ]=])..[=[
 
+cat /root/.ssh/authorized_keys | grep 'mm$'
+
 ]=], {script = 'update_keys'})
+	if stored_pubkey:trim() ~= pubkey then
+		--TODO:
+		error'public key not updated'
+		return
+	end
+	cp(mm.keyfile(), mm.keyfile(machine))
 end
 
-function mm.gen_mm_key()
-	rm(mm.mm_key_file..'.new')
-	rm(mm.mm_key_file..'.new.pub')
-	os.execute(_('ssh-keygen -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.mm_key_file..'.new'))
-	for _, ip, machine in each_row_vals'select public_ip, machine from machine' do
+function mm.update_keys()
+	rm(mm.keyfile())
+	os.execute(_('ssh-keygen -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile()))
+	rm(mm.keyfile()..'.pub') --we'll compute it every time.
+	mm.gen_ppk()
+	rowset_changed'config'
+	for _, machine in each_row_vals'select machine from machine' do
 		thread(function()
-			print('Updating keys for '..machine..'...')
-			mm.update_keys(ip)
+			mm.update_keys_on(machine)
 		end)
 	end
-	mv(mm.mm_key_file..'.new'    , mm.mm_key_file)
-	mv(mm.mm_key_file..'.new.pub', mm.mm_key_file..'.pub')
-	mm.mm_key_pub = load(mm.mm_key_file..'.pub')
+end
+
+function action.update_keys()
+	mm.update_keys()
 end
 
 function cmd.update_keys()
-	webb.run(function()
-		mm.gen_mm_key()
-	end)
+	mm.update_keys()
 end
 
 --command: deploy ------------------------------------------------------------
@@ -865,58 +914,55 @@ function action.deploy(deploy)
 	mm.deploy(deploy)
 end
 
-cmd.deploy = function(ip, deploy)
-	webb.run(function()
-		ip = machine_ip(ip)
-		mm.ssh_bash(ip, [=[
+cmd.deploy = function(machine, deploy)
+	mm.ssh_bash(machine, [=[
 
 ]=], {script = 'deploy'})
-	end)
 end
 
---cmdline --------------------------------------------------------------------
+--cmdline tools --------------------------------------------------------------
 
 function cmd.ls()
-	webb.run(function()
-		local to_lua = require'mysql_client'.to_lua
-		pqr(query({
-			compact=1,
-			field_attrs = {last_seen = {to_lua = glue.timeago}},
-		}, [[
-			select
-				machine,
-				public_ip,
-				unix_timestamp(last_seen) as last_seen,
-				cores,
-				ram_gb, ram_free_gb,
-				hdd_gb, hdd_free_gb,
-				cpu,
-				os_ver,
-				mysql_ver
-			from machine
-			order by pos, ctime
-		]]))
-	end)
+	local to_lua = require'mysql_client'.to_lua
+	pqr(query({
+		compact=1,
+		field_attrs = {last_seen = {to_lua = glue.timeago}},
+	}, [[
+		select
+			machine,
+			public_ip,
+			unix_timestamp(last_seen) as last_seen,
+			cores,
+			ram_gb, ram_free_gb,
+			hdd_gb, hdd_free_gb,
+			cpu,
+			os_ver,
+			mysql_ver
+		from machine
+		order by pos, ctime
+]]))
 end
 
 function cmd.ssh(machine, command)
-	webb.run(function()
-		local ip = cmdcheck(machine_ip(str_arg(machine)), 'ssh MACHINE')
-		mm.ssh(ip, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
-			{capture_stdout = false, capture_stderr = false, nowait = true})
-	end)
+	mm.ssh(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
+		{capture_stdout = false, capture_stderr = false})
 end
 
 function cmd.ssh_all(command)
-	webb.run(function()
-		for _, ip, machine in each_row_vals'select public_ip, machine from machine' do
-			thread(function()
-				print('Executing on '..machine..'...')
-				mm.ssh(ip, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
-					{capture_stdout = false, capture_stderr = false, nowait = true})
-			end)
-		end
-	end)
+	for _, machine in each_row_vals'select machine from machine' do
+		thread(function()
+			print('Executing on '..machine..'...')
+			mm.ssh(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
+				{capture_stdout = false, capture_stderr = false})
+		end)
+	end
+end
+
+--NOTE: make a putty sessin called `mm` where you set the window size,
+--uncheck "warn on close" and whatever else you need to make putty comfortable.
+function cmd.putty(machine)
+	local ip = cmdcheck(mm.ip(str_arg(machine)), 'ssh MACHINE')
+	proc.exec('putty -load mm -i '..mm.keyfile():gsub('%.key$', '.ppk')..' root@'..ip):forget()
 end
 
 return mm:run(...)
