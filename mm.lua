@@ -167,6 +167,9 @@ body[theme=dark] .header {
 
 .x-textarea[console] {
 	opacity: 1;
+	white-space: pre;
+	overflow-wrap: normal;
+	overflow-x: scroll;
 }
 
 #config_form.maxcols1 {
@@ -571,16 +574,15 @@ end
 
 mm.script = {} --{name -> script}
 
-function mm.bash_script(s, env)
+function mm.bash_script(s, env, included)
 	if type(s) == 'function' then
 		s = s(env)
 	end
 	s = s:gsub('\r\n', '\n')
-	local included = {}
 	local function include(s)
 		if included[s] then return '' end
 		included[s] = true
-		return mm.bash_script(assertf(mm.script[s], 'no script: %s', s))
+		return mm.bash_script(assertf(mm.script[s], 'no script: %s', s), nil, included)
 	end
 	s = s:gsub( '^%s*#include ([_%w]+)', include)
 	s = s:gsub('\n%s*#include ([_%w]+)', include)
@@ -621,7 +623,7 @@ function mm.ssh_bash(machine, script, opt)
 		QUIET = nil, --not logging.verbose or nil,
 		YES = true,
 	}, opt.env)
-	opt.stdin = '{\n'..mm.bash_script(script, env)..'\n}; exit'..(opt.stdin or '')
+	opt.stdin = '{\n'..mm.bash_script(script, env, {})..'\n}; exit'..(opt.stdin or '')
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
 
@@ -997,11 +999,11 @@ function mm.machine_prepare(machine)
 #include die
 
 say "Installing Ubuntu packages..."
-apt-get -y update
-apt-get -y install htop mc mysql-server
+run apt-get -y update
+run apt-get -y install htop mc mysql-server
 
 say "Resetting mysql root password..."
-mysql -e "alter user 'root'@'localhost' identified by 'root'; flush privileges;"
+run mysql -e "alter user 'root'@'localhost' identified by 'root'; flush privileges;"
 
 #include github_update_key
 
