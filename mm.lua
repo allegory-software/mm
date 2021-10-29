@@ -6,12 +6,10 @@ local proc = require'proc'
 local sock = require'sock'
 local xapp = require'xapp'
 
-local mm = daemon(...)
 if Linux then
-	var_dir = _('/root/%s-var', app_name)
+	var_dir = '/root/mm-var'
 end
-mm:init()
-xapp(mm)
+local mm = xapp(daemon'mm')
 
 --tools ----------------------------------------------------------------------
 
@@ -391,9 +389,18 @@ rowset.machines = sql_rowset{
 	end,
 	update_row = function(self, row)
 		update_row('machine', row, 'machine public_ip local_ip admin_page pos')
+		local m1 = row.machine
+		local m0 = row['machine:old']
+		if m1 and m1 ~= m0 then
+			if exists(mm.keyfile(m0)) then mv(mm.keyfile(m0), mm.keyfile(m1)) end
+			if exists(mm.ppkfile(m0)) then mv(mm.ppkfile(m0), mm.ppkfile(m1)) end
+		end
 	end,
 	delete_row = function(self, row)
 		delete_row('machine', row, 'machine')
+		local m0 = row['machine:old']
+		rm(mm.keyfile(m0))
+		rm(mm.ppkfile(m0))
 	end,
 }
 
@@ -411,11 +418,6 @@ rowset.deploys = sql_rowset{
 	]],
 	pk = 'deploy',
 	field_attrs = {
-		machine = {
-			--lookup_rowset_name = 'machines',
-			--lookup_col = 'machine',
-			--display_col = 'machine',
-		},
 	},
 	insert_row = function(self, row)
 		insert_row('deploy', row, 'deploy machine repo version pos')
@@ -579,19 +581,30 @@ function mm.bash_script(s, env, included)
 		s = s(env)
 	end
 	s = s:gsub('\r\n', '\n')
+	local function include_force(s, included)
+		return mm.bash_script(assertf(mm.script[s], 'no script: %s', s), nil, included)
+	end
+	local function include_force_lf(s, included)
+		return '\n'..include_force(s, included)
+	end
 	local function include(s)
 		if included[s] then return '' end
 		included[s] = true
-		return mm.bash_script(assertf(mm.script[s], 'no script: %s', s), nil, included)
+		return include_force(s, included)
 	end
-	s = s:gsub( '^%s*#include ([_%w]+)', include)
-	s = s:gsub('\n%s*#include ([_%w]+)', include)
+	local function include_lf(s)
+		return '\n'..include(s)
+	end
+	s = s:gsub( '^[ \t]*#include ([_%w]+)', include)
+	s = s:gsub('\n[ \t]*#include ([_%w]+)', include_lf)
+	s = s:gsub( '^[ \t]*#include! ([_%w]+)', include_force)
+	s = s:gsub('\n[ \t]*#include! ([_%w]+)', include_force_lf)
 	if env then
 		local t = {}
 		for k,v in sortedpairs(env) do
 			t[#t+1] = k..'=\''..tostring(v)..'\''
 		end
-		s = concat(t, '\n')..'\n\n'..s
+		s = concat(t, '\n'):outdent()..'\n\n'..s
 	end
 	return s
 end
@@ -771,6 +784,7 @@ end
 
 function mm.machine_get_info(machine)
 		local stdout = mm.ssh_bash(machine, [=[
+
 #include die
 
 echo "os_ver        $(lsb_release -sd)"
@@ -817,13 +831,13 @@ cmd.machine_update_info = action.machine_update_info
 
 function mm.gen_known_hosts_file()
 	local t = {}
-	for i, ip, fp in each_row_vals[[
+	for i, ip, s in each_row_vals[[
 		select public_ip, fingerprint
 		from machine
 		where fingerprint is not null
 		order by pos, ctime
 	]] do
-		add(t, fp)
+		add(t, s)
 	end
 	save(mm.known_hosts_file, concat(t, '\n'))
 end
@@ -883,6 +897,7 @@ function mm.ssh_update_key(machine)
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.pubkey()
 	local stored_pubkey = mm.ssh_bash(machine, [=[
+
 #include die
 
 say "Adding mm public key to /root/.ssh/authorized_keys (for SSH access)..."
@@ -950,6 +965,7 @@ cmd.ssh_check_key = action.ssh_check_key
 
 mm.script.github_update_key = function()
 	return [=[
+
 #include die
 
 say "Adding github.com host fingerprint (for pulling)..."
@@ -980,6 +996,7 @@ cat << 'EOF' > /root/.ssh/id_rsa
 
 EOF
 run chmod 400 /root/.ssh/id_rsa
+
 ]=])
 end
 
@@ -996,6 +1013,7 @@ end
 
 function mm.machine_prepare(machine)
 	mm.ssh_bash(machine, [=[
+
 #include die
 
 say "Installing Ubuntu packages..."
@@ -1021,6 +1039,7 @@ cmd.machine_prepare = action.machine_prepare
 function mm.deploy(deploy)
 	local d = first_row([[
 		select
+			d.machine,
 			d.repo,
 			d.version,
 			m.public_ip
@@ -1030,6 +1049,31 @@ function mm.deploy(deploy)
 		where
 			deploy = ?
 	]], deploy)
+	mm.ssh_bash(d.machine, [[
+
+#include die
+
+as_deploy() { run sudo -u $DEPLOY -- bash -s; }
+
+run useradd -m $DEPLOY
+must cd /home/$DEPLOY
+
+must rm -rf mgit
+must git clone git@github.com:capr/multigit.git mgit
+must rm -rf bin/mgit
+must mkdir -p bin
+must ln -sf /home/$DEPLOY/mgit/mgit bin/mgit
+
+must rm -rf app
+must mkdir -p app/.mgit
+must cd app
+must ../bin/mgit clone $REPO
+must ../bin/mgit clone
+
+must cd ..
+must chown $DEPLOY:$DEPLOY -R .
+
+]], {env = {DEPLOY = deploy, REPO = d.repo}})
 end
 
 function action.deploy(deploy)
