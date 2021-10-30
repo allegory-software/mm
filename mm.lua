@@ -1039,13 +1039,18 @@ end
 
 function mm.machine_prepare(machine)
 	mm.ssh_bash('machine_prepare', machine, [=[
+
 		#include utils
+
 		ubuntu_install_packages htop mc mysql-server
+
 		git_install_git_up
 		git_config_user mm@allegory.ro "Many Machines"
 		ssh_update_host_fingerprint github.com "$github_fingerprint"
 		ssh_update_host_key github.com mm_github "$github_key"
+
 		mysql_update_password localhost root root
+
 	]=], {
 		github_fingerprint = mm.github_fingerprint,
 		github_key = mm.github_key,
@@ -1075,14 +1080,17 @@ function mm.deploy(deploy)
 	]], deploy)
 	mm.ssh_bash('deploy', d.machine, [[
 
-#include die
+		#include die
 
-run useradd -m $DEPLOY
-must cd /home/$DEPLOY
+		must useradd -m $DEPLOY
+		must cd /home/$DEPLOY
 
-must git clone $REPO install
-must cd install
-run sudo -E -u $DEPLOY -- bash -c ./install
+		must run sudo -u $DEPLOY git clone $REPO install
+		must cd install
+		run sudo -u $DEPLOY \
+			MACHINE="$MACHINE" \
+			DEPLOY="$DEPLOY" \
+				-- ./install
 
 ]], {DEPLOY = deploy, REPO = d.repo})
 end
