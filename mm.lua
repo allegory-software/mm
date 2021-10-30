@@ -5,6 +5,7 @@ require'xmodule'
 local proc = require'proc'
 local sock = require'sock'
 local xapp = require'xapp'
+local mustache = require'mustache'
 
 if Linux then
 	var_dir = '/root/mm-var'
@@ -30,7 +31,7 @@ end
 function mm.ssh_gen_ppk(machine, suffix)
 	local key = mm.keyfile(machine, suffix)
 	local ppk = mm.ppkfile(machine, suffix)
-	exec(_('winscp.com /keygen %s /output=%s', key, ppk))
+	exec('winscp.com /keygen %s /output=%s', key, ppk)
 end
 cmd.ssh_gen_ppk = mm.ssh_gen_ppk
 
@@ -60,20 +61,11 @@ github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXY
 
 --database -------------------------------------------------------------------
 
-local function cmdcheck(s, usage)
-	if not s then
-		cmd.help(usage)
-		os.exit(1)
-	end
-	return s
-end
-
 function mm.install()
 
-	auth_create_tables()
+	create_schema()
 
-	drop_table'deploy'
-	drop_table'machine'
+	auth_create_tables()
 
 	query[[
 	$table machine (
@@ -98,35 +90,22 @@ function mm.install()
 	]]
 
 	query[[
-	$table repo (
-
-	);
-	]]
-
-	query[[
 	$table deploy (
 		deploy      $strpk,
 		machine     $strid not null, $fk(deploy, machine),
 		repo        $url not null,
+
 		version     $name not null,
 		status      $name,
 		pos         $pos
 	);
 	]]
 
-	insert_row('machine', {
-		machine = 'sp-test',
-		local_ip = '10.0.0.20',
-	}, 'machine local_ip')
-
-	insert_row('machine', {
-		machine = 'sp-prod',
-		public_ip = '45.13.136.150',
-	}, 'machine public_ip')
-
 end
 
---admin ui -------------------------------------------------------------------
+cmd.install = mm.install
+
+--admin web UI ---------------------------------------------------------------
 
 mm.title = 'Many Machines'
 --mm.font = 'opensans'
@@ -447,13 +426,13 @@ end)
 
 --async exec -----------------------------------------------------------------
 
-function mm.exec(cmd, opt)
+function mm.exec(task_name, cmd, opt)
 	opt = opt or empty
 
 	local capture_stdout = opt.capture_stdout ~= false
 	local capture_stderr = opt.capture_stderr ~= false
 
-	local task = mm.task(opt)
+	local task = mm.task(task_name, opt)
 
 	local p, err = proc.exec{
 		cmd = cmd,
@@ -561,8 +540,8 @@ function mm.ip(machine)
 	return checkfound(ip, 'machine not found')
 end
 
-function mm.ssh(machine, args, opt)
-	return mm.exec(extend({
+function mm.ssh(task_name, machine, args, opt)
+	return mm.exec(task_name, extend({
 			'ssh',
 			'-o', 'BatchMode=yes',
 			'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
@@ -574,15 +553,20 @@ end
 
 --remote bash scripts --------------------------------------------------------
 
-mm.script = {} --{name -> script}
+mm.script = {} --{name->script}
 
-function mm.bash_script(s, env, included)
+function mm.bash_preprocess(vars)
+	return mustache.render(s, vars, nil, nil, nil, nil, proc.esc_unix)
+end
+
+function mm.bash_script(s, env, pp_env, included)
 	if type(s) == 'function' then
 		s = s(env)
 	end
 	s = s:gsub('\r\n', '\n')
 	local function include_force(s, included)
-		return mm.bash_script(assertf(mm.script[s], 'no script: %s', s), nil, included)
+		local s = assertf(mm.script[s], 'no script: %s', s)
+		return mm.bash_script(s, nil, mustache_vars, included)
 	end
 	local function include_force_lf(s, included)
 		return '\n'..include_force(s, included)
@@ -602,42 +586,31 @@ function mm.bash_script(s, env, included)
 	if env then
 		local t = {}
 		for k,v in sortedpairs(env) do
-			t[#t+1] = k..'=\''..tostring(v)..'\''
+			t[#t+1] = k..'='..proc.esc_unix(tostring(v))
 		end
 		s = concat(t, '\n'):outdent()..'\n\n'..s
 	end
-	return s
+	if pp_env then
+		return mm.bash_preprocess(s, pp_env)
+	else
+		return s
+	end
 end
-
---die: basic vocabulary for flow control and progress/error reporting.
---these functions are influenced by QUIET, DEBUG and YES env vars.
-mm.script.die = [[
-say()   { [ "$QUIET" ] || echo "$@" >&2; }
-error() { say -n "ERROR: "; say "$@"; return 1; }
-die()   { echo -n "EXIT: " >&2; echo "$@" >&2; exit 1; }
-debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
-run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
-quiet() { debug -n "EXEC: $@ "; "$@" >&2; local ret=$?; debug "[$ret]"; return $ret; }
-must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
-hold()  { [ $# -gt 0 ] && say "$@"; [ "$YES$QUIET" ] && return; echo -n "Press ENTER to continue, or ^C to quit."; read; }
-query() { MYSQL_PWD=root run mysql -u root -N -B -e "$@"; }
-]]
 
 --passing both the script and the script's expected stdin contents through
 --ssh's stdin at the same time is only possible due to a ridiculous behavior
 --that only bash could have: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
 --feed in stdin right after that. worse-is-better at its finest.
-function mm.ssh_bash(machine, script, opt)
+function mm.ssh_bash(task_name, machine, script, env, opt)
 	opt = opt or {}
 	local env = update({
-		MACHINE = machine,
-		DEBUG = logging.debug or nil,
-		QUIET = nil, --not logging.verbose or nil,
-		YES = true,
-	}, opt.env)
-	opt.stdin = '{\n'..mm.bash_script(script, env, {})..'\n}; exit'..(opt.stdin or '')
-	return mm.ssh(machine, {'bash', '-s'}, opt)
+		MACHINE = machine, --for any script that wants to know
+		DEBUG = logging.debug or nil, --for die script
+	}, env)
+	local s = mm.bash_script(script, env, opt.pp, {})
+	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
+	return mm.ssh(task_name, machine, {'bash', '-s'}, opt)
 end
 
 --tasks ----------------------------------------------------------------------
@@ -649,17 +622,17 @@ local task_events_thread
 
 local task = {}
 
-function mm.task(opt)
+function mm.task(task_name, opt)
 	last_task_id = last_task_id + 1
 	local self = inherit({
 		id = last_task_id,
+		name = task_name,
 		cmd = cmd,
 		start_time = time(),
 		duration = 0,
 		status = 'new',
 		errors = {},
 		stdin = opt.stdin,
-		script = opt.script,
 		_out = {},
 		_err = {},
 		_outerr = {},
@@ -691,7 +664,7 @@ function task:finish(exit_code)
 	self:setstatus'finished'
 	local s = self:stdouterr()
 	if s ~= '' then
-		dbg('mm', 'taskout', '%d,%s\n%s', self.id, self.script, s)
+		dbg('mm', 'taskout', '%d,%s\n%s', self.id, self.name, s)
 	end
 end
 
@@ -722,7 +695,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 	self.fields = {
 		{name = 'id'        , type = 'number', w = 20},
 		{name = 'pinned'    , type = 'bool'},
-		{name = 'script'    , },
+		{name = 'name'      , },
 		{name = 'status'    , },
 		{name = 'start_time', type = 'timestamp'},
 		{name = 'duration'  , type = 'number', decimals = 2,  w = 20,
@@ -739,7 +712,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		return {
 			task.id,
 			task.pinned or false,
-			task.script,
+			task.name,
 			task.status,
 			task.start_time,
 			task.duration,
@@ -780,10 +753,105 @@ local function checknostderr(task)
 	return task
 end
 
+--bash utils -----------------------------------------------------------------
+
+--die: basic vocabulary for flow control and progress/error reporting.
+--these functions are influenced by QUIET and DEBUG env vars.
+mm.script.die = [[
+say()   { [ "$QUIET" ] || echo "$@" >&2; }
+error() { say -n "ERROR: "; say "$@"; return 1; }
+die()   { echo -n "EXIT: " >&2; echo "$@" >&2; exit 1; }
+debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
+run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
+quiet() { debug -n "EXEC: $@ "; "$@" >&2; local ret=$?; debug "[$ret]"; return $ret; }
+must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
+query() { MYSQL_PWD=root run mysql -u root -N -B -e "$@"; }
+]]
+
+mm.script.utils = [[
+
+#include die
+
+ssh_update_host_fingerprint() { # host fingerprint
+	run ssh-keygen -R "$1"
+	printf "%s" "$2" >> $HOME/.ssh/known_hosts
+	run chmod 400 $HOME/.ssh/known_hosts
+}
+
+ssh_update_host() { # host keyname
+	say "Assigning SSH host '$1' to key '$2'..."
+	local CONFIG=$HOME/.ssh/config
+	sed < $CONFIG "/^$/d;s/Host /$NL&/" | sed '/^Host '"$1"'$/,/^$/d;' > $CONFIG
+	cat << EOF >> $CONFIG
+Host $1
+	HostName $1
+	IdentityFile $HOME/.ssh/${2}.id_rsa
+EOF
+}
+
+ssh_update_key() { # keyname key
+	say "Updating SSH key '$1'..."
+	printf "%s" "$2" > $HOME/.ssh/${1}.id_rsa
+	run chmod 400 $HOME/.ssh/${1}.id_rsa
+}
+
+ssh_update_host_key() { # host keyname key
+	ssh_update_key "$2" "$3"
+	ssh_update_host "$1" "$2"
+}
+
+ssh_update_pubkey() { # keyname key
+	say "Updating SSH public key '$1'..."
+	local ak=$HOME/.ssh/authorized_keys
+	quiet mkdir -p $HOME/.ssh
+	quiet sed -i "/ $1/d" $ak
+	printf "%s" "$2" >> $ak
+	quiet chmod 400 $ak
+}
+
+ssh_pubkey() { # keyname
+	cat $HOME/.ssh/authorized_keys | grep " $1\$"
+}
+
+git_install_git_up() {
+	say "Installing 'git up' command..."
+	local git_up=/usr/lib/git-core/git-up
+	cat << 'EOF' > $git_up
+msg="$1"; [ "$msg" ] || msg="unimportant"
+git add -A .
+git commit -m "$msg"
+git push
+EOF
+	run chmod +x $git_up
+}
+
+git_config_user() { # email name
+	run git config --global user.email "$1"
+	run git config --global user.name "$2"
+}
+
+lock_passwd() { # user
+	say "Locking password for user '$1'..."
+	quiet passwd -l $1
+}
+
+mysql_update_password() { # host user pass
+	say "Updating mysql password for '$2'@'$1'..."
+	run mysql -e "alter user '$2'@'$1' identified by '$3'; flush privileges;"
+}
+
+ubuntu_install_packages() { # packages
+	say "Installing Ubuntu packages $1..."
+	run apt-get -y update
+	run apt-get -y install $1
+}
+
+]]
+
 --command: machine-update-info -----------------------------------------------
 
 function mm.machine_get_info(machine)
-		local stdout = mm.ssh_bash(machine, [=[
+	local stdout = mm.ssh_bash('machine_get_info', machine, [=[
 
 #include die
 
@@ -798,7 +866,7 @@ echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; pr
 echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-]=], {script = 'machine_get_info'}):stdout()
+]=]):stdout()
 	local t = {last_seen = time()}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^(.-)%s+(.*)')
@@ -843,8 +911,8 @@ function mm.gen_known_hosts_file()
 end
 
 function mm.ssh_update_host_fingerprint(machine)
-	local fp = checknostderr(mm.exec({'ssh-keyscan', '-H', mm.ip(machine)},
-		{script = 'get_host_fingerprint', capture_stderr = false})):stdout()
+	local fp = checknostderr(mm.exec('get_host_fingerprint',
+		{'ssh-keyscan', '-H', mm.ip(machine)}, {capture_stderr = false})):stdout()
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
@@ -859,7 +927,7 @@ cmd.ssh_update_host_fingerprint = action.ssh_update_host_fingerprint
 
 function mm.ssh_gen_key()
 	rm(mm.keyfile())
-	exec(_('ssh-keygen -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile()))
+	exec('ssh-keygen -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
 	rm(mm.keyfile()..'.pub') --we'll compute it every time.
 	mm.ssh_gen_ppk()
 	rowset_changed'config'
@@ -896,25 +964,12 @@ function mm.ssh_update_key(machine)
 
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.pubkey()
-	local stored_pubkey = mm.ssh_bash(machine, [=[
-
-#include die
-
-say "Adding mm public key to /root/.ssh/authorized_keys (for SSH access)..."
-quiet mkdir -p /root/.ssh
-quiet sed -i '/ mm/d' /root/.ssh/authorized_keys
-cat << 'EOF' >> /root/.ssh/authorized_keys
-]=]..pubkey..[=[
-
-EOF
-quiet chmod 400 /root/.ssh/authorized_keys
-
-say "Locking root password..."
-quiet passwd -l root
-
-cat /root/.ssh/authorized_keys | grep 'mm$'
-
-]=], {script = 'ssh_update_key'}):stdout():trim()
+	local stored_pubkey = mm.ssh_bash('ssh_update_key', machine, [=[
+		#include utils
+		ssh_update_pubkey mm "$pubkey"
+		lock_passwd root
+		ssh_pubkey mm
+]=], {pubkey = pubkey}):stdout():trim()
 
 	if stored_pubkey ~= pubkey then
 		return nil, 'Public key NOT updated'
@@ -940,9 +995,10 @@ end
 cmd.ssh_update_key = action.ssh_update_key
 
 function mm.ssh_check_key(machine)
-	local host_pubkey = mm.ssh_bash(machine, [[
-		cat /root/.ssh/authorized_keys | grep 'mm$'
-	]], {script = 'ssh_check_key'}):stdout():trim()
+	local host_pubkey = mm.ssh_bash('ssh_check_key', machine, [[
+		#include utils
+		ssh_pubkey mm
+	]]):stdout():trim()
 	return host_pubkey == mm.pubkey()
 end
 
@@ -963,45 +1019,15 @@ cmd.ssh_check_key = action.ssh_check_key
 
 --command: github-update-key -------------------------------------------------
 
-mm.script.github_update_key = function()
-	return [=[
-
-#include die
-
-say "Adding github.com host fingerprint (for pulling)..."
-run ssh-keygen -R github.com
-cat << 'EOF' >> /root/.ssh/known_hosts
-]=]..mm.github_fingerprint..[=[
-
-EOF
-run chmod 400 /root/.ssh/known_hosts
-
-]=]..(mm.github_key and [=[
-say "Setting git for pushing to github..."
-
-run git config --global user.email "cosmin@allegory.ro"
-run git config --global user.name "Cosmin Apreutesei"
-
-git_up=/usr/lib/git-core/git-up
-cat << 'EOF' > $git_up
-msg="$1"; [ "$msg" ] || msg="unimportant"
-git add -A .
-git commit -m "$msg"
-git push -u origin master
-EOF
-run chmod +x $git_up
-
-cat << 'EOF' > /root/.ssh/id_rsa
-]=]..mm.github_key..[=[
-
-EOF
-run chmod 400 /root/.ssh/id_rsa
-
-]=])
-end
-
 function mm.github_update_key(machine)
-	mm.ssh_bash(machine, mm.script.github_update_key)
+	mm.ssh_bash('github_update_key', machine, [[
+		#include utils
+		ssh_update_host_fingerprint github.com "$github_fingerprint"
+		ssh_update_host_key github.com mm_github "$github_key"
+	]], {
+		github_fingerprint = mm.github_fingerprint,
+		github_key = mm.github_key,
+	})
 end
 
 function action.github_update_key(machine)
@@ -1012,20 +1038,18 @@ end
 --command: machine-prepare ---------------------------------------------------
 
 function mm.machine_prepare(machine)
-	mm.ssh_bash(machine, [=[
-
-#include die
-
-say "Installing Ubuntu packages..."
-run apt-get -y update
-run apt-get -y install htop mc mysql-server
-
-say "Resetting mysql root password..."
-run mysql -e "alter user 'root'@'localhost' identified by 'root'; flush privileges;"
-
-#include github_update_key
-
-]=], {script = 'machine_prepare'})
+	mm.ssh_bash('machine_prepare', machine, [=[
+		#include utils
+		ubuntu_install_packages htop mc mysql-server
+		git_install_git_up
+		git_config_user mm@allegory.ro "Many Machines"
+		ssh_update_host_fingerprint github.com "$github_fingerprint"
+		ssh_update_host_key github.com mm_github "$github_key"
+		mysql_update_password localhost root root
+	]=], {
+		github_fingerprint = mm.github_fingerprint,
+		github_key = mm.github_key,
+	})
 end
 
 function action.machine_prepare(machine)
@@ -1049,31 +1073,18 @@ function mm.deploy(deploy)
 		where
 			deploy = ?
 	]], deploy)
-	mm.ssh_bash(d.machine, [[
+	mm.ssh_bash('deploy', d.machine, [[
 
 #include die
-
-as_deploy() { run sudo -u $DEPLOY -- bash -s; }
 
 run useradd -m $DEPLOY
 must cd /home/$DEPLOY
 
-must rm -rf mgit
-must git clone git@github.com:capr/multigit.git mgit
-must rm -rf bin/mgit
-must mkdir -p bin
-must ln -sf /home/$DEPLOY/mgit/mgit bin/mgit
+must git clone $REPO install
+must cd install
+run sudo -E -u $DEPLOY -- bash -c ./install
 
-must rm -rf app
-must mkdir -p app/.mgit
-must cd app
-must ../bin/mgit clone $REPO
-must ../bin/mgit clone
-
-must cd ..
-must chown $DEPLOY:$DEPLOY -R .
-
-]], {env = {DEPLOY = deploy, REPO = d.repo}})
+]], {DEPLOY = deploy, REPO = d.repo})
 end
 
 function action.deploy(deploy)
@@ -1083,6 +1094,14 @@ end
 cmd.deploy = action.deploy
 
 --cmdline tools --------------------------------------------------------------
+
+local function cmdcheck(s, usage)
+	if not s then
+		cmd.help(usage)
+		os.exit(1)
+	end
+	return s
+end
 
 function cmd.ls()
 	local to_lua = require'mysql_client'.to_lua
@@ -1106,7 +1125,7 @@ function cmd.ls()
 end
 
 function cmd.ssh(machine, command)
-	mm.ssh(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
+	mm.ssh(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
 		{capture_stdout = false, capture_stderr = false})
 end
 
@@ -1114,7 +1133,7 @@ function cmd.ssh_all(command)
 	for _, machine in each_row_vals'select machine from machine' do
 		thread(function()
 			print('Executing on '..machine..'...')
-			mm.ssh(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
+			mm.ssh(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
 				{capture_stdout = false, capture_stderr = false})
 		end)
 	end
