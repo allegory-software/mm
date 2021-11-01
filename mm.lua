@@ -1150,8 +1150,20 @@ end
 --TIP: make a putty session called `mm` where you set the window size,
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
 function cmd.putty(machine)
-	local ip = cmdcheck(mm.ip(str_arg(machine)), 'ssh MACHINE')
+	local ip = mm.ip(machine)
 	proc.exec('putty -load mm -i '..mm.keyfile(machine):gsub('%.key$', '.ppk')..' root@'..ip):forget()
 end
+
+function cmd.tunnel(machine, ports)
+	local args = {'-N'}
+	ports = cmdcheck(str_arg(ports), 'tunnel MACHINE LPORT1[:RPORT1],...')
+	for ports in ports:gmatch'([^,]+)' do
+		local rport, lport = ports:match'(.-):(.*)'
+		add(args, '-L')
+		add(args, '127.0.0.1:'..(lport or ports)..':'..mm.ip(machine)..':'..(rport or ports))
+	end
+	mm.ssh(nil, machine, args, {capture_stdout = false, capture_stderr = false})
+end
+
 
 return mm:run(...)

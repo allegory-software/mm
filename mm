@@ -23,7 +23,7 @@ install() {
 
 usage() {
 	echo "Usage: $app ..."
-	echo "   start | stop | restart | status   control the service"
+	echo "   start | stop | restart | status   control the server"
 	echo "   see                               tail the log file"
 	echo "   install                           install on a fresh user account"
 	exec_app help
