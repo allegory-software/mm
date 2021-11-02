@@ -57,8 +57,7 @@ require'mysql_client'.logging = logging
 config('db_host', '10.0.0.5')
 config('db_port', 3307)
 config('db_pass', 'root')
-config('session_secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
-config('pass_salt'     , 'is9v09z-@^%@s!0~ckl0827ScZpx92kldsufy')
+config('secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 
 --https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 mm.github_fingerprint = ([[
