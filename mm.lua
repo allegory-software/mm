@@ -2,6 +2,7 @@
 require'$daemon'
 require'xmodule'
 
+local b64 = require'libb64'
 local proc = require'proc'
 local sock = require'sock'
 local xapp = require'xapp'
@@ -35,6 +36,11 @@ function mm.ssh_gen_ppk(machine, suffix)
 end
 cmd.ssh_gen_ppk = mm.ssh_gen_ppk
 
+function mm.mysql_root_pass() --last line of the private key
+	return load(mm.keyfile())
+		:gsub(('-----END RSA PRIVATE KEY-----'):esc(), ''):trim():match'[^\r\n]+$'
+end
+
 --config ---------------------------------------------------------------------
 
 mm.known_hosts_file  = indir(var_dir, 'known_hosts')
@@ -51,12 +57,12 @@ require'mysql_client'.logging = logging
 config('db_host', '10.0.0.5')
 config('db_port', 3307)
 config('db_pass', 'root')
-config('var_dir', '.')
 config('session_secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('pass_salt'     , 'is9v09z-@^%@s!0~ckl0827ScZpx92kldsufy')
 
+--https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 mm.github_fingerprint = ([[
-github.com,140.82.121.3 ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
+github.com SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
 ]]):trim()
 
 --database -------------------------------------------------------------------
@@ -70,8 +76,8 @@ function mm.install()
 	query[[
 	$table machine (
 		machine     $strpk,
-		public_ip   $name,
-		local_ip    $name,
+		public_ip   $strid,
+		local_ip    $strid,
 		fingerprint $b64key,
 		ssh_key_ok  $bool,
 		admin_page  $url,
@@ -94,9 +100,10 @@ function mm.install()
 		deploy      $strpk,
 		machine     $strid not null, $fk(deploy, machine),
 		repo        $url not null,
-
-		version     $name not null,
-		status      $name,
+		version     $strid,
+		env         $strid not null,
+		secret      $b64key, --multi-purpose
+		status      $strid,
 		pos         $pos
 	);
 	]]
@@ -152,9 +159,12 @@ body[theme=dark] .header {
 #config_form.maxcols1 {
 	max-width: 400px;
 	grid-template-areas:
+		"h1"
 		"mm_"
 		"ssh_gen_key_button"
 		"ssh_update_keys_button"
+		"h2"
+		"mys"
 	;
 }
 
@@ -193,7 +203,8 @@ html[[
 			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
 				<x-bare-nav id=config_nav rowset_name=config></x-bare-nav>
 				<x-form nav_id=config_nav id=config_form>
-					<x-textarea rows=12 col=mm_pub infomode=under
+					<h2 area=h1>SSH</h2>
+					<x-textarea rows=12 col=mm_pubkey infomode=under
 						info="This is the SSH key used to log in as root on all machines.">
 					</x-textarea>
 					<x-button danger action_name=ssh_gen_key_button_action style="grid-area: ssh_gen_key_button"
@@ -202,6 +213,8 @@ html[[
 					<x-button danger action_name=ssh_update_keys_button_action style="grid-area: ssh_update_keys_button"
 						text="Upload key to all machines" icon="fa fa-upload">
 					</x-button>
+					<div area=h2><hr><h2>MySQL</h2></div>
+					<x-passedit col=mysql_root_pass copy_to_clipboard_button></x-passedit>
 				</x-form>
 			</div>
 		</x-switcher>
@@ -306,6 +319,15 @@ document.on('machines_grid.init', function(e) {
 			},
 		})
 
+		items.push({
+			text: 'Update Github key',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					get(['', 'github-update-key', machine], check_notify)
+			},
+		})
+
 	})
 
 })
@@ -391,6 +413,7 @@ rowset.deploys = sql_rowset{
 			machine,
 			repo,
 			version,
+			env,
 			status
 		from
 			deploy
@@ -399,10 +422,11 @@ rowset.deploys = sql_rowset{
 	field_attrs = {
 	},
 	insert_row = function(self, row)
-		insert_row('deploy', row, 'deploy machine repo version pos')
+		row.secret = b64.encode(random_string(46)) --results in a 64 byte string
+ 		insert_row('deploy', row, 'deploy machine repo version env secret pos')
 	end,
 	update_row = function(self, row)
-		update_row('deploy', row, 'deploy machine repo version pos')
+		update_row('deploy', row, 'deploy machine repo version env pos')
 	end,
 	delete_row = function(self, row)
 		delete_row('deploy', row, 'deploy')
@@ -413,12 +437,13 @@ rowset.config = virtual_rowset(function(self, ...)
 
 	self.fields = {
 		{name = 'config_id', type = 'number'},
-		{name = 'mm_pub', text = 'MM\'s Public Key', maxlen = 8192},
+		{name = 'mm_pubkey', text = 'MM\'s Public Key', maxlen = 8192},
+		{name = 'mysql_root_pass', text = 'MySQL Root Password'},
 	}
 	self.pk = 'config_id'
 
 	function self:load_rows(rs, params)
-		local row = {1, mm.pubkey()}
+		local row = {1, mm.pubkey(), mm.mysql_root_pass()}
 		rs.rows = {row}
 	end
 
@@ -586,7 +611,7 @@ function mm.bash_script(s, env, pp_env, included)
 	if env then
 		local t = {}
 		for k,v in sortedpairs(env) do
-			t[#t+1] = k..'='..proc.esc_unix(tostring(v))
+			t[#t+1] = k..'='..proc.quote_arg_unix(tostring(v))
 		end
 		s = concat(t, '\n'):outdent()..'\n\n'..s
 	end
@@ -763,7 +788,6 @@ error() { say -n "ERROR: "; say "$@"; return 1; }
 die()   { echo -n "EXIT: " >&2; echo "$@" >&2; exit 1; }
 debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
 run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
-quiet() { debug -n "EXEC: $@ "; "$@" >&2; local ret=$?; debug "[$ret]"; return $ret; }
 must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
 query() { MYSQL_PWD=root run mysql -u root -N -B -e "$@"; }
 ]]
@@ -803,10 +827,10 @@ ssh_update_host_key() { # host keyname key
 ssh_update_pubkey() { # keyname key
 	say "Updating SSH public key '$1'..."
 	local ak=$HOME/.ssh/authorized_keys
-	quiet mkdir -p $HOME/.ssh
-	quiet sed -i "/ $1/d" $ak
+	must mkdir -p $HOME/.ssh
+	must sed -i "/ $1/d" $ak
 	printf "%s" "$2" >> $ak
-	quiet chmod 400 $ak
+	must chmod 400 $ak
 }
 
 ssh_pubkey() { # keyname
@@ -830,20 +854,58 @@ git_config_user() { # email name
 	run git config --global user.name "$2"
 }
 
-lock_passwd() { # user
-	say "Locking password for user '$1'..."
-	quiet passwd -l $1
+user_create() { # user
+	say "Creating user $1..."
+	must useradd -m $1
 }
 
-mysql_update_password() { # host user pass
-	say "Updating mysql password for '$2'@'$1'..."
-	run mysql -e "alter user '$2'@'$1' identified by '$3'; flush privileges;"
+user_lock_pass() { # user
+	say "Locking password for user '$1'..."
+	must passwd -l $1
+}
+
+mysql_create_user() { # host user pass
+	say "Creating mysql user '$2'@'$1'..."
+	run mysql -e "
+		create user '$2'@'$1' identified with mysql_native_password by '$3';
+		flush privileges;
+	"
+}
+
+mysql_update_pass() { # host user pass
+	say "Updating MySQL password for '$2'@'$1'..."
+	run mysql -e "
+		alter user '$2'@'$1' identified with mysql_native_password by '$3';
+		flush privileges;
+	"
+}
+
+mysql_create_schema() { # schema
+	say "Creating mysql schema $1..."
+	run mysql -e "
+		create database if not exists $1
+		character set utf8mb4 collate utf8mb4_unicode_ci;
+	"
+}
+
+mysql_grant_user() { # host user schema
+	run mysql -e "
+		grant all privileges on $3.* to '$2'@'$1';
+		flush privileges;
+	"
 }
 
 ubuntu_install_packages() { # packages
 	say "Installing Ubuntu packages $1..."
 	run apt-get -y update
 	run apt-get -y install $1
+}
+
+mgit_install() {
+	must mkdir -p /opt
+	must cd /opt
+	must git clone git@github.com:capr/multigit.git mgit
+	must ln -sf /opt/mgit/mgit /usr/local/bin/mgit
 }
 
 ]]
@@ -966,8 +1028,10 @@ function mm.ssh_update_key(machine)
 	local pubkey = mm.pubkey()
 	local stored_pubkey = mm.ssh_bash('ssh_update_key', machine, [=[
 		#include utils
+		(
 		ssh_update_pubkey mm "$pubkey"
-		lock_passwd root
+		user_lock_pass root
+		) >&2
 		ssh_pubkey mm
 ]=], {pubkey = pubkey}):stdout():trim()
 
@@ -1021,12 +1085,19 @@ cmd.ssh_check_key = action.ssh_check_key
 
 function mm.github_update_key(machine)
 	mm.ssh_bash('github_update_key', machine, [[
+
 		#include utils
+
 		ssh_update_host_fingerprint github.com "$github_fingerprint"
 		ssh_update_host_key github.com mm_github "$github_key"
+
+		which mysql >/dev/null && \
+			mysql_update_pass localhost root "$mysql_root_pass"
+
 	]], {
 		github_fingerprint = mm.github_fingerprint,
 		github_key = mm.github_key,
+		mysql_root_pass = mm.mysql_root_pass(),
 	})
 end
 
@@ -1049,11 +1120,14 @@ function mm.machine_prepare(machine)
 		ssh_update_host_fingerprint github.com "$github_fingerprint"
 		ssh_update_host_key github.com mm_github "$github_key"
 
-		mysql_update_password localhost root root
+		mgit_install
+
+		mysql_update_pass localhost root "$mysql_root_pass"
 
 	]=], {
 		github_fingerprint = mm.github_fingerprint,
 		github_key = mm.github_key,
+		mysql_root_pass = mm.mysql_root_pass()
 	})
 end
 
@@ -1066,33 +1140,54 @@ cmd.machine_prepare = action.machine_prepare
 --command: deploy ------------------------------------------------------------
 
 function mm.deploy(deploy)
+
 	local d = first_row([[
 		select
 			d.machine,
 			d.repo,
 			d.version,
-			m.public_ip
+			d.env,
+			d.secret
 		from
 			deploy d
-			inner join machine m on d.machine = m.machine
 		where
 			deploy = ?
 	]], deploy)
+
+	local app = d.repo:gsub('%.git$', ''):match'/(.-)$'
+
 	mm.ssh_bash('deploy', d.machine, [[
 
 		#include die
 
-		must useradd -m $DEPLOY
-		must cd /home/$DEPLOY
+		must user_create $DEPLOY
+		must user_lock_pass $DEPLOY
+		HOME=/home/$DEPLOY must ssh_update_pubkey mm "$PUBKEY"
 
-		must run sudo -u $DEPLOY git clone $REPO install
-		must cd install
-		run sudo -u $DEPLOY \
+		must mysql_create_schema $DEPLOY
+		must mysql_create_user localhost $DEPLOY "$MYSQL_PASS"
+		must mysql_grant_user  localhost $DEPLOY $DEPLOY
+
+		must cd /home/$DEPLOY
+		must sudo -u $DEPLOY git clone -b $VERSION $REPO $APP
+		must cd $APP
+		must sudo -u $DEPLOY \
 			MACHINE="$MACHINE" \
 			DEPLOY="$DEPLOY" \
-				-- ./install
+			MYSQL_SCHEMA="$DEPLOY" \
+			MYSQL_USER="$DEPLOY" \
+			MYSQL_PASS="$MYSQL_PASS" \
+			SECRET="$SECRET" \
+				-- ./$APP install $ENV
 
-]], {DEPLOY = deploy, REPO = d.repo})
+	]], {
+		DEPLOY = deploy, REPO = d.repo, APP = app,
+		VERSION = d.version or 'master', ENV = d.env,
+		MYSQL_PASS = d.secret,
+		PUBKEY = mm.pubkey(),
+		SECRET = d.secret,
+	})
+
 end
 
 function action.deploy(deploy)
@@ -1160,10 +1255,9 @@ function cmd.tunnel(machine, ports)
 	for ports in ports:gmatch'([^,]+)' do
 		local rport, lport = ports:match'(.-):(.*)'
 		add(args, '-L')
-		add(args, '127.0.0.1:'..(lport or ports)..':'..mm.ip(machine)..':'..(rport or ports))
+		add(args, '127.0.0.1:'..(lport or ports)..':127.0.0.1:'..(rport or ports))
 	end
 	mm.ssh(nil, machine, args, {capture_stdout = false, capture_stderr = false})
 end
-
 
 return mm:run(...)
