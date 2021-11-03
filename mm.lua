@@ -8,6 +8,8 @@ local sock = require'sock'
 local xapp = require'xapp'
 local mustache = require'mustache'
 
+local ssh_dir = exedir
+
 if Linux then
 	var_dir = '/root/mm-var'
 end
@@ -26,19 +28,35 @@ function mm.ppkfile(machine, suffix)
 end
 
 function mm.pubkey(machine, prefix)
-	return readpipe('ssh-keygen -y -f "'..mm.keyfile(machine, prefix)..'"'):trim()..' mm'
+	return readpipe(indir(ssh_dir, 'ssh-keygen')..' -y -f "'..mm.keyfile(machine, prefix)..'"'):trim()
 end
+
+--NOTE: this is a `fix-perms.cmd` script to put in your var dir and run
+--in case you get the incredibly stupid "perms are too open" error from ssh.
+--[[
+@echo off
+for %%f in (.\*.key) do (
+	Icacls %%f /c /t /Inheritance:d
+	Icacls %%f /c /t /Grant %UserName%:F
+	TakeOwn /F %%f
+	Icacls %%f /c /t /Grant:r %UserName%:F
+	Icacls %%f /c /t /Remove:g "Authenticated Users" BUILTIN\Administrators BUILTIN Everyone System Users
+	Icacls %%f
+)
+]]
 
 function mm.ssh_gen_ppk(machine, suffix)
 	local key = mm.keyfile(machine, suffix)
 	local ppk = mm.ppkfile(machine, suffix)
-	exec('winscp.com /keygen %s /output=%s', key, ppk)
+	exec(indir(exedir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
 end
 cmd.ssh_gen_ppk = mm.ssh_gen_ppk
 
-function mm.mysql_root_pass() --last line of the private key
-	return load(mm.keyfile())
-		:gsub(('-----END RSA PRIVATE KEY-----'):esc(), ''):trim():match'[^\r\n]+$'
+function mm.mysql_root_pass(machine) --last line of the private key
+	local s = load(mm.keyfile(machine))
+		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
+	assert(#s == 32)
+	return s
 end
 
 --config ---------------------------------------------------------------------
@@ -57,11 +75,11 @@ require'mysql_client'.logging = logging
 config('db_host', '10.0.0.5')
 config('db_port', 3307)
 config('db_pass', 'root')
-config('secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
+config('secret' , '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 
 --https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 mm.github_fingerprint = ([[
-github.com SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
 ]]):trim()
 
 --database -------------------------------------------------------------------
@@ -454,12 +472,13 @@ function mm.exec(task_name, cmd, opt)
 	opt = opt or empty
 
 	local capture_stdout = opt.capture_stdout ~= false
-	local capture_stderr = opt.capture_stderr ~= false
+	local capture_stderr = opt.capture_stderr ~= false and not cx().fake
 
 	local task = mm.task(task_name, opt)
 
 	local p, err = proc.exec{
 		cmd = cmd,
+		env = opt.env,
 		async = true,
 		autokill = true,
 		stdout = capture_stdout,
@@ -537,7 +556,6 @@ function mm.exec(task_name, cmd, opt)
 	end
 
 	if opt and cx().fake then
-		--note(
 		task:free()
 	else
 		thread(function()
@@ -566,13 +584,18 @@ end
 
 function mm.ssh(task_name, machine, args, opt)
 	return mm.exec(task_name, extend({
-			'ssh',
+			indir(ssh_dir, 'ssh'),
+			opt.allocate_tty and '-t' or '-T',
 			'-o', 'BatchMode=yes',
 			'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
 			'-o', 'ConnectTimeout=2',
 			'-i', mm.keyfile(machine),
 			'root@'..mm.ip(machine),
 		}, args), opt)
+end
+
+function mm.sshi(task_name, machine, args, opt)
+	return mm.ssh(task_name, machine, args, update({capture_stdout = false, allocate_tty = true}, opt))
 end
 
 --remote bash scripts --------------------------------------------------------
@@ -612,7 +635,7 @@ function mm.bash_script(s, env, pp_env, included)
 		for k,v in sortedpairs(env) do
 			t[#t+1] = k..'='..proc.quote_arg_unix(tostring(v))
 		end
-		s = concat(t, '\n'):outdent()..'\n\n'..s
+		s = concat(t, '\n')..'\n\n'..s
 	end
 	if pp_env then
 		return mm.bash_preprocess(s, pp_env)
@@ -632,7 +655,7 @@ function mm.ssh_bash(task_name, machine, script, env, opt)
 		MACHINE = machine, --for any script that wants to know
 		DEBUG = logging.debug or nil, --for die script
 	}, env)
-	local s = mm.bash_script(script, env, opt.pp, {})
+	local s = mm.bash_script(script:outdent(), env, opt.pp, {})
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
 	return mm.ssh(task_name, machine, {'bash', '-s'}, opt)
 end
@@ -779,8 +802,9 @@ end
 
 --bash utils -----------------------------------------------------------------
 
---die: basic vocabulary for flow control and progress/error reporting.
+--die: basic vocabulary for flow control and progress/error reporting for bash.
 --these functions are influenced by QUIET and DEBUG env vars.
+--see https://github.com/capr/die for how to use.
 mm.script.die = [[
 say()   { [ "$QUIET" ] || echo "$@" >&2; }
 error() { say -n "ERROR: "; say "$@"; return 1; }
@@ -788,7 +812,6 @@ die()   { echo -n "EXIT: " >&2; echo "$@" >&2; exit 1; }
 debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
 run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
 must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
-query() { MYSQL_PWD=root run mysql -u root -N -B -e "$@"; }
 ]]
 
 mm.script.utils = [[
@@ -796,13 +819,15 @@ mm.script.utils = [[
 #include die
 
 ssh_update_host_fingerprint() { # host fingerprint
-	run ssh-keygen -R "$1"
-	printf "%s" "$2" >> $HOME/.ssh/known_hosts
-	run chmod 400 $HOME/.ssh/known_hosts
+	say "Updating SSH host fingerprint for host '$1' (/etc/ssh)..."
+	local kh=/etc/ssh/ssh_known_hosts
+	run ssh-keygen -R "$1" -f $kh
+	must printf "%s\n" "$2" >> $kh
+	must chmod 400 $kh
 }
 
 ssh_update_host() { # host keyname
-	say "Assigning SSH host '$1' to key '$2'..."
+	say "Assigning SSH key '$2' to host '$1' ($HOME)..."
 	local CONFIG=$HOME/.ssh/config
 	sed < $CONFIG "/^$/d;s/Host /$NL&/" | sed '/^Host '"$1"'$/,/^$/d;' > $CONFIG
 	cat << EOF >> $CONFIG
@@ -813,9 +838,10 @@ EOF
 }
 
 ssh_update_key() { # keyname key
-	say "Updating SSH key '$1'..."
-	printf "%s" "$2" > $HOME/.ssh/${1}.id_rsa
-	run chmod 400 $HOME/.ssh/${1}.id_rsa
+	say "Updating SSH key '$1' ($HOME)..."
+	local idf=$HOME/.ssh/${1}.id_rsa
+	must printf "%s" "$2" > $idf
+	must chmod 400 $idf
 }
 
 ssh_update_host_key() { # host keyname key
@@ -827,8 +853,8 @@ ssh_update_pubkey() { # keyname key
 	say "Updating SSH public key '$1'..."
 	local ak=$HOME/.ssh/authorized_keys
 	must mkdir -p $HOME/.ssh
-	must sed -i "/ $1/d" $ak
-	printf "%s" "$2" >> $ak
+	[ -f $ak ] && must sed -i "/ $1/d" $ak
+	must printf "%s" "$2" >> $ak
 	must chmod 400 $ak
 }
 
@@ -845,7 +871,7 @@ git add -A .
 git commit -m "$msg"
 git push
 EOF
-	run chmod +x $git_up
+	must chmod +x $git_up
 }
 
 git_config_user() { # email name
@@ -854,48 +880,53 @@ git_config_user() { # email name
 }
 
 user_create() { # user
-	say "Creating user $1..."
+	say "Creating user '$1'..."
 	must useradd -m $1
 }
 
 user_lock_pass() { # user
 	say "Locking password for user '$1'..."
-	must passwd -l $1
+	must passwd -l $1 >&2
+}
+
+query() {
+	[ "$MYSQL_ROOT_PASS" ] || die "\$MYSQL_ROOT_PASS not set."
+	MYSQL_PWD="$MYSQL_ROOT_PASS" must mysql -N -B -u root -e "$1"
 }
 
 mysql_create_user() { # host user pass
-	say "Creating mysql user '$2'@'$1'..."
-	run mysql -e "
+	say "Creating mysql user '$2@$1'..."
+	must query "
 		create user '$2'@'$1' identified with mysql_native_password by '$3';
 		flush privileges;
 	"
 }
 
 mysql_update_pass() { # host user pass
-	say "Updating MySQL password for '$2'@'$1'..."
-	run mysql -e "
+	say "Updating MySQL password for user '$2@$1'..."
+	must query "
 		alter user '$2'@'$1' identified with mysql_native_password by '$3';
 		flush privileges;
 	"
 }
 
 mysql_create_schema() { # schema
-	say "Creating mysql schema $1..."
-	run mysql -e "
+	say "Creating mysql schema '$1'..."
+	must query "
 		create database if not exists $1
 		character set utf8mb4 collate utf8mb4_unicode_ci;
 	"
 }
 
 mysql_grant_user() { # host user schema
-	run mysql -e "
+	must query "
 		grant all privileges on $3.* to '$2'@'$1';
 		flush privileges;
 	"
 }
 
 ubuntu_install_packages() { # packages
-	say "Installing Ubuntu packages $1..."
+	say "Installing Ubuntu packages '$1'..."
 	run apt-get -y update
 	run apt-get -y install $1
 }
@@ -914,20 +945,22 @@ mgit_install() {
 function mm.machine_get_info(machine)
 	local stdout = mm.ssh_bash('machine_get_info', machine, [=[
 
-#include die
+		#include utils
 
-echo "os_ver        $(lsb_release -sd)"
-echo "mysql_ver     $(which mysql >/dev/null && query 'select version();')"
-echo "cpu           $(lscpu | sed -n 's/^Model name:\s*\(.*\)/\1/p')"
-               cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
-           sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
-echo "cores         $(expr $sockets \* $cps)"
-echo "ram_gb        $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf "%.2f",$2}')"
-echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
-echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
-echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
+		echo "os_ver        $(lsb_release -sd)"
+		echo "mysql_ver     $(which mysql >/dev/null && query 'select version();')"
+		echo "cpu           $(lscpu | sed -n 's/^Model name:\s*\(.*\)/\1/p')"
+							cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
+					  sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
+		echo "cores         $(expr $sockets \* $cps)"
+		echo "ram_gb        $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf "%.2f",$2}')"
+		echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
+		echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
+		echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-]=]):stdout()
+	]=], {
+		MYSQL_ROOT_PASS = mm.mysql_root_pass(machine),
+	}):stdout()
 	local t = {last_seen = time()}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^(.-)%s+(.*)')
@@ -972,8 +1005,8 @@ function mm.gen_known_hosts_file()
 end
 
 function mm.ssh_update_host_fingerprint(machine)
-	local fp = checknostderr(mm.exec('get_host_fingerprint',
-		{'ssh-keyscan', '-H', mm.ip(machine)}, {capture_stderr = false})):stdout()
+	local fp = mm.exec('get_host_fingerprint',
+		{indir(ssh_dir, 'ssh-keyscan'), '-4', '-t', 'rsa', '-H', mm.ip(machine)}):stdout()
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
@@ -988,7 +1021,7 @@ cmd.ssh_update_host_fingerprint = action.ssh_update_host_fingerprint
 
 function mm.ssh_gen_key()
 	rm(mm.keyfile())
-	exec('ssh-keygen -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
+	exec(indir(ssh_dir, 'ssh-keygen')..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
 	rm(mm.keyfile()..'.pub') --we'll compute it every time.
 	mm.ssh_gen_ppk()
 	rowset_changed'config'
@@ -1011,28 +1044,35 @@ function action.ssh_pubkey(machine)
 end
 cmd.ssh_pubkey = action.ssh_pubkey
 
---command: update ssh key ----------------------------------------------------
+--command: ssh-update-key ----------------------------------------------------
+
+function mm.each_machine(f)
+	for _, machine in each_row_vals'select machine from machine' do
+		thread(f, machine)
+	end
+end
 
 function mm.ssh_update_key(machine)
 	if not machine then
-		for _, machine in each_row_vals'select machine from machine' do
-			thread(function()
-				mm.ssh_update_key(machine)
-			end)
-		end
+		mm.each_machine(mm.ssh_update_key)
 		return true
 	end
 
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.pubkey()
+	local old_mysql_root_pass = mm.mysql_root_pass(machine)
 	local stored_pubkey = mm.ssh_bash('ssh_update_key', machine, [=[
 		#include utils
-		(
+		which mysql >/dev/null && \
+			mysql_update_pass localhost root "$mysql_root_pass"
 		ssh_update_pubkey mm "$pubkey"
 		user_lock_pass root
-		) >&2
 		ssh_pubkey mm
-]=], {pubkey = pubkey}):stdout():trim()
+	]=], {
+		pubkey = pubkey,
+		mysql_root_pass = mm.mysql_root_pass(),
+		MYSQL_ROOT_PASS = old_mysql_root_pass,
+	}):stdout():trim()
 
 	if stored_pubkey ~= pubkey then
 		return nil, 'Public key NOT updated'
@@ -1084,26 +1124,28 @@ cmd.ssh_check_key = action.ssh_check_key
 
 function mm.github_update_key(machine)
 	mm.ssh_bash('github_update_key', machine, [[
-
 		#include utils
-
 		ssh_update_host_fingerprint github.com "$github_fingerprint"
 		ssh_update_host_key github.com mm_github "$github_key"
-
-		which mysql >/dev/null && \
-			mysql_update_pass localhost root "$mysql_root_pass"
-
+		for d in /home/*; do
+			[ -d $d.ssh ] && \
+				HOME=$d ssh_update_host_key github.com mm_github "$github_key"
+		done
 	]], {
 		github_fingerprint = mm.github_fingerprint,
 		github_key = mm.github_key,
-		mysql_root_pass = mm.mysql_root_pass(),
 	})
 end
 
 function action.github_update_key(machine)
+	if not machine then
+		mm.each_machine(mm.github_update_key)
+		return true
+	end
 	mm.github_update_key(machine)
 	out_json{machine = machine, notify = 'Github key updated'}
 end
+cmd.github_update_key = action.github_update_key
 
 --command: machine-prepare ---------------------------------------------------
 
@@ -1140,6 +1182,8 @@ cmd.machine_prepare = action.machine_prepare
 
 function mm.deploy(deploy)
 
+	checkarg(str_arg(deploy), 'deploy required')
+
 	local d = first_row([[
 		select
 			d.machine,
@@ -1155,55 +1199,68 @@ function mm.deploy(deploy)
 
 	local app = d.repo:gsub('%.git$', ''):match'/(.-)$'
 
+	local mysql_pass = d.secret:sub(1, 32)
+	assert(#mysql_pass == 32)
+
 	mm.ssh_bash('deploy', d.machine, [[
 
-		#include die
+		#include utils
 
-		must user_create $DEPLOY
-		must user_lock_pass $DEPLOY
-		HOME=/home/$DEPLOY must ssh_update_pubkey mm "$PUBKEY"
+		must user_create $deploy
+		must user_lock_pass $deploy
 
-		must mysql_create_schema $DEPLOY
-		must mysql_create_user localhost $DEPLOY "$MYSQL_PASS"
-		must mysql_grant_user  localhost $DEPLOY $DEPLOY
+		HOME=/home/$deploy ssh_update_host_key github.com mm_github "$github_key"
 
-		must cd /home/$DEPLOY
-		must sudo -u $DEPLOY git clone -b $VERSION $REPO $APP
-		must cd $APP
-		must sudo -u $DEPLOY \
+		must mysql_create_schema $deploy
+		must mysql_create_user localhost $deploy "$mysql_pass"
+		must mysql_grant_user  localhost $deploy $deploy
+
+		must cd /home/$deploy
+		must sudo -u $deploy git clone -b $version $repo $app
+		must cd $app
+		must sudo -u $deploy \
 			MACHINE="$MACHINE" \
-			DEPLOY="$DEPLOY" \
-			MYSQL_SCHEMA="$DEPLOY" \
-			MYSQL_USER="$DEPLOY" \
-			MYSQL_PASS="$MYSQL_PASS" \
-			SECRET="$SECRET" \
-				-- ./$APP install $ENV
+			DEPLOY="$deploy" \
+			MYSQL_SCHEMA="$deploy" \
+			MYSQL_USER="$deploy" \
+			MYSQL_PASS="$mysql_pass" \
+			SECRET="$secret" \
+				-- ./$app install $env
 
 	]], {
-		DEPLOY = deploy, REPO = d.repo, APP = app,
-		VERSION = d.version or 'master', ENV = d.env,
-		MYSQL_PASS = d.secret,
-		PUBKEY = mm.pubkey(),
-		SECRET = d.secret,
+		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
+		deploy = deploy,
+		repo = d.repo,
+		app = app,
+		version = d.version or 'master',
+		env = d.env,
+		mysql_pass = mysql_pass,
+		secret = d.secret,
+		github_key = mm.github_key,
 	})
 
 end
 
-function action.deploy(deploy)
-	mm.deploy(deploy)
-end
-
+action.deploy = mm.deploy
 cmd.deploy = action.deploy
 
---cmdline tools --------------------------------------------------------------
+function mm.undeploy(deploy)
+	checkarg(str_arg(deploy), 'deploy required')
+	mm.ssh_bash('deploy', d.machine, [[
 
-local function cmdcheck(s, usage)
-	if not s then
-		cmd.help(usage)
-		os.exit(1)
-	end
-	return s
+		#include utils
+
+		mut cd $app
+		./$app
+
+	]], {
+		app = app,
+	})
 end
+action.undeploy = mm.undeploy
+cmd.undeploy = action.undeploy
+
+--cmdline tools --------------------------------------------------------------
 
 function cmd.ls()
 	local to_lua = require'mysql_client'.to_lua
@@ -1227,16 +1284,15 @@ function cmd.ls()
 end
 
 function cmd.ssh(machine, command)
-	mm.ssh(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
-		{capture_stdout = false, capture_stderr = false})
+	mm.sshi(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
 end
 
 function cmd.ssh_all(command)
+	command = checkarg(str_arg(command), 'command expected')
 	for _, machine in each_row_vals'select machine from machine' do
 		thread(function()
 			print('Executing on '..machine..'...')
-			mm.ssh(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))},
-				{capture_stdout = false, capture_stderr = false})
+			mm.ssh(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
 		end)
 	end
 end
@@ -1245,18 +1301,25 @@ end
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
 function cmd.putty(machine)
 	local ip = mm.ip(machine)
-	proc.exec('putty -load mm -i '..mm.keyfile(machine):gsub('%.key$', '.ppk')..' root@'..ip):forget()
+	proc.exec(indir(exedir, 'putty')..' -load mm -i '..mm.keyfile(machine):gsub('%.key$', '.ppk')..' root@'..ip):forget()
 end
 
 function cmd.tunnel(machine, ports)
 	local args = {'-N'}
-	ports = cmdcheck(str_arg(ports), 'tunnel MACHINE LPORT1[:RPORT1],...')
+	ports = checkarg(str_arg(ports), 'Usage: mm tunnel MACHINE LPORT1[:RPORT1],...')
 	for ports in ports:gmatch'([^,]+)' do
 		local rport, lport = ports:match'(.-):(.*)'
 		add(args, '-L')
 		add(args, '127.0.0.1:'..(lport or ports)..':127.0.0.1:'..(rport or ports))
 	end
-	mm.ssh(nil, machine, args, {capture_stdout = false, capture_stderr = false})
+	mm.sshi(nil, machine, args)
+end
+
+function cmd.mysql(machine, ...)
+	mm.sshi(nil, machine, {
+		'MYSQL_PWD='..proc.quote_arg_unix(mm.mysql_root_pass(machine)),
+			'mysql', '-u', 'root', '-h', 'localhost', ...})
+
 end
 
 return mm:run(...)

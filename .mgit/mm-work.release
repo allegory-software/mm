@@ -30,3 +30,5 @@ luapower/webb
 luapower/winapi
 luapower/x-widgets
 luapower/xxhash
+luapower/ssh-msys
+luapower/putty
