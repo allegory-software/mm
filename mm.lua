@@ -119,7 +119,8 @@ function mm.install()
 		repo        $url not null,
 		version     $strid,
 		env         $strid not null,
-		secret      $b64key, --multi-purpose
+		secret      $b64key not null, --multi-purpose
+		mysql_pass  $hash not null,
 		status      $strid,
 		pos         $pos
 	);
@@ -440,7 +441,8 @@ rowset.deploys = sql_rowset{
 	},
 	insert_row = function(self, row)
 		row.secret = b64.encode(random_string(46)) --results in a 64 byte string
- 		insert_row('deploy', row, 'deploy machine repo version env secret pos')
+ 		row.mysql_pass = b64.encode(random_string(23)) --results in a 32 byte string
+ 		insert_row('deploy', row, 'deploy machine repo version env secret mysql_pass pos')
 	end,
 	update_row = function(self, row)
 		update_row('deploy', row, 'deploy machine repo version env pos')
@@ -583,15 +585,27 @@ function mm.ip(machine)
 end
 
 function mm.ssh(task_name, machine, args, opt)
-	return mm.exec(task_name, extend({
-			indir(ssh_dir, 'ssh'),
+	if false and Windows then
+		--TODO: timeout option (look for a putty fork)
+		return mm.exec(task_name, extend({
+			indir(ssh_dir, 'plink'),
+			'-ssh',
 			opt.allocate_tty and '-t' or '-T',
-			'-o', 'BatchMode=yes',
-			'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
-			'-o', 'ConnectTimeout=2',
-			'-i', mm.keyfile(machine),
+			'-hostkey ', mm.pubkey(machine),
+			'-batch',
 			'root@'..mm.ip(machine),
 		}, args), opt)
+	else
+		return mm.exec(task_name, extend({
+				indir(ssh_dir, 'ssh'),
+				opt.allocate_tty and '-t' or '-T',
+				'-o', 'BatchMode=yes',
+				'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
+				'-o', 'ConnectTimeout=2',
+				'-i', mm.keyfile(machine),
+				'root@'..mm.ip(machine),
+			}, args), opt)
+	end
 end
 
 function mm.sshi(task_name, machine, args, opt)
@@ -802,9 +816,8 @@ end
 
 --bash utils -----------------------------------------------------------------
 
---die: basic vocabulary for flow control and progress/error reporting for bash.
+--die 1.0, see https://github.com/capr/die
 --these functions are influenced by QUIET and DEBUG env vars.
---see https://github.com/capr/die for how to use.
 mm.script.die = [[
 say()   { [ "$QUIET" ] || echo "$@" >&2; }
 error() { say -n "ERROR: "; say "$@"; return 1; }
@@ -818,16 +831,26 @@ mm.script.utils = [[
 
 #include die
 
+rm_subdir() {
+	[ "${1:0:1}" == "/" ] || { say "base dir not absolute"; return 1; }
+	[ "$2" ] || { say "subdir required"; return 1; }
+	local dir="$1/$2"
+	say "Removing dir '$dir'..."
+	[ -d "$dir" ] || return 1
+	must rm -rf "$dir"
+}
+
 ssh_update_host_fingerprint() { # host fingerprint
 	say "Updating SSH host fingerprint for host '$1' (/etc/ssh)..."
 	local kh=/etc/ssh/ssh_known_hosts
 	run ssh-keygen -R "$1" -f $kh
 	must printf "%s\n" "$2" >> $kh
-	must chmod 400 $kh
+	must chmod 644 $kh
 }
 
 ssh_update_host() { # host keyname
 	say "Assigning SSH key '$2' to host '$1' ($HOME)..."
+	must mkdir -p $HOME/.ssh
 	local CONFIG=$HOME/.ssh/config
 	sed < $CONFIG "/^$/d;s/Host /$NL&/" | sed '/^Host '"$1"'$/,/^$/d;' > $CONFIG
 	cat << EOF >> $CONFIG
@@ -835,13 +858,16 @@ Host $1
 	HostName $1
 	IdentityFile $HOME/.ssh/${2}.id_rsa
 EOF
+	must chown $USER:$USER -R $HOME/.ssh
 }
 
 ssh_update_key() { # keyname key
 	say "Updating SSH key '$1' ($HOME)..."
+	must mkdir -p $HOME/.ssh
 	local idf=$HOME/.ssh/${1}.id_rsa
 	must printf "%s" "$2" > $idf
-	must chmod 400 $idf
+	must chmod 600 $idf
+	must chown $USER:$USER -R $HOME/.ssh
 }
 
 ssh_update_host_key() { # host keyname key
@@ -855,7 +881,8 @@ ssh_update_pubkey() { # keyname key
 	must mkdir -p $HOME/.ssh
 	[ -f $ak ] && must sed -i "/ $1/d" $ak
 	must printf "%s" "$2" >> $ak
-	must chmod 400 $ak
+	must chmod 600 $ak
+	must chown $USER:$USER -R $HOME/.ssh
 }
 
 ssh_pubkey() { # keyname
@@ -882,11 +909,19 @@ git_config_user() { # email name
 user_create() { # user
 	say "Creating user '$1'..."
 	must useradd -m $1
+	must chsh -s /bin/bash $1
 }
 
 user_lock_pass() { # user
 	say "Locking password for user '$1'..."
 	must passwd -l $1 >&2
+}
+
+user_remove() {
+	[ "$1" ] || die "user required"
+	say "Removing user '$1'..."
+	id -u $1 &>/dev/null && must userdel $1
+	rm_subdir /home $1
 }
 
 query() {
@@ -895,11 +930,16 @@ query() {
 }
 
 mysql_create_user() { # host user pass
-	say "Creating mysql user '$2@$1'..."
+	say "Creating MySQL user '$2@$1'..."
 	must query "
 		create user '$2'@'$1' identified with mysql_native_password by '$3';
 		flush privileges;
 	"
+}
+
+mysql_drop_user() { # host user
+	say "Dropping MySQL user '$2@$1'..."
+	must query "drop user if exists '$2'@'$1'; flush privileges;"
 }
 
 mysql_update_pass() { # host user pass
@@ -911,11 +951,17 @@ mysql_update_pass() { # host user pass
 }
 
 mysql_create_schema() { # schema
-	say "Creating mysql schema '$1'..."
+	say "Creating MySQL schema '$1'..."
 	must query "
-		create database if not exists $1
-		character set utf8mb4 collate utf8mb4_unicode_ci;
+		create database $1
+			character set utf8mb4
+			collate utf8mb4_unicode_ci;
 	"
+}
+
+mysql_drop_schema() { # schema
+	say "Dropping MySQL schema '$1'..."
+	must query "drop database if exists $1"
 }
 
 mysql_grant_user() { # host user schema
@@ -925,16 +971,20 @@ mysql_grant_user() { # host user schema
 	"
 }
 
-ubuntu_install_packages() { # packages
-	say "Installing Ubuntu packages '$1'..."
+ubuntu_install_packages() { # package1 ...
+	say "Installing Ubuntu packages: $@..."
 	run apt-get -y update
-	run apt-get -y install $1
+	run apt-get -y install $@
 }
 
 mgit_install() {
 	must mkdir -p /opt
 	must cd /opt
-	must git clone git@github.com:capr/multigit.git mgit
+	if [ -d mgit ]; then
+		cd mgit && git pull
+	else
+		must git clone git@github.com:capr/multigit.git mgit
+	fi
 	must ln -sf /opt/mgit/mgit /usr/local/bin/mgit
 }
 
@@ -1150,6 +1200,7 @@ cmd.github_update_key = action.github_update_key
 --command: machine-prepare ---------------------------------------------------
 
 function mm.machine_prepare(machine)
+	local old_mysql_root_pass = mm.mysql_root_pass(machine)
 	mm.ssh_bash('machine_prepare', machine, [=[
 
 		#include utils
@@ -1168,7 +1219,8 @@ function mm.machine_prepare(machine)
 	]=], {
 		github_fingerprint = mm.github_fingerprint,
 		github_key = mm.github_key,
-		mysql_root_pass = mm.mysql_root_pass()
+		mysql_root_pass = mm.mysql_root_pass(),
+		MYSQL_ROOT_PASS = old_mysql_root_pass,
 	})
 end
 
@@ -1180,6 +1232,10 @@ cmd.machine_prepare = action.machine_prepare
 
 --command: deploy ------------------------------------------------------------
 
+function mm.app_name(repo)
+	return repo:gsub('%.git$', ''):match'/(.-)$'
+end
+
 function mm.deploy(deploy)
 
 	checkarg(str_arg(deploy), 'deploy required')
@@ -1190,6 +1246,7 @@ function mm.deploy(deploy)
 			d.repo,
 			d.version,
 			d.env,
+			d.mysql_pass,
 			d.secret
 		from
 			deploy d
@@ -1197,10 +1254,7 @@ function mm.deploy(deploy)
 			deploy = ?
 	]], deploy)
 
-	local app = d.repo:gsub('%.git$', ''):match'/(.-)$'
-
-	local mysql_pass = d.secret:sub(1, 32)
-	assert(#mysql_pass == 32)
+	local app = mm.app_name(d.repo)
 
 	mm.ssh_bash('deploy', d.machine, [[
 
@@ -1209,7 +1263,7 @@ function mm.deploy(deploy)
 		must user_create $deploy
 		must user_lock_pass $deploy
 
-		HOME=/home/$deploy ssh_update_host_key github.com mm_github "$github_key"
+		HOME=/home/$deploy USER=$deploy ssh_update_host_key github.com mm_github "$github_key"
 
 		must mysql_create_schema $deploy
 		must mysql_create_user localhost $deploy "$mysql_pass"
@@ -1219,13 +1273,14 @@ function mm.deploy(deploy)
 		must sudo -u $deploy git clone -b $version $repo $app
 		must cd $app
 		must sudo -u $deploy \
+			DEBUG="$DEBUG" \
 			MACHINE="$MACHINE" \
 			DEPLOY="$deploy" \
 			MYSQL_SCHEMA="$deploy" \
 			MYSQL_USER="$deploy" \
 			MYSQL_PASS="$mysql_pass" \
 			SECRET="$secret" \
-				-- ./$app install $env
+				-- ./$app deploy $env
 
 	]], {
 		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
@@ -1234,31 +1289,41 @@ function mm.deploy(deploy)
 		app = app,
 		version = d.version or 'master',
 		env = d.env,
-		mysql_pass = mysql_pass,
 		secret = d.secret,
+		mysql_pass = d.mysql_pass,
 		github_key = mm.github_key,
-	})
+	}, {capture_stdout = false})
 
 end
 
 action.deploy = mm.deploy
 cmd.deploy = action.deploy
 
-function mm.undeploy(deploy)
-	checkarg(str_arg(deploy), 'deploy required')
+function mm.deploy_remove(deploy)
+	deploy = checkarg(str_arg(deploy), 'deploy required')
+	local d = first_row('select repo, machine from deploy where deploy = ?', deploy)
+	local app = mm.app_name(d.repo)
+
 	mm.ssh_bash('deploy', d.machine, [[
 
 		#include utils
 
-		mut cd $app
-		./$app
+		run cd /home/$deploy \
+			&& run ./$app stop
+
+		mysql_drop_schema $deploy
+		mysql_drop_user localhost $deploy
+
+		user_remove $deploy
 
 	]], {
 		app = app,
+		deploy = deploy,
+		MYSQL_ROOT_PASS = mm.mysql_root_pass(d.machine),
 	})
 end
-action.undeploy = mm.undeploy
-cmd.undeploy = action.undeploy
+action.deploy_remove = mm.deploy_remove
+cmd.deploy_remove = action.deploy_remove
 
 --cmdline tools --------------------------------------------------------------
 
