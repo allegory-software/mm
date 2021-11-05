@@ -1,3 +1,15 @@
+--[[
+
+	Many Machines, a SAAS Provisioning & Maintainance Plaform.
+	Written by Cosmin Apreutesei. Public Domain.
+
+	TODO: find a way for plink to only see the rsa ssh host key.
+
+	TODO: make mm portable by using file rowsets instead of mysql.
+
+	TODO: convert cmdline to posting mm tasks if mm server is running.
+
+]]
 
 require'$daemon'
 require'xmodule'
@@ -8,12 +20,13 @@ local sock = require'sock'
 local xapp = require'xapp'
 local mustache = require'mustache'
 
-local ssh_dir = exedir
+local sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 
 if Linux then
 	var_dir = '/root/mm-var'
 end
 local mm = xapp(daemon'mm')
+mm.use_plink = false
 
 --tools ----------------------------------------------------------------------
 
@@ -27,9 +40,22 @@ function mm.ppkfile(machine, suffix)
 	return mm.keyfile(machine, suffix, 'ppk')
 end
 
-function mm.pubkey(machine, prefix)
-	return readpipe(indir(ssh_dir, 'ssh-keygen')..' -y -f "'..mm.keyfile(machine, prefix)..'"'):trim()
+function mm.pubkey(machine, suffix)
+	return readpipe(indir(exedir, 'ssh-keygen')..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
 end
+
+--NOTE: this crap is only here to convince `plink -hostkey` to work.
+function mm.hostkey(machine)
+	machine = checkarg(str_arg(machine))
+	local key = first_row('select fingerprint from machine where machine = ?', machine):trim()
+	return mm.exec('hostkey', {indir(exedir, 'ssh-keygen'), '-E', 'sha256', '-lf', '-'}, {stdin = key})
+		:stdout():trim():match'%s([^%s]+)'
+end
+function action.hostkey(machine)
+	setmime'txt'
+	out(mm.hostkey(machine))
+end
+cmd.hostkey = action.hostkey
 
 --NOTE: this is a `fix-perms.cmd` script to put in your var dir and run
 --in case you get the incredibly stupid "perms are too open" error from ssh.
@@ -585,31 +611,34 @@ function mm.ip(machine)
 end
 
 function mm.ssh(task_name, machine, args, opt)
-	if false and Windows then
+	if Windows and (opt.use_plink or mm.use_plink) then
 		--TODO: timeout option (look for a putty fork)
 		return mm.exec(task_name, extend({
-			indir(ssh_dir, 'plink'),
+			indir(exedir, 'plink'),
 			'-ssh',
+			'-load', 'mm',
 			opt.allocate_tty and '-t' or '-T',
-			'-hostkey ', mm.pubkey(machine),
+			'-hostkey', mm.hostkey(machine),
+			'-i', mm.ppkfile(machine),
 			'-batch',
 			'root@'..mm.ip(machine),
 		}, args), opt)
 	else
 		return mm.exec(task_name, extend({
-				indir(ssh_dir, 'ssh'),
+				indir(exedir, 'ssh'),
 				opt.allocate_tty and '-t' or '-T',
 				'-o', 'BatchMode=yes',
-				'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
-				'-o', 'ConnectTimeout=2',
+				'-o', 'ConnectTimeout=5',
+				'-o', 'PreferredAuthentications=publickey'..
+				'-o', 'UserKnownHostsFile="'..mm.known_hosts_file..'"',
 				'-i', mm.keyfile(machine),
 				'root@'..mm.ip(machine),
 			}, args), opt)
 	end
 end
 
-function mm.sshi(task_name, machine, args, opt)
-	return mm.ssh(task_name, machine, args, update({capture_stdout = false, allocate_tty = true}, opt))
+function mm.sshi(machine, args, opt)
+	return mm.ssh(nil, machine, args, update({capture_stdout = false, allocate_tty = true}, opt))
 end
 
 --remote bash scripts --------------------------------------------------------
@@ -1056,7 +1085,7 @@ end
 
 function mm.ssh_update_host_fingerprint(machine)
 	local fp = mm.exec('get_host_fingerprint',
-		{indir(ssh_dir, 'ssh-keyscan'), '-4', '-t', 'rsa', '-H', mm.ip(machine)}):stdout()
+		{indir(exedir, 'ssh-keyscan'), '-4', '-T', '2', '-t', 'rsa', mm.ip(machine)}):stdout()
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
@@ -1071,7 +1100,7 @@ cmd.ssh_update_host_fingerprint = action.ssh_update_host_fingerprint
 
 function mm.ssh_gen_key()
 	rm(mm.keyfile())
-	exec(indir(ssh_dir, 'ssh-keygen')..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
+	exec(indir(exedir, 'ssh-keygen')..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
 	rm(mm.keyfile()..'.pub') --we'll compute it every time.
 	mm.ssh_gen_ppk()
 	rowset_changed'config'
@@ -1325,7 +1354,7 @@ end
 action.deploy_remove = mm.deploy_remove
 cmd.deploy_remove = action.deploy_remove
 
---cmdline tools --------------------------------------------------------------
+--remote access tools --------------------------------------------------------
 
 function cmd.ls()
 	local to_lua = require'mysql_client'.to_lua
@@ -1349,7 +1378,11 @@ function cmd.ls()
 end
 
 function cmd.ssh(machine, command)
-	mm.sshi(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
+	mm.sshi(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
+end
+
+function cmd.plink(machine, command)
+	mm.sshi(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))}, {use_plink = true})
 end
 
 function cmd.ssh_all(command)
@@ -1366,7 +1399,7 @@ end
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
 function cmd.putty(machine)
 	local ip = mm.ip(machine)
-	proc.exec(indir(exedir, 'putty')..' -load mm -i '..mm.keyfile(machine):gsub('%.key$', '.ppk')..' root@'..ip):forget()
+	proc.exec(indir(exedir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
 end
 
 function cmd.tunnel(machine, ports)
@@ -1377,14 +1410,50 @@ function cmd.tunnel(machine, ports)
 		add(args, '-L')
 		add(args, '127.0.0.1:'..(lport or ports)..':127.0.0.1:'..(rport or ports))
 	end
-	mm.sshi(nil, machine, args)
+	mm.sshi(machine, args)
 end
 
 function cmd.mysql(machine, ...)
-	mm.sshi(nil, machine, {
+	mm.sshi(machine, {
 		'MYSQL_PWD='..proc.quote_arg_unix(mm.mysql_root_pass(machine)),
 			'mysql', '-u', 'root', '-h', 'localhost', ...})
 
+end
+
+function mm.mount(machine, drive, rem_path, bg)
+	drive = drive or 'S'
+	rem_path = rem_path or '/'
+	machine = str_arg(machine)
+	local cmd =
+		'"'..indir(sshfs_dir, 'sshfs.exe')..'"'..
+		' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
+		(bg and '' or ' -f')..
+		--' -odebug'.. --good stuff (implies -f)
+		--these were copy-pasted from sshfs-win manager.
+		' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
+		' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
+		--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
+		' -ossh_command='..path.sep(indir(sshfs_dir, 'ssh'), nil, '/')..
+		' -oBatchMode=yes'..
+		' -oRequestTTY=no'..
+		' -oPreferredAuthentications=publickey'..
+		' -oUserKnownHostsFile='..path.sep(mm.known_hosts_file, nil, '/')..
+		' -oIdentityFile='..path.sep(mm.keyfile(machine), nil, '/')
+	if bg then
+		exec(cmd)
+	else
+		mm.exec('sshfs '..drive..':', cmd)
+	end
+end
+
+cmd.mount = mm.mount
+
+function cmd.mount_bg(machine, drive, rem_path)
+	return mm.mount(machine, drive, rem_path, true)
+end
+
+function cmd.unmount_all()
+	exec'taskkill /f /im sshfs.exe'
 end
 
 return mm:run(...)
