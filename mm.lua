@@ -24,15 +24,21 @@ local mustache = require'mustache'
 
 local sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 
-if Linux then
-	var_dir = '/root/mm-var'
-end
 local mm = xapp(daemon'mm')
 mm.use_plink = false
 
 --tools ----------------------------------------------------------------------
 
+local function NYI(event)
+	logerror('mm', event, 'NYI')
+end
+
+function sshcmd(cmd)
+	return win and indir(exedir, cmd) or cmd
+end
+
 function mm.keyfile(machine, suffix, ext)
+	machine = machine and machine:trim()
 	local file = 'mm'..(machine and '-'..machine or '')
 		..(suffix and '.'..suffix or '')..'.'..(ext or 'key')
 	return indir(var_dir, file)
@@ -43,14 +49,14 @@ function mm.ppkfile(machine, suffix)
 end
 
 function mm.pubkey(machine, suffix)
-	return readpipe(indir(exedir, 'ssh-keygen')..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
+	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
 end
 
 --NOTE: this crap is only here to convince `plink -hostkey` to work.
 function mm.ssh_hostkey(machine)
 	machine = checkarg(str_arg(machine))
 	local key = first_row('select fingerprint from machine where machine = ?', machine):trim()
-	return mm.exec('hostkey', {indir(exedir, 'ssh-keygen'), '-E', 'sha256', '-lf', '-'}, {stdin = key})
+	return mm.exec('hostkey', {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}, {stdin = key})
 		:stdout():trim():match'%s([^%s]+)'
 end
 function action.ssh_hostkey(machine)
@@ -59,24 +65,27 @@ function action.ssh_hostkey(machine)
 end
 cmd.ssh_hostkey = action.ssh_hostkey
 
---NOTE: this is a `fix-perms.cmd` script to put in your var dir and run
---in case you get the incredibly stupid "perms are too open" error from ssh.
---[[
-@echo off
-for %%f in (.\*.key) do (
-	Icacls %%f /c /t /Inheritance:d
-	Icacls %%f /c /t /Grant %UserName%:F
-	TakeOwn /F %%f
-	Icacls %%f /c /t /Grant:r %UserName%:F
-	Icacls %%f /c /t /Remove:g "Authenticated Users" BUILTIN\Administrators BUILTIN Everyone System Users
-	Icacls %%f
-)
-]]
+--run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
+function mm.ssh_key_fix_perms(machine)
+	if not win then return end
+	local s = mm.keyfile(machine)
+	readpipe('icacls %s /c /t /Inheritance:d', s)
+	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
+	readpipe('takeown /F %s', s)
+	readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
+	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
+	readpipe('icacls %s', s)
+end
 
 function mm.ssh_key_gen_ppk(machine, suffix)
 	local key = mm.keyfile(machine, suffix)
 	local ppk = mm.ppkfile(machine, suffix)
-	exec(indir(exedir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
+	if win then
+		exec(indir(exedir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
+	else
+		--TODO: use plink linux binary
+		NYI'ssh_key_gen_ppk'
+	end
 end
 cmd.ssh_key_gen_ppk = mm.ssh_key_gen_ppk
 
@@ -85,6 +94,10 @@ function mm.mysql_root_pass(machine) --last line of the private key
 		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
 	assert(#s == 32)
 	return s
+end
+function cmd.mysql_root_pass(machine)
+	setmime'txt'
+	out(mm.mysql_root_pass(machine))
 end
 
 --config ---------------------------------------------------------------------
@@ -509,7 +522,7 @@ function mm.exec(task_name, cmd, opt)
 
 	local p, err = proc.exec{
 		cmd = cmd,
-		env = opt.env,
+		env = opt.env and update(proc.env(), opt.env),
 		async = true,
 		autokill = true,
 		stdout = capture_stdout,
@@ -628,15 +641,15 @@ function mm.ssh(task_name, machine, args, opt)
 		}, args), opt)
 	else
 		return mm.exec(task_name, extend({
-				indir(exedir, 'ssh'),
-				opt.allocate_tty and '-t' or '-T',
-				'-o', 'BatchMode=yes',
-				'-o', 'ConnectTimeout=5',
-				'-o', 'PreferredAuthentications=publickey',
-				'-o', 'UserKnownHostsFile="'..mm.known_hosts_file..'"',
-				'-i', mm.keyfile(machine),
-				'root@'..mm.ip(machine),
-			}, args), opt)
+			sshcmd'ssh',
+			opt.allocate_tty and '-t' or '-T',
+			'-o', 'BatchMode=yes',
+			'-o', 'ConnectTimeout=5',
+			'-o', 'PreferredAuthentications=publickey',
+			'-o', 'UserKnownHostsFile='..mm.known_hosts_file,
+			'-i', mm.keyfile(machine),
+			'root@'..mm.ip(machine),
+		}, args), opt)
 	end
 end
 
@@ -957,8 +970,7 @@ user_remove() {
 }
 
 query() {
-	[ "$MYSQL_ROOT_PASS" ] || die "\$MYSQL_ROOT_PASS not set."
-	MYSQL_PWD="$MYSQL_ROOT_PASS" must mysql -N -B -u root -e "$1"
+	MYSQL_PWD="$(cat /root/mysql_root_pass)" must mysql -N -B -u root -e "$1"
 }
 
 mysql_create_user() { # host user pass
@@ -980,6 +992,12 @@ mysql_update_pass() { # host user pass
 		alter user '$2'@'$1' identified with mysql_native_password by '$3';
 		flush privileges;
 	"
+}
+
+mysql_update_root_pass() { # pass
+	mysql_update_pass localhost root "$1"
+	must echo -n "$1" > /root/mysql_root_pass
+	must chmod 600 /root/mysql_root_pass
 }
 
 mysql_create_schema() { # schema
@@ -1040,9 +1058,7 @@ function mm.machine_get_info(machine)
 		echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 		echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-	]=], {
-		MYSQL_ROOT_PASS = mm.mysql_root_pass(machine),
-	}):stdout()
+	]=]):stdout()
 	local t = {last_seen = time()}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^(.-)%s+(.*)')
@@ -1088,7 +1104,7 @@ end
 
 function mm.ssh_hostkey_update(machine)
 	local fp = mm.exec('get_host_fingerprint',
-		{indir(exedir, 'ssh-keyscan'), '-4', '-T', '2', '-t', 'rsa', mm.ip(machine)}):stdout()
+		{sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', mm.ip(machine)}):stdout()
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
@@ -1103,8 +1119,9 @@ cmd.ssh_hostkey_update = action.ssh_hostkey_update
 
 function mm.ssh_key_gen()
 	rm(mm.keyfile())
-	exec(indir(exedir, 'ssh-keygen')..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
+	exec(sshcmd'ssh-keygen'..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
 	rm(mm.keyfile()..'.pub') --we'll compute it every time.
+	mm.ssh_key_fix_perms()
 	mm.ssh_key_gen_ppk()
 	rowset_changed'config'
 	query'update machine set ssh_key_ok = 0'
@@ -1142,18 +1159,16 @@ function mm.ssh_key_update(machine)
 
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.pubkey()
-	local old_mysql_root_pass = mm.mysql_root_pass(machine)
 	local stored_pubkey = mm.ssh_bash('ssh_key_update', machine, [=[
 		#include utils
 		which mysql >/dev/null && \
-			mysql_update_pass localhost root "$mysql_root_pass"
+			mysql_update_root_pass "$mysql_root_pass"
 		ssh_update_pubkey mm "$pubkey"
 		user_lock_pass root
 		ssh_pubkey mm
 	]=], {
 		pubkey = pubkey,
 		mysql_root_pass = mm.mysql_root_pass(),
-		MYSQL_ROOT_PASS = old_mysql_root_pass,
 	}):stdout():trim()
 
 	if stored_pubkey ~= pubkey then
@@ -1162,6 +1177,7 @@ function mm.ssh_key_update(machine)
 
 	cp(mm.keyfile(), mm.keyfile(machine))
 	cp(mm.ppkfile(), mm.ppkfile(machine))
+	mm.ssh_key_fix_perms(machine)
 
 	update_row('machine', {ssh_key_ok = true, ['machine:old'] = machine}, 'ssh_key_ok')
 	rowset_changed'machines'
@@ -1232,7 +1248,6 @@ cmd.github_key_update = action.github_key_update
 --command: machine-prepare ---------------------------------------------------
 
 function mm.machine_prepare(machine)
-	local old_mysql_root_pass = mm.mysql_root_pass(machine)
 	mm.ssh_bash('machine_prepare', machine, [=[
 
 		#include utils
@@ -1246,13 +1261,12 @@ function mm.machine_prepare(machine)
 
 		mgit_install
 
-		mysql_update_pass localhost root "$mysql_root_pass"
+		mysql_update_root_pass "$mysql_root_pass"
 
 	]=], {
 		github_fingerprint = mm.github_fingerprint,
 		github_key = mm.github_key,
 		mysql_root_pass = mm.mysql_root_pass(),
-		MYSQL_ROOT_PASS = old_mysql_root_pass,
 	})
 end
 
@@ -1315,7 +1329,6 @@ function mm.deploy(deploy)
 				-- ./$app deploy $env
 
 	]], {
-		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
 		deploy = deploy,
 		repo = d.repo,
 		app = app,
@@ -1351,7 +1364,6 @@ function mm.deploy_remove(deploy)
 	]], {
 		app = app,
 		deploy = deploy,
-		MYSQL_ROOT_PASS = mm.mysql_root_pass(d.machine),
 	})
 end
 action.deploy_remove = mm.deploy_remove
@@ -1379,15 +1391,14 @@ function cmd.machines()
 		order by pos, ctime
 ]]))
 end
-
 cmd.ls = cmd.machines
 
-function cmd.ssh(machine, command)
-	mm.sshi(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
+function cmd.ssh(machine, cmd)
+	mm.sshi(machine, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)})
 end
 
-function cmd.plink(machine, command)
-	mm.sshi(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))}, {use_plink = true})
+function wincmd.plink(machine, cmd)
+	mm.sshi(machine, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)}, {use_plink = true})
 end
 
 function cmd.ssh_all(command)
@@ -1402,7 +1413,7 @@ end
 
 --TIP: make a putty session called `mm` where you set the window size,
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
-function cmd.putty(machine)
+function wincmd.putty(machine)
 	local ip = mm.ip(machine)
 	proc.exec(indir(exedir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
 end
@@ -1418,36 +1429,44 @@ function cmd.tunnel(machine, ports)
 	mm.sshi(machine, args)
 end
 
-function cmd.mysql(machine, ...)
-	mm.sshi(machine, {
-		'MYSQL_PWD='..proc.quote_arg_unix(mm.mysql_root_pass(machine)),
-			'mysql', '-u', 'root', '-h', 'localhost', ...})
-
+local function censor_mysql_pwd(s)
+	return s:gsub('MYSQL_PWD=[^%s]+', 'MYSQL_PWD=censored')
+end
+function cmd.mysql(machine, sql)
+	local args = {'MYSQL_PWD='..mm.mysql_root_pass(machine), 'mysql', '-u', 'root', '-h', 'localhost'}
+	if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
+	logging.censor.mysql_pwd = censor_mysql_pwd
+	mm.sshi(machine, args)
+	logging.censor.mysql_pwd = nil
 end
 
-function mm.mount(machine, drive, rem_path, bg)
-	drive = drive or 'S'
-	rem_path = rem_path or '/'
-	machine = str_arg(machine)
-	local cmd =
-		'"'..indir(sshfs_dir, 'sshfs.exe')..'"'..
-		' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
-		(bg and '' or ' -f')..
-		--' -odebug'.. --good stuff (implies -f)
-		--these were copy-pasted from sshfs-win manager.
-		' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
-		' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
-		--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
-		' -ossh_command='..path.sep(indir(sshfs_dir, 'ssh'), nil, '/')..
-		' -oBatchMode=yes'..
-		' -oRequestTTY=no'..
-		' -oPreferredAuthentications=publickey'..
-		' -oUserKnownHostsFile='..path.sep(mm.known_hosts_file, nil, '/')..
-		' -oIdentityFile='..path.sep(mm.keyfile(machine), nil, '/')
-	if bg then
-		exec(cmd)
+function mm.mount(machine, rem_path, drive, bg)
+	if win then
+		drive = drive or 'S'
+		rem_path = rem_path or '/'
+		machine = str_arg(machine)
+		local cmd =
+			'"'..indir(sshfs_dir, 'sshfs.exe')..'"'..
+			' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
+			(bg and '' or ' -f')..
+			--' -odebug'.. --good stuff (implies -f)
+			--these were copy-pasted from sshfs-win manager.
+			' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
+			' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
+			--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
+			' -ossh_command='..path.sep(indir(sshfs_dir, 'ssh'), nil, '/')..
+			' -oBatchMode=yes'..
+			' -oRequestTTY=no'..
+			' -oPreferredAuthentications=publickey'..
+			' -oUserKnownHostsFile='..path.sep(mm.known_hosts_file, nil, '/')..
+			' -oIdentityFile='..path.sep(mm.keyfile(machine), nil, '/')
+		if bg then
+			exec(cmd)
+		else
+			mm.exec('sshfs '..drive..':', cmd)
+		end
 	else
-		mm.exec('sshfs '..drive..':', cmd)
+		NYI'mount'
 	end
 end
 
@@ -1458,7 +1477,11 @@ function cmd.mount_bg(machine, drive, rem_path)
 end
 
 function cmd.mount_kill_all()
-	exec'taskkill /f /im sshfs.exe'
+	if win then
+		exec'taskkill /f /im sshfs.exe'
+	else
+		NYI'mount_kill_all'
+	end
 end
 
 function cmd.deploys()
@@ -1477,7 +1500,7 @@ function cmd.deploys()
 			unix_timestamp(ctime) as ctime
 		from deploy
 		order by pos, ctime
-]]))
+	]]))
 end
 
 return mm:run(...)
