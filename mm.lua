@@ -52,7 +52,7 @@ function mm.pubkey(machine, suffix)
 	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
 end
 
---NOTE: this crap is only here to convince `plink -hostkey` to work.
+--TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
 function mm.ssh_hostkey(machine)
 	machine = checkarg(str_arg(machine))
 	local key = first_row('select fingerprint from machine where machine = ?', machine):trim()
@@ -83,7 +83,7 @@ function mm.ssh_key_gen_ppk(machine, suffix)
 	if win then
 		exec(indir(exedir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
 	else
-		--TODO: use plink linux binary
+		--TODO: use plink linux binary to gen the ppk.
 		NYI'ssh_key_gen_ppk'
 	end
 end
@@ -628,7 +628,7 @@ end
 
 function mm.ssh(task_name, machine, args, opt)
 	if Windows and (opt.use_plink or mm.use_plink) then
-		--TODO: timeout option (look for a putty fork)
+		--TODO: plink is missing a timeout option (look for a putty fork which has it?).
 		return mm.exec(task_name, extend({
 			indir(exedir, 'plink'),
 			'-ssh',
@@ -1440,6 +1440,7 @@ function cmd.mysql(machine, sql)
 	logging.censor.mysql_pwd = nil
 end
 
+--TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
 function mm.mount(machine, rem_path, drive, bg)
 	if win then
 		drive = drive or 'S'
