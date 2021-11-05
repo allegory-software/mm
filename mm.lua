@@ -1261,7 +1261,14 @@ function mm.machine_prepare(machine)
 
 		mgit_install
 
+		touch /root/mysql_root_pass     # mysql works with password=no when root.
 		mysql_update_root_pass "$mysql_root_pass"
+
+		cat << 'EOF' > /etc/mysql/mysql.conf.d/z.cnf
+[mysqld]
+log_bin_trust_function_creators = 1
+		EOF
+		run service mysqld restart
 
 	]=], {
 		github_fingerprint = mm.github_fingerprint,
