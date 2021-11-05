@@ -3,6 +3,8 @@
 	Many Machines, a SAAS Provisioning & Maintainance Plaform.
 	Written by Cosmin Apreutesei. Public Domain.
 
+	TODO: ssh | mysql |
+
 	TODO: find a way for plink to only see the rsa ssh host key.
 
 	TODO: make mm portable by using file rowsets instead of mysql.
@@ -45,17 +47,17 @@ function mm.pubkey(machine, suffix)
 end
 
 --NOTE: this crap is only here to convince `plink -hostkey` to work.
-function mm.hostkey(machine)
+function mm.ssh_hostkey(machine)
 	machine = checkarg(str_arg(machine))
 	local key = first_row('select fingerprint from machine where machine = ?', machine):trim()
 	return mm.exec('hostkey', {indir(exedir, 'ssh-keygen'), '-E', 'sha256', '-lf', '-'}, {stdin = key})
 		:stdout():trim():match'%s([^%s]+)'
 end
-function action.hostkey(machine)
+function action.ssh_hostkey(machine)
 	setmime'txt'
-	out(mm.hostkey(machine))
+	out(mm.ssh_hostkey(machine))
 end
-cmd.hostkey = action.hostkey
+cmd.ssh_hostkey = action.ssh_hostkey
 
 --NOTE: this is a `fix-perms.cmd` script to put in your var dir and run
 --in case you get the incredibly stupid "perms are too open" error from ssh.
@@ -71,12 +73,12 @@ for %%f in (.\*.key) do (
 )
 ]]
 
-function mm.ssh_gen_ppk(machine, suffix)
+function mm.ssh_key_gen_ppk(machine, suffix)
 	local key = mm.keyfile(machine, suffix)
 	local ppk = mm.ppkfile(machine, suffix)
 	exec(indir(exedir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
 end
-cmd.ssh_gen_ppk = mm.ssh_gen_ppk
+cmd.ssh_key_gen_ppk = mm.ssh_key_gen_ppk
 
 function mm.mysql_root_pass(machine) --last line of the private key
 	local s = load(mm.keyfile(machine))
@@ -148,6 +150,7 @@ function mm.install()
 		secret      $b64key not null, --multi-purpose
 		mysql_pass  $hash not null,
 		status      $strid,
+		ctime       $ctime,
 		pos         $pos
 	);
 	]]
@@ -205,8 +208,8 @@ body[theme=dark] .header {
 	grid-template-areas:
 		"h1"
 		"mm_"
-		"ssh_gen_key_button"
-		"ssh_update_keys_button"
+		"ssh_key_gen_button"
+		"ssh_key_updates_button"
 		"h2"
 		"mys"
 	;
@@ -251,10 +254,10 @@ html[[
 					<x-textarea rows=12 col=mm_pubkey infomode=under
 						info="This is the SSH key used to log in as root on all machines.">
 					</x-textarea>
-					<x-button danger action_name=ssh_gen_key_button_action style="grid-area: ssh_gen_key_button"
+					<x-button danger action_name=ssh_key_gen_button_action style="grid-area: ssh_key_gen_button"
 						text="Generate new key" icon="fa fa-key">
 					</x-button>
-					<x-button danger action_name=ssh_update_keys_button_action style="grid-area: ssh_update_keys_button"
+					<x-button danger action_name=ssh_key_updates_button_action style="grid-area: ssh_key_updates_button"
 						text="Upload key to all machines" icon="fa fa-upload">
 					</x-button>
 					<div area=h2><hr><h2>MySQL</h2></div>
@@ -334,7 +337,7 @@ document.on('machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'ssh-update-host-fingerprint', machine], check_notify)
+					get(['', 'ssh-hostkey-update', machine], check_notify)
 			},
 		})
 
@@ -342,7 +345,7 @@ document.on('machines_grid.init', function(e) {
 			text: 'Update key',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
-				if (machine)get(['', 'ssh-update-key', machine], check_notify)
+				if (machine)get(['', 'ssh-key-update', machine], check_notify)
 			},
 		})
 
@@ -350,7 +353,7 @@ document.on('machines_grid.init', function(e) {
 			text: 'Check key',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
-				if (machine)get(['', 'ssh-check-key', machine], check_notify)
+				if (machine)get(['', 'ssh-key-check', machine], check_notify)
 			},
 		})
 
@@ -368,7 +371,7 @@ document.on('machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'github-update-key', machine], check_notify)
+					get(['', 'github-key-update', machine], check_notify)
 			},
 		})
 
@@ -376,12 +379,12 @@ document.on('machines_grid.init', function(e) {
 
 })
 
-function ssh_gen_key_button_action() {
-	this.load(['', 'ssh-gen-key'], check_notify)
+function ssh_key_gen_button_action() {
+	this.load(['', 'ssh-key-gen'], check_notify)
 }
 
-function ssh_update_keys_button_action() {
-	this.load(['', 'ssh-update-key'], check_notify)
+function ssh_key_updates_button_action() {
+	this.load(['', 'ssh-key-update'], check_notify)
 }
 
 function deploy_button_action() {
@@ -618,7 +621,7 @@ function mm.ssh(task_name, machine, args, opt)
 			'-ssh',
 			'-load', 'mm',
 			opt.allocate_tty and '-t' or '-T',
-			'-hostkey', mm.hostkey(machine),
+			'-hostkey', mm.ssh_hostkey(machine),
 			'-i', mm.ppkfile(machine),
 			'-batch',
 			'root@'..mm.ip(machine),
@@ -629,7 +632,7 @@ function mm.ssh(task_name, machine, args, opt)
 				opt.allocate_tty and '-t' or '-T',
 				'-o', 'BatchMode=yes',
 				'-o', 'ConnectTimeout=5',
-				'-o', 'PreferredAuthentications=publickey'..
+				'-o', 'PreferredAuthentications=publickey',
 				'-o', 'UserKnownHostsFile="'..mm.known_hosts_file..'"',
 				'-i', mm.keyfile(machine),
 				'root@'..mm.ip(machine),
@@ -869,7 +872,7 @@ rm_subdir() {
 	must rm -rf "$dir"
 }
 
-ssh_update_host_fingerprint() { # host fingerprint
+ssh_hostkey_update() { # host fingerprint
 	say "Updating SSH host fingerprint for host '$1' (/etc/ssh)..."
 	local kh=/etc/ssh/ssh_known_hosts
 	run ssh-keygen -R "$1" -f $kh
@@ -877,7 +880,7 @@ ssh_update_host_fingerprint() { # host fingerprint
 	must chmod 644 $kh
 }
 
-ssh_update_host() { # host keyname
+ssh_host_update() { # host keyname
 	say "Assigning SSH key '$2' to host '$1' ($HOME)..."
 	must mkdir -p $HOME/.ssh
 	local CONFIG=$HOME/.ssh/config
@@ -890,7 +893,7 @@ EOF
 	must chown $USER:$USER -R $HOME/.ssh
 }
 
-ssh_update_key() { # keyname key
+ssh_key_update() { # keyname key
 	say "Updating SSH key '$1' ($HOME)..."
 	must mkdir -p $HOME/.ssh
 	local idf=$HOME/.ssh/${1}.id_rsa
@@ -899,9 +902,9 @@ ssh_update_key() { # keyname key
 	must chown $USER:$USER -R $HOME/.ssh
 }
 
-ssh_update_host_key() { # host keyname key
-	ssh_update_key "$2" "$3"
-	ssh_update_host "$1" "$2"
+ssh_host_key_update() { # host keyname key
+	ssh_key_update "$2" "$3"
+	ssh_host_update "$1" "$2"
 }
 
 ssh_update_pubkey() { # keyname key
@@ -1068,7 +1071,7 @@ end
 action.machine_update_info = mm.machine_update_info
 cmd.machine_update_info = action.machine_update_info
 
---command: ssh-update-host-fingerprint ---------------------------------------
+--command: ssh-hostkey-update ---------------------------------------
 
 function mm.gen_known_hosts_file()
 	local t = {}
@@ -1083,36 +1086,36 @@ function mm.gen_known_hosts_file()
 	save(mm.known_hosts_file, concat(t, '\n'))
 end
 
-function mm.ssh_update_host_fingerprint(machine)
+function mm.ssh_hostkey_update(machine)
 	local fp = mm.exec('get_host_fingerprint',
 		{indir(exedir, 'ssh-keyscan'), '-4', '-T', '2', '-t', 'rsa', mm.ip(machine)}):stdout()
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
 
-function action.ssh_update_host_fingerprint(machine)
-	mm.ssh_update_host_fingerprint(machine)
+function action.ssh_hostkey_update(machine)
+	mm.ssh_hostkey_update(machine)
 	out_json{machine = machine, notify = 'Host fingerprint updated for '..machine}
 end
-cmd.ssh_update_host_fingerprint = action.ssh_update_host_fingerprint
+cmd.ssh_hostkey_update = action.ssh_hostkey_update
 
---command: ssh-gen-key -------------------------------------------------------
+--command: ssh-key-gen -------------------------------------------------------
 
-function mm.ssh_gen_key()
+function mm.ssh_key_gen()
 	rm(mm.keyfile())
 	exec(indir(exedir, 'ssh-keygen')..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
 	rm(mm.keyfile()..'.pub') --we'll compute it every time.
-	mm.ssh_gen_ppk()
+	mm.ssh_key_gen_ppk()
 	rowset_changed'config'
 	query'update machine set ssh_key_ok = 0'
 	rowset_changed'machine'
 end
 
-function action.ssh_gen_key()
-	mm.ssh_gen_key()
+function action.ssh_key_gen()
+	mm.ssh_key_gen()
 	out_json{notify = 'SSH key generated'}
 end
-cmd.ssh_gen_key = action.ssh_gen_key
+cmd.ssh_key_gen = action.ssh_key_gen
 
 --command: pubkey ------------------------------------------------------------
 
@@ -1123,7 +1126,7 @@ function action.ssh_pubkey(machine)
 end
 cmd.ssh_pubkey = action.ssh_pubkey
 
---command: ssh-update-key ----------------------------------------------------
+--command: ssh-key-update ----------------------------------------------------
 
 function mm.each_machine(f)
 	for _, machine in each_row_vals'select machine from machine' do
@@ -1131,16 +1134,16 @@ function mm.each_machine(f)
 	end
 end
 
-function mm.ssh_update_key(machine)
+function mm.ssh_key_update(machine)
 	if not machine then
-		mm.each_machine(mm.ssh_update_key)
+		mm.each_machine(mm.ssh_key_update)
 		return true
 	end
 
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.pubkey()
 	local old_mysql_root_pass = mm.mysql_root_pass(machine)
-	local stored_pubkey = mm.ssh_bash('ssh_update_key', machine, [=[
+	local stored_pubkey = mm.ssh_bash('ssh_key_update', machine, [=[
 		#include utils
 		which mysql >/dev/null && \
 			mysql_update_pass localhost root "$mysql_root_pass"
@@ -1166,26 +1169,26 @@ function mm.ssh_update_key(machine)
 	return true
 end
 
-function action.ssh_update_key(machine)
-	check500(mm.ssh_update_key(machine))
+function action.ssh_key_update(machine)
+	check500(mm.ssh_key_update(machine))
 	out_json{machine = machine,
 		notify = machine
 			and 'SSH key updated for '..machine
 			or 'SSH key update tasks created',
 	}
 end
-cmd.ssh_update_key = action.ssh_update_key
+cmd.ssh_key_update = action.ssh_key_update
 
-function mm.ssh_check_key(machine)
-	local host_pubkey = mm.ssh_bash('ssh_check_key', machine, [[
+function mm.ssh_key_check(machine)
+	local host_pubkey = mm.ssh_bash('ssh_key_check', machine, [[
 		#include utils
 		ssh_pubkey mm
 	]]):stdout():trim()
 	return host_pubkey == mm.pubkey()
 end
 
-function action.ssh_check_key(machine)
-	local ok = mm.ssh_check_key(machine)
+function action.ssh_key_check(machine)
+	local ok = mm.ssh_key_check(machine)
 
 	update_row('machine', {ssh_key_ok = ok, ['machine:old'] = machine}, 'ssh_key_ok')
 	rowset_changed'machines'
@@ -1197,18 +1200,18 @@ function action.ssh_check_key(machine)
 		ssh_key_ok = ok,
 	}
 end
-cmd.ssh_check_key = action.ssh_check_key
+cmd.ssh_key_check = action.ssh_key_check
 
---command: github-update-key -------------------------------------------------
+--command: github-key-update -------------------------------------------------
 
-function mm.github_update_key(machine)
-	mm.ssh_bash('github_update_key', machine, [[
+function mm.github_key_update(machine)
+	mm.ssh_bash('github_key_update', machine, [[
 		#include utils
-		ssh_update_host_fingerprint github.com "$github_fingerprint"
-		ssh_update_host_key github.com mm_github "$github_key"
+		ssh_hostkey_update github.com "$github_fingerprint"
+		ssh_host_key_update github.com mm_github "$github_key"
 		for d in /home/*; do
 			[ -d $d.ssh ] && \
-				HOME=$d ssh_update_host_key github.com mm_github "$github_key"
+				HOME=$d ssh_host_key_update github.com mm_github "$github_key"
 		done
 	]], {
 		github_fingerprint = mm.github_fingerprint,
@@ -1216,15 +1219,15 @@ function mm.github_update_key(machine)
 	})
 end
 
-function action.github_update_key(machine)
+function action.github_key_update(machine)
 	if not machine then
-		mm.each_machine(mm.github_update_key)
+		mm.each_machine(mm.github_key_update)
 		return true
 	end
-	mm.github_update_key(machine)
+	mm.github_key_update(machine)
 	out_json{machine = machine, notify = 'Github key updated'}
 end
-cmd.github_update_key = action.github_update_key
+cmd.github_key_update = action.github_key_update
 
 --command: machine-prepare ---------------------------------------------------
 
@@ -1238,8 +1241,8 @@ function mm.machine_prepare(machine)
 
 		git_install_git_up
 		git_config_user mm@allegory.ro "Many Machines"
-		ssh_update_host_fingerprint github.com "$github_fingerprint"
-		ssh_update_host_key github.com mm_github "$github_key"
+		ssh_hostkey_update github.com "$github_fingerprint"
+		ssh_host_key_update github.com mm_github "$github_key"
 
 		mgit_install
 
@@ -1292,7 +1295,7 @@ function mm.deploy(deploy)
 		must user_create $deploy
 		must user_lock_pass $deploy
 
-		HOME=/home/$deploy USER=$deploy ssh_update_host_key github.com mm_github "$github_key"
+		HOME=/home/$deploy USER=$deploy ssh_host_key_update github.com mm_github "$github_key"
 
 		must mysql_create_schema $deploy
 		must mysql_create_user localhost $deploy "$mysql_pass"
@@ -1356,7 +1359,7 @@ cmd.deploy_remove = action.deploy_remove
 
 --remote access tools --------------------------------------------------------
 
-function cmd.ls()
+function cmd.machines()
 	local to_lua = require'mysql_client'.to_lua
 	pqr(query({
 		compact=1,
@@ -1376,6 +1379,8 @@ function cmd.ls()
 		order by pos, ctime
 ]]))
 end
+
+cmd.ls = cmd.machines
 
 function cmd.ssh(machine, command)
 	mm.sshi(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
@@ -1452,8 +1457,27 @@ function cmd.mount_bg(machine, drive, rem_path)
 	return mm.mount(machine, drive, rem_path, true)
 end
 
-function cmd.unmount_all()
+function cmd.mount_kill_all()
 	exec'taskkill /f /im sshfs.exe'
+end
+
+function cmd.deploys()
+	local to_lua = require'mysql_client'.to_lua
+	pqr(query({
+		compact=1,
+		field_attrs = {ctime = {to_lua = glue.timeago}},
+	}, [[
+		select
+			deploy,
+			machine,
+			repo,
+			version,
+			env,
+			status,
+			unix_timestamp(ctime) as ctime
+		from deploy
+		order by pos, ctime
+]]))
 end
 
 return mm:run(...)
