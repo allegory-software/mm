@@ -258,6 +258,7 @@ html[[
 				<x-grid id=deploys_grid rowset_name=deploys></x-grid>
 				<div>
 					<x-button action_name=deploy_button_action text="Deploy"></x-button>
+					<x-button action_name=deploy_remove_button_action text="Remove Deploy"></x-button>
 				</div>
 			</x-vsplit>
 			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
@@ -403,6 +404,11 @@ function ssh_key_updates_button_action() {
 function deploy_button_action() {
 	let deploy = deploys_grid.focused_row_cell_val('deploy')
 	this.load(['', 'deploy', deploy], check_notify)
+}
+
+function deploy_remove_button_action() {
+	let deploy = deploys_grid.focused_row_cell_val('deploy')
+	this.load(['', 'deploy-remove', deploy], check_notify)
 }
 ]]
 
@@ -713,6 +719,7 @@ function mm.ssh_bash(task_name, machine, script, env, opt)
 	local env = update({
 		MACHINE = machine, --for any script that wants to know
 		DEBUG = logging.debug or nil, --for die script
+		VERBOSE = logging.verbose or nil,
 	}, env)
 	local s = mm.bash_script(script:outdent(), env, opt.pp, {})
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
@@ -861,11 +868,9 @@ end
 
 --bash utils -----------------------------------------------------------------
 
---die 1.0, see https://github.com/capr/die
---these functions are influenced by QUIET and DEBUG env vars.
+--die hard, see https://github.com/capr/die
 mm.script.die = [[
-say()   { [ "$QUIET" ] || echo "$@" >&2; }
-error() { say -n "ERROR: "; say "$@"; return 1; }
+say()   { echo "$@" >&2; }
 die()   { echo -n "EXIT: " >&2; echo "$@" >&2; exit 1; }
 debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
 run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
@@ -1267,8 +1272,10 @@ function mm.machine_prepare(machine)
 		cat << 'EOF' > /etc/mysql/mysql.conf.d/z.cnf
 [mysqld]
 log_bin_trust_function_creators = 1
-		EOF
-		run service mysqld restart
+EOF
+		must service mysql restart
+
+		say Machine prepared.
 
 	]=], {
 		github_fingerprint = mm.github_fingerprint,
@@ -1313,20 +1320,43 @@ function mm.deploy(deploy)
 
 		#include utils
 
-		must user_create $deploy
-		must user_lock_pass $deploy
+		if [ ! -d "/home/$deploy" ]; then
 
-		HOME=/home/$deploy USER=$deploy ssh_host_key_update github.com mm_github "$github_key"
+			must user_create $deploy
+			must user_lock_pass $deploy
 
-		must mysql_create_schema $deploy
-		must mysql_create_user localhost $deploy "$mysql_pass"
-		must mysql_grant_user  localhost $deploy $deploy
+			HOME=/home/$deploy USER=$deploy ssh_host_key_update github.com mm_github "$github_key"
 
-		must cd /home/$deploy
-		must sudo -u $deploy git clone -b $version $repo $app
+			must mysql_create_schema $deploy
+			must mysql_create_user localhost $deploy "$mysql_pass"
+			must mysql_grant_user  localhost $deploy $deploy
+
+			must cd /home/$deploy
+
+			local opt=; [ "$version" ] && opt="-b $version"
+			must sudo -u "$deploy" git clone $opt $repo $app
+
+		else
+
+			must cd /home/$deploy
+
+			if [ -d .mgit ]; then # repo converted itself to mgit
+				must sudo -u "$deploy" mgit clone "$app=$version"
+			else
+				must sudo -u "$deploy" git fetch
+				if [ "$version" ]; then
+					must sudo -u "$deploy" git -c advice.detachedHead=false checkout "$version"
+				else
+					must sudo -u "$deploy" git checkout -B master origin/master
+				fi
+			fi
+
+		fi
+
 		must cd $app
-		must sudo -u $deploy \
+		must sudo -u "$deploy" \
 			DEBUG="$DEBUG" \
+			VERBOSE="$VERBOSE" \
 			MACHINE="$MACHINE" \
 			DEPLOY="$deploy" \
 			MYSQL_SCHEMA="$deploy" \
@@ -1339,7 +1369,7 @@ function mm.deploy(deploy)
 		deploy = deploy,
 		repo = d.repo,
 		app = app,
-		version = d.version or 'master',
+		version = d.version,
 		env = d.env,
 		secret = d.secret,
 		mysql_pass = d.mysql_pass,
@@ -1361,7 +1391,7 @@ function mm.deploy_remove(deploy)
 		#include utils
 
 		run cd /home/$deploy \
-			&& run ./$app stop
+			&& (cd $app && run ./$app stop)
 
 		mysql_drop_schema $deploy
 		mysql_drop_user localhost $deploy
