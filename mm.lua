@@ -717,14 +717,13 @@ end
 --that only bash could have: bash reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte more, so we can
 --feed in stdin right after that. worse-is-better at its finest.
-function mm.ssh_bash(task_name, machine, script, env, opt)
+function mm.ssh_bash(task_name, machine, script, script_env, opt)
 	opt = opt or {}
-	local env = update({
-		MACHINE = machine, --for any script that wants to know
-		DEBUG = logging.debug or nil, --for die script
-		VERBOSE = logging.verbose or nil,
-	}, env)
-	local s = mm.bash_script(script:outdent(), env, opt.pp, {})
+	local script_env = update({
+		DEBUG   = env'DEBUG',
+		VERBOSE = env'VERBOSE',
+	}, script_env)
+	local s = mm.bash_script(script:outdent(), script_env, opt.pp_env, {})
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
 	return mm.ssh(task_name, machine, {'bash', '-s'}, opt)
 end
@@ -903,16 +902,17 @@ ssh_hostkey_update() { # host fingerprint
 	must chmod 644 $kh
 }
 
-ssh_host_update() { # host keyname
-	say "Assigning SSH key '$2' to host '$1' ($HOME)..."
+ssh_host_update() { # host keyname [moving_ip]
+	say "Assigning SSH key '$2' to host '$1' $HOME $3..."
 	must mkdir -p $HOME/.ssh
 	local CONFIG=$HOME/.ssh/config
 	sed < $CONFIG "/^$/d;s/Host /$NL&/" | sed '/^Host '"$1"'$/,/^$/d;' > $CONFIG
-	cat << EOF >> $CONFIG
-Host $1
-	HostName $1
-	IdentityFile $HOME/.ssh/${2}.id_rsa
-EOF
+	(
+		printf "%s\n" "Host $1"
+		printf "\t%s\n" "HostName $1"
+		printf "\t%s\n" "IdentityFile $HOME/.ssh/${2}.id_rsa"
+		[ "$3" ] && printf "\t%s\n" "CheckHostIP no"
+	) >> $CONFIG
 	must chown $USER:$USER -R $HOME/.ssh
 }
 
@@ -925,9 +925,9 @@ ssh_key_update() { # keyname key
 	must chown $USER:$USER -R $HOME/.ssh
 }
 
-ssh_host_key_update() { # host keyname key
+ssh_host_key_update() { # host keyname key [moving_ip]
 	ssh_key_update "$2" "$3"
-	ssh_host_update "$1" "$2"
+	ssh_host_update "$1" "$2" "$4"
 }
 
 ssh_update_pubkey() { # keyname key
@@ -1234,10 +1234,11 @@ function mm.github_key_update(machine)
 	mm.ssh_bash('github_key_update', machine, [[
 		#include utils
 		ssh_hostkey_update github.com "$github_fingerprint"
-		ssh_host_key_update github.com mm_github "$github_key"
-		for d in /home/*; do
-			[ -d $d.ssh ] && \
-				HOME=$d ssh_host_key_update github.com mm_github "$github_key"
+		ssh_host_key_update github.com mm_github "$github_key" moving_ip
+		must cd /home
+		for user in *; do
+			[ -d /home/$user/.ssh ] && \
+				HOME=/home/$user USER=$user ssh_host_key_update github.com mm_github "$github_key" moving_ip
 		done
 	]], {
 		github_fingerprint = mm.github_fingerprint,
@@ -1267,7 +1268,7 @@ function mm.machine_prepare(machine)
 		git_install_git_up
 		git_config_user mm@allegory.ro "Many Machines"
 		ssh_hostkey_update github.com "$github_fingerprint"
-		ssh_host_key_update github.com mm_github "$github_key"
+		ssh_host_key_update github.com mm_github "$github_key" moving_ip
 
 		mgit_install
 
@@ -1280,7 +1281,7 @@ log_bin_trust_function_creators = 1
 EOF
 		must service mysql restart
 
-		say Machine prepared.
+		say "All done."
 
 	]=], {
 		github_fingerprint = mm.github_fingerprint,
@@ -1330,7 +1331,8 @@ function mm.deploy(deploy)
 			must user_create $deploy
 			must user_lock_pass $deploy
 
-			HOME=/home/$deploy USER=$deploy ssh_host_key_update github.com mm_github "$github_key"
+			HOME=/home/$deploy USER=$deploy ssh_host_key_update \
+				github.com mm_github "$github_key" moving_ip
 
 			must mysql_create_schema $deploy
 			must mysql_create_user localhost $deploy "$mysql_pass"
@@ -1338,9 +1340,8 @@ function mm.deploy(deploy)
 
 			must run_as "$deploy" << EOF
 
-must cd /home/$deploy
-
-local opt=; [ "$version" ] && opt="-b $version"
+cd /home/$deploy || exit
+opt=; [ "$version" ] && opt="-b $version"
 git clone $opt $repo $app
 
 EOF
@@ -1349,7 +1350,7 @@ EOF
 
 			must run_as "$deploy" << EOF
 
-cd /home/$deploy/$app || exit
+cd /home/$deploy/$app || { echo "Could not cd to $app dir" >&2; exit 1; }
 
 if [ -d .mgit ]; then # repo converted itself to mgit
 	mgit clone "$app=$version"
@@ -1411,13 +1412,17 @@ function mm.deploy_remove(deploy)
 
 		#include utils
 
-		run cd /home/$deploy \
-			&& (cd $app && run ./$app stop)
+		[ -d /home/$deploy/$app ] && (
+			must cd /home/$deploy/$app
+			run ./$app stop
+		)
 
 		mysql_drop_schema $deploy
 		mysql_drop_user localhost $deploy
 
 		user_remove $deploy
+
+		say "All done."
 
 	]], {
 		app = app,
