@@ -158,7 +158,8 @@ function mm.install()
 		deploy      $strpk,
 		machine     $strid not null, $fk(deploy, machine),
 		repo        $url not null,
-		version     $strid,
+		wanted_version $strid,
+		deployed_version $strid,
 		env         $strid not null,
 		secret      $b64key not null, --multi-purpose
 		mysql_pass  $hash not null,
@@ -478,7 +479,8 @@ rowset.deploys = sql_rowset{
 			deploy,
 			machine,
 			repo,
-			version,
+			wanted_version,
+			deployed_version,
 			env,
 			status
 		from
@@ -490,10 +492,10 @@ rowset.deploys = sql_rowset{
 	insert_row = function(self, row)
 		row.secret = b64.encode(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64.encode(random_string(23)) --results in a 32 byte string
- 		insert_row('deploy', row, 'deploy machine repo version env secret mysql_pass pos')
+ 		insert_row('deploy', row, 'deploy machine repo wanted_version env secret mysql_pass pos')
 	end,
 	update_row = function(self, row)
-		update_row('deploy', row, 'deploy machine repo version env pos')
+		update_row('deploy', row, 'deploy machine repo wanted_version env pos')
 	end,
 	delete_row = function(self, row)
 		delete_row('deploy', row, 'deploy')
@@ -620,6 +622,7 @@ function mm.exec(task_name, cmd, opt)
 	if #task.errors > 0 then
 		error(concat(task.errors, '\n'))
 	end
+	assertf(task.exit_code == 0, 'Task finished with exit code %d', task.exit_code)
 
 	return task
 end
@@ -871,7 +874,7 @@ end
 --die hard, see https://github.com/capr/die
 mm.script.die = [[
 say()   { echo "$@" >&2; }
-die()   { echo -n "EXIT: " >&2; echo "$@" >&2; exit 1; }
+die()   { echo -n "ABORT: " >&2; echo "$@" >&2; exit 1; }
 debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
 run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
 must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
@@ -880,6 +883,8 @@ must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 
 mm.script.utils = [[
 
 #include die
+
+run_as() { sudo -u "$1" -s DEBUG="$DEBUG" VERBOSE="$VERBOSE" -s --; }
 
 rm_subdir() {
 	[ "${1:0:1}" == "/" ] || { say "base dir not absolute"; return 1; }
@@ -1298,13 +1303,13 @@ end
 
 function mm.deploy(deploy)
 
-	checkarg(str_arg(deploy), 'deploy required')
+	deploy = checkarg(str_arg(deploy), 'deploy required')
 
 	local d = first_row([[
 		select
 			d.machine,
 			d.repo,
-			d.version,
+			d.wanted_version,
 			d.env,
 			d.mysql_pass,
 			d.secret
@@ -1331,50 +1336,66 @@ function mm.deploy(deploy)
 			must mysql_create_user localhost $deploy "$mysql_pass"
 			must mysql_grant_user  localhost $deploy $deploy
 
-			must cd /home/$deploy
+			must run_as "$deploy" << EOF
 
-			local opt=; [ "$version" ] && opt="-b $version"
-			must sudo -u "$deploy" git clone $opt $repo $app
+must cd /home/$deploy
+
+local opt=; [ "$version" ] && opt="-b $version"
+git clone $opt $repo $app
+
+EOF
 
 		else
 
-			must cd /home/$deploy
+			must run_as "$deploy" << EOF
 
-			if [ -d .mgit ]; then # repo converted itself to mgit
-				must sudo -u "$deploy" mgit clone "$app=$version"
-			else
-				must sudo -u "$deploy" git fetch
-				if [ "$version" ]; then
-					must sudo -u "$deploy" git -c advice.detachedHead=false checkout "$version"
-				else
-					must sudo -u "$deploy" git checkout -B master origin/master
-				fi
-			fi
+cd /home/$deploy/$app || exit
 
+if [ -d .mgit ]; then # repo converted itself to mgit
+	mgit clone "$app=$version"
+else
+	git fetch || exit
+	if [ "$version" ]; then
+		git -c advice.detachedHead=false checkout "$version"
+	else
+		git checkout -B master origin/master
+	fi
+fi
+
+EOF
 		fi
 
-		must cd $app
 		must sudo -u "$deploy" \
 			DEBUG="$DEBUG" \
 			VERBOSE="$VERBOSE" \
-			MACHINE="$MACHINE" \
-			DEPLOY="$deploy" \
+			ENV="$env" \
+			VERSION="$version" \
 			MYSQL_SCHEMA="$deploy" \
 			MYSQL_USER="$deploy" \
 			MYSQL_PASS="$mysql_pass" \
 			SECRET="$secret" \
-				-- ./$app deploy $env
+			-s -- << EOF
+
+cd /home/$deploy/$app || exit
+./$app deploy
+
+EOF
 
 	]], {
 		deploy = deploy,
 		repo = d.repo,
 		app = app,
-		version = d.version,
-		env = d.env,
+		version = d.wanted_version,
+		env = d.env or 'dev',
 		secret = d.secret,
 		mysql_pass = d.mysql_pass,
 		github_key = mm.github_key,
-	}, {capture_stdout = false})
+	})
+
+	update_row('deploy', {
+		deployed_version = d.wanted_version,
+		['deploy:old'] = deploy,
+	}, 'deployed_version')
 
 end
 
@@ -1386,7 +1407,7 @@ function mm.deploy_remove(deploy)
 	local d = first_row('select repo, machine from deploy where deploy = ?', deploy)
 	local app = mm.app_name(d.repo)
 
-	mm.ssh_bash('deploy', d.machine, [[
+	mm.ssh_bash('deploy_remove', d.machine, [[
 
 		#include utils
 
@@ -1532,7 +1553,8 @@ function cmd.deploys()
 			deploy,
 			machine,
 			repo,
-			version,
+			wanted_version,
+			deployed_version,
 			env,
 			status,
 			unix_timestamp(ctime) as ctime
