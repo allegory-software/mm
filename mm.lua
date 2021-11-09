@@ -3,13 +3,13 @@
 	Many Machines, a SAAS Provisioning & Maintainance Plaform.
 	Written by Cosmin Apreutesei. Public Domain.
 
-	TODO: ssh | mysql |
-
-	TODO: find a way for plink to only see the rsa ssh host key.
-
 	TODO: make mm portable by using file rowsets instead of mysql.
+	TODO: make mm even more portable by saving the var dir to git-hosted encrypted zip files.
 
+	TODO: one-command-multiple-hosts: both web and cmdline.
+	TODO: use plink linux binary to gen the ppk on linux.
 	TODO: convert cmdline to posting mm tasks if mm server is running.
+	TODO: bind libssh2 or see what is needed to implement ssh2 protocol in Lua.
 
 ]]
 
@@ -21,6 +21,7 @@ local proc = require'proc'
 local sock = require'sock'
 local xapp = require'xapp'
 local mustache = require'mustache'
+local queue = require'queue'
 
 local sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 
@@ -148,6 +149,7 @@ function mm.install()
 		ram_free_gb double,
 		hdd_gb      double,
 		hdd_free_gb double,
+		log_port    int,
 		pos         $pos,
 		ctime       $ctime
 	);
@@ -257,10 +259,13 @@ html[[
 			</x-vsplit>
 			<x-vsplit action=deploys>
 				<x-grid id=deploys_grid rowset_name=deploys></x-grid>
-				<div>
-					<x-button action_name=deploy_button_action text="Deploy"></x-button>
-					<x-button action_name=deploy_remove_button_action text="Remove Deploy"></x-button>
-				</div>
+				<x-split>
+					<div>
+						<x-button action_name=deploy_button_action text="Deploy"></x-button>
+						<x-button action_name=deploy_remove_button_action text="Remove Deploy"></x-button>
+					</div>
+					<x-grid rowset_name=deploy_log param_nav_id=deploys_grid params=deploy></x-grid>
+				</x-split>
 			</x-vsplit>
 			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
 				<x-bare-nav id=config_nav rowset_name=config></x-bare-nav>
@@ -382,11 +387,29 @@ document.on('machines_grid.init', function(e) {
 		})
 
 		items.push({
-			text: 'Update Github key',
+			text: 'Update github key',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
 					get(['', 'github-key-update', machine], check_notify)
+			},
+		})
+
+		items.push({
+			text: 'Start log server',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					get(['', 'log-server-start', machine], check_notify)
+			},
+		})
+
+		items.push({
+			text: 'Test log server',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					get(['', 'testlog', machine], check_notify)
 			},
 		})
 
@@ -635,7 +658,13 @@ function mm.ip(machine)
 	return checkfound(ip, 'machine not found')
 end
 
+--NOTE: the only reason for wanting to use plink on Windows is because ssh's
+--`ControlMaster` option (less laggy tasks) doesn't work on Windows but putty
+--has an option to share an already-open ssh connection for a new session
+--and we could use that maybe (needs some refactoring though).
 function mm.ssh(task_name, machine, args, opt)
+	opt = opt or {}
+	opt.affects = machine
 	if Windows and (opt.use_plink or mm.use_plink) then
 		--TODO: plink is missing a timeout option (look for a putty fork which has it?).
 		return mm.exec(task_name, extend({
@@ -742,6 +771,7 @@ function mm.task(task_name, opt)
 	local self = inherit({
 		id = last_task_id,
 		name = task_name,
+		affects = opt.affects,
 		cmd = cmd,
 		start_time = time(),
 		duration = 0,
@@ -811,6 +841,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		{name = 'id'        , type = 'number', w = 20},
 		{name = 'pinned'    , type = 'bool'},
 		{name = 'name'      , },
+		{name = 'affects'   , hint = 'Entities that this task affects'},
 		{name = 'status'    , },
 		{name = 'start_time', type = 'timestamp'},
 		{name = 'duration'  , type = 'number', decimals = 2,  w = 20,
@@ -828,6 +859,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 			task.id,
 			task.pinned or false,
 			task.name,
+			task.affects,
 			task.status,
 			task.start_time,
 			task.duration,
@@ -1369,6 +1401,7 @@ EOF
 		must sudo -u "$deploy" \
 			DEBUG="$DEBUG" \
 			VERBOSE="$VERBOSE" \
+			DEPLOY="$deploy" \
 			ENV="$env" \
 			VERSION="$version" \
 			MYSQL_SCHEMA="$deploy" \
@@ -1432,6 +1465,130 @@ end
 action.deploy_remove = mm.deploy_remove
 cmd.deploy_remove = action.deploy_remove
 
+--remote logging -------------------------------------------------------------
+
+mm.log_port = 5555
+mm.log_local_port1 = 6000
+mm.log_queue_size = 10000
+
+function mm.alloc_log_tunnel_ports()
+	local lport1 = mm.log_local_port1
+	local lport2 = first_row'select max(log_port) from machine where log_port is not null' or lport1-1
+	for i, machine in each_row_vals'select machine from machine where log_port is null' do
+		update_row('machine', {
+			log_port = lport2 + i,
+			['machine:old'] = machine,
+		}, 'log_port')
+	end
+end
+
+function mm.logport(machine)
+	machine = checkarg(str_arg(machine))
+	return first_row('select log_port from machine where machine = ?', machine)
+end
+
+mm.log_server_tasks = {}
+mm.deploy_logs = {}
+
+function mm.log_server_start(machine)
+	machine = checkarg(str_arg(machine))
+	if not mm.log_server_tasks[machine] then
+		local lport = mm.logport(machine)
+		if not lport then
+			mm.alloc_log_tunnel_ports()
+			lport = assert(mm.logport(machine))
+		end
+		thread(function()
+			mm.tunnel('log_tunnel', machine,
+				lport..':'..mm.log_port, {reverse_tunnel = true})
+			note('mm', 'TUNNEL', '%d <- %s:%d', lport, machine, mm.logport)
+		end)
+		local task = mm.task('log_server', {affects = machine})
+		thread(function()
+			local tcp = assert(sock.tcp())
+			assert(tcp:setopt('reuseaddr', true))
+			assert(tcp:listen('127.0.0.1', lport))
+			note('mm', 'LISTEN', '127.0.0.1:%d', lport)
+			task:setstatus'running'
+			while not task.stop do
+				local ctcp = assert(tcp:accept())
+				thread(function()
+					note('mm', 'ACCEPT', '%d <- %s', lport, machine)
+					local lenbuf = u32a(1)
+					local msgbuf = buffer()
+					local plenbuf = cast(u8p, lenbuf)
+					while not task.stop do
+						local len = ctcp:recvn(plenbuf, 4)
+						if not len then break end
+						local len = lenbuf[0]
+						local buf = msgbuf(len)
+						assert(ctcp:recvn(buf, len))
+						local s = ffi.string(buf, len)
+						local msg = loadstring('return '..s)()
+						msg.machine = machine
+						local q = mm.deploy_logs[msg.deploy]
+						if not q then
+							q = queue.new(mm.log_queue_size)
+							q.next_id = 1
+							mm.deploy_logs[msg.deploy] = q
+						end
+						if q:full() then
+							q:pop()
+						end
+						msg.id = q.next_id
+						q.next_id = q.next_id + 1
+						q:push(msg)
+						rowset_changed'deploy_log'
+					end
+					ctcp:close()
+				end)
+			end
+			task:free()
+		end)
+		mm.log_server_tasks[machine] = task
+	end
+end
+
+action.log_server_start = mm.log_server_start
+
+rowset.deploy_log = virtual_rowset(function(self)
+	self.fields = {
+		{name = 'id'      , hidden = true},
+		{name = 'deploy'  , },
+		{name = 'severity', },
+		{name = 'module'  , },
+		{name = 'event'   , },
+		{name = 'message' , maxlen = 16 * 1024^2},
+		{name = 'time'    , type = 'timestamp'},
+		{name = 'env'     , },
+	}
+	self.pk = 'id'
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local deploy = params['param:filter'][1]
+		if not deploy then return end
+		local msg_queue = mm.deploy_logs[deploy]
+		if not msg_queue then return end
+		for msg in msg_queue:items() do
+			add(rs.rows, {msg.id, msg.deploy, msg.severity, msg.module, msg.event, msg.message, msg.time, msg.env})
+		end
+	end
+end)
+
+function action.testlog(machine)
+	mm.ssh_bash('testlog', machine, [[
+		#include utils
+		must run_as sp1 << EOF
+cd /home/sp1/sp || exit 1
+./sp testlog || exit 1
+EOF
+	]])
+	--for _, machine, lport in ech_row_vals'select machine, log_port from machine' do
+	--end
+end
+
+cmd.log_server = mm.log_server
+
 --remote access tools --------------------------------------------------------
 
 function cmd.machines()
@@ -1481,15 +1638,23 @@ function wincmd.putty(machine)
 	proc.exec(indir(exedir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
 end
 
-function cmd.tunnel(machine, ports)
+function mm.tunnel(task_name, machine, ports, opt)
 	local args = {'-N'}
 	ports = checkarg(str_arg(ports), 'Usage: mm tunnel MACHINE LPORT1[:RPORT1],...')
 	for ports in ports:gmatch'([^,]+)' do
 		local rport, lport = ports:match'(.-):(.*)'
-		add(args, '-L')
+		add(args, opt and opt.reverse_tunnel and '-R' or '-L')
 		add(args, '127.0.0.1:'..(lport or ports)..':127.0.0.1:'..(rport or ports))
 	end
-	mm.sshi(machine, args)
+	return mm.ssh(task_name, machine, args,
+		opt and opt.interactive and update({capture_stdout = false, allocate_tty = true}, opt))
+end
+
+function cmd.tunnel(machine, ports)
+	return mm.tunnel(nil, machine, ports, {interactive = true})
+end
+function cmd.rtunnel(machine, ports)
+	return mm.tunnel(nil, machine, ports, {interactive = true, reverse_tunnel = true})
 end
 
 local function censor_mysql_pwd(s)
@@ -1567,5 +1732,9 @@ function cmd.deploys()
 		order by pos, ctime
 	]]))
 end
+
+webb.run(function()
+	--add_column('machine', 'log_port', 'int after hdd_free_gb')
+end)
 
 return mm:run(...)
