@@ -25,6 +25,7 @@ local queue = require'queue'
 
 local sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 
+config('http_port', 8080)
 local mm = xapp(daemon'mm')
 mm.use_plink = false
 
@@ -219,7 +220,7 @@ body[theme=dark] .header {
 	overflow-x: scroll;
 }
 
-#config_form.maxcols1 {
+#mm_config_form.maxcols1 {
 	max-width: 400px;
 	grid-template-areas:
 		"h1"
@@ -246,30 +247,30 @@ html[[
 			<div b><span class="fa fa-server"></span> MANY MACHINES</div>
 			<x-settings-button></x-settings-button>
 		</div>
-		<x-listbox id=actions_listbox>
+		<x-listbox id=mm_actions_listbox>
 			<div action=machines>Machines</div>
 			<div action=deploys>Deployments</div>
 			<div action=config>Configuration</div>
 		</x-listbox>
 	</div>
 	<x-vsplit fixed_side=second>
-		<x-switcher nav_id=actions_listbox>
+		<x-switcher nav_id=mm_actions_listbox>
 			<x-vsplit action=machines>
-				<x-grid id=machines_grid rowset_name=machines></x-grid>
+				<x-grid id=mm_machines_grid rowset_name=machines></x-grid>
 			</x-vsplit>
 			<x-vsplit action=deploys>
-				<x-grid id=deploys_grid rowset_name=deploys></x-grid>
+				<x-grid id=mm_deploys_grid rowset_name=deploys></x-grid>
 				<x-split>
 					<div>
 						<x-button action_name=deploy_button_action text="Deploy"></x-button>
 						<x-button action_name=deploy_remove_button_action text="Remove Deploy"></x-button>
 					</div>
-					<x-grid rowset_name=deploy_log param_nav_id=deploys_grid params=deploy></x-grid>
+					<x-grid id=mm_deploy_log_grid rowset_name=deploy_log param_nav_id=mm_deploys_grid params=deploy></x-grid>
 				</x-split>
 			</x-vsplit>
 			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
-				<x-bare-nav id=config_nav rowset_name=config></x-bare-nav>
-				<x-form nav_id=config_nav id=config_form>
+				<x-bare-nav id=mm_config_nav rowset_name=config></x-bare-nav>
+				<x-form nav_id=mm_config_nav id=mm_config_form>
 					<h2 area=h1>SSH</h2>
 					<x-textarea rows=12 col=mm_pubkey infomode=under
 						info="This is the SSH key used to log in as root on all machines.">
@@ -286,10 +287,10 @@ html[[
 			</div>
 		</x-switcher>
 		<x-split action=tasks fixed_side=second fixed_size=600>
-			<x-grid id=tasks_grid rowset_name=tasks save_row_on=input></x-grid>
+			<x-grid id=mm_tasks_grid rowset_name=tasks save_row_on=input></x-grid>
 			<x-pagelist>
-				<x-textarea mono console class=x-stretched title="OUT/ERR" id=task_out_textarea nav_id=tasks_grid col=out></x-textarea>
-				<x-textarea mono console class=x-stretched title="STDIN" id=task_stdin_textarea nav_id=tasks_grid col=stdin></x-textarea>
+				<x-textarea mono console class=x-stretched title="OUT/ERR" id=mm_task_out_textarea nav_id=mm_tasks_grid col=out></x-textarea>
+				<x-textarea mono console class=x-stretched title="STDIN" id=mm_task_stdin_textarea nav_id=mm_tasks_grid col=stdin></x-textarea>
 			</x-pagelist>
 		</x-split>
 	</x-vsplit>
@@ -319,7 +320,7 @@ rowset_field_attrs['machines.refresh'] = {
 }
 
 // output textarea auto-scroll.
-document.on('task_out_textarea.init', function(e) {
+document.on('mm_task_out_textarea.init', function(e) {
 	e.do_after('do_update_val', function() {
 		let te = e.$1('textarea')
 		if (te)
@@ -333,7 +334,7 @@ function check_notify(t) {
 }
 
 // machines grid context menu items.
-document.on('machines_grid.init', function(e) {
+document.on('mm_machines_grid.init', function(e) {
 
 	e.on('init_context_menu_items', function(items) {
 
@@ -426,12 +427,12 @@ function ssh_key_updates_button_action() {
 }
 
 function deploy_button_action() {
-	let deploy = deploys_grid.focused_row_cell_val('deploy')
+	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
 	this.load(['', 'deploy', deploy], check_notify)
 }
 
 function deploy_remove_button_action() {
-	let deploy = deploys_grid.focused_row_cell_val('deploy')
+	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
 	this.load(['', 'deploy-remove', deploy], check_notify)
 }
 ]]
@@ -1554,23 +1555,27 @@ action.log_server_start = mm.log_server_start
 rowset.deploy_log = virtual_rowset(function(self)
 	self.fields = {
 		{name = 'id'      , hidden = true},
-		{name = 'deploy'  , },
-		{name = 'severity', },
-		{name = 'module'  , },
-		{name = 'event'   , },
+		{name = 'time'    , max_w = 100, type = 'timestamp'},
+		{name = 'deploy'  , max_w =  80},
+		{name = 'severity', max_w =  60},
+		{name = 'module'  , max_w =  60},
+		{name = 'event'   , max_w =  60},
 		{name = 'message' , maxlen = 16 * 1024^2},
-		{name = 'time'    , type = 'timestamp'},
-		{name = 'env'     , },
+		{name = 'env'     , hidden = true},
 	}
 	self.pk = 'id'
 	function self:load_rows(rs, params)
 		rs.rows = {}
-		local deploy = params['param:filter'][1]
-		if not deploy then return end
-		local msg_queue = mm.deploy_logs[deploy]
-		if not msg_queue then return end
-		for msg in msg_queue:items() do
-			add(rs.rows, {msg.id, msg.deploy, msg.severity, msg.module, msg.event, msg.message, msg.time, msg.env})
+		local deploys = params['param:filter']
+		if deploys then
+			for _, deploy in ipairs(deploys) do
+				local msg_queue = mm.deploy_logs[deploy]
+				if msg_queue then
+					for msg in msg_queue:items() do
+						add(rs.rows, {msg.id, msg.time, msg.deploy, msg.severity, msg.module, msg.event, msg.message, msg.env})
+					end
+				end
+			end
 		end
 	end
 end)
