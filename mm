@@ -39,8 +39,8 @@ usage() {
 	say
 	say " USAGE: $APP [OPTIONS] COMMAND ..."
 	say
-	say "   run                               run the server in foreground"
-	say "   start | stop | restart | status   control the server"
+	say "   run                               run the server in the console"
+	say "   start | stop | restart | status   run the server in background"
 	say "   tail                              tail the log file"
 	say
 	say "   [help|--help]                     show this screen"
