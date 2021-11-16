@@ -410,7 +410,7 @@ rowset_field_attrs['machines.refresh'] = {
 	w: 40,
 	button_options: {icon: 'fa fa-sync', bare: true, text: '', load_spin: true},
 	action: function(machine) {
-		this.load(['', 'machine-update-info', machine])
+		this.load(['', 'machine-info-update', machine])
 	},
 }
 
@@ -1141,19 +1141,22 @@ user_remove() {
 	rm_subdir /home $1
 }
 
+has_mysql() { which mysql >/dev/null; }
+
 query() {
 	if [ -f /root/mysql_root_pass ]; then
 		MYSQL_PWD="$(cat /root/mysql_root_pass)" must mysql -N -B -h 127.0.0.1 -u root -e "$1"
 	else
-		# on a fresh mysql install we can login as root without a password
-		# because the default auth plugin for root@localhost is `unix_socket`.
+		# on a fresh mysql install we can login from the `root` system user
+		# as mysql user `root` without a password because the default auth
+		# plugin for `root` (without hostname!) is `unix_socket`.
 		must mysql -N -B -u root -e "$1"
 	fi
 }
 
 mysql_create_user() { # host user pass
 	say "Creating MySQL user '$2@$1'..."
-	must query "
+	query "
 		create user '$2'@'$1' identified with mysql_native_password by '$3';
 		flush privileges;
 	"
@@ -1161,12 +1164,12 @@ mysql_create_user() { # host user pass
 
 mysql_drop_user() { # host user
 	say "Dropping MySQL user '$2@$1'..."
-	must query "drop user if exists '$2'@'$1'; flush privileges;"
+	query "drop user if exists '$2'@'$1'; flush privileges;"
 }
 
 mysql_update_pass() { # host user pass
 	say "Updating MySQL password for user '$2@$1'..."
-	must query "
+	query "
 		alter user '$2'@'$1' identified with mysql_native_password by '$3';
 		flush privileges;
 	"
@@ -1180,7 +1183,7 @@ mysql_update_root_pass() { # pass
 
 mysql_create_schema() { # schema
 	say "Creating MySQL schema '$1'..."
-	must query "
+	query "
 		create database $1
 			character set utf8mb4
 			collate utf8mb4_unicode_ci;
@@ -1189,11 +1192,11 @@ mysql_create_schema() { # schema
 
 mysql_drop_schema() { # schema
 	say "Dropping MySQL schema '$1'..."
-	must query "drop database if exists $1"
+	query "drop database if exists $1"
 }
 
 mysql_grant_user() { # host user schema
-	must query "
+	query "
 		grant all privileges on $3.* to '$2'@'$1';
 		flush privileges;
 	"
@@ -1245,16 +1248,33 @@ xbkp() {
 		--user=root --password="$(cat /root/mysql_root_pass)" $@
 }
 
+mysql_table_exists() { # schema table
+	[ "$(query "select 1 from information_schema.tables
+		where table_schema = '$1' and table_name = '$2'")" ]
+}
+
+mysql_column_exists() { # schema table column
+	[ "$(query "select 1 from information_schema.columns
+		where table_schema = '$1' and table_name = '$2' and column_name = '$3'")" ]
+}
+
+schema_version() { # deploy
+	mysql_table_exists "$1" config \
+		&& mysql_column_exists "$1" config schema_version \
+		&& query "select schema_version from \`$1\`.config"
+}
+
 xbkp_backup() { # deploy bkp parent_bkp
-	local d="/root/mm-bkp/$1/$2"
+	local sv="$(schema_version)"; [ "$sv" ] || sv=0
+	local d="/root/mm-bkp/$1/$sv-$2"
 	must mkdir -f "$d"
-	xbkp "$d" --backup --compress --compress-threads=4
+	must xbkp "$d" --backup --compress --compress-threads=2 --databases="$1"
 }
 
 xbkp_restore() { # deploy bkp
 	local d="/root/mm-bkp/$1/$2"
-	xbkp "$d" --decompress --parallel
-	xbkp "$d" --prepare
+	xbkp "$d" --decompress --parallel --decompress-threads=2
+	xbkp "$d" --prepare --export
 	xbkp "$d" --move-back
 }
 
@@ -1265,35 +1285,43 @@ xbkp_remove() { # deploy bkp ...
 
 ]]
 
---command: machine-update-info -----------------------------------------------
+--command: machine-info-update -----------------------------------------------
 
-function mm.machine_get_info(machine)
-	local stdout = mm.ssh_bash('machine_get_info', machine, [=[
+function mm.machine_info(machine)
+	local stdout = mm.ssh_bash('machine_info', machine, [=[
 
 		#include utils
 
-		echo "os_ver        $(lsb_release -sd)"
-		echo "mysql_ver     $(which mysql >/dev/null && query 'select version();')"
-		echo "cpu           $(lscpu | sed -n 's/^Model name:\s*\(.*\)/\1/p')"
-							cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
-					  sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
-		echo "cores         $(expr $sockets \* $cps)"
-		echo "ram_gb        $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf "%.2f",$2}')"
-		echo "ram_free_gb   $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
-		echo "hdd_gb        $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
-		echo "hdd_free_gb   $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
+		echo "           os_ver $(lsb_release -sd)"
+		echo "        mysql_ver $(has_mysql && query 'select version();')"
+		echo "              cpu $(lscpu | sed -n 's/^Model name:\s*\(.*\)/\1/p')"
+		                   cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
+		               sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
+		echo "            cores $(expr $sockets \* $cps)"
+		echo "           ram_gb $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf "%.2f",$2}')"
+		echo "      ram_free_gb $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
+		echo "           hdd_gb $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
+		echo "      hdd_free_gb $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
 	]=]):stdout()
 	local t = {last_seen = time()}
 	for s in stdout:trim():lines() do
-		local k,v = assert(s:match'^(.-)%s+(.*)')
+		local k,v = assert(s:match'^%s*(.-)%s+(.*)')
+		add(t, k)
 		t[k] = v
 	end
 	return t
 end
 
-function mm.machine_update_info(machine)
-	t = assert(mm.machine_get_info(machine))
+function cmd.machine_info(machine)
+	local t = mm.machine_info(machine)
+	for i,k in ipairs(t) do
+		print(_('%20s %s', k, t[k]))
+	end
+end
+
+function mm.machine_info_update(machine)
+	t = assert(mm.machine_info(machine))
 	t['machine:old'] = machine
 	assert(update_row('machine', t, [[
 		os_ver
@@ -1308,9 +1336,8 @@ function mm.machine_update_info(machine)
 	]]).affected_rows == 1)
 	rowset_changed'machines'
 end
-
-action.machine_update_info = mm.machine_update_info
-cmd.machine_update_info = action.machine_update_info
+action.machine_info_update = mm.machine_info_update
+cmd.machine_info_update = action.machine_info_update
 
 --command: ssh-hostkey-update ---------------------------------------
 
@@ -1386,8 +1413,7 @@ function mm.ssh_key_update(machine)
 	local pubkey = mm.pubkey()
 	local stored_pubkey = mm.ssh_bash('ssh_key_update', machine, [=[
 		#include utils
-		which mysql >/dev/null && \
-			mysql_update_root_pass "$mysql_root_pass"
+		has_mysql && mysql_update_root_pass "$mysql_root_pass"
 		ssh_update_pubkey mm "$pubkey"
 		user_lock_pass root
 		ssh_pubkey mm
@@ -1788,6 +1814,15 @@ cmd.log_server = mm.log_server
 
 --backups --------------------------------------------------------------------
 
+function cmd.schema_version(deploy)
+	deploy = checkarg(str_arg(deploy))
+	local machine = checkarg((first_row('select machine from deploy where deploy = ?', deploy)))
+	local ver = tonumber(mm.ssh_bash('schema_version', machine, [[
+		#include utils
+		schema_version ]]..deploy):stdout():trim())
+	print(ver)
+end
+
 rowset.backups = sql_rowset{
 	select = [[
 		select
@@ -1850,7 +1885,7 @@ function cmd.machines()
 			cpu,
 			os_ver,
 			mysql_ver,
-			unix_timestamp(ctime as ctime)
+			unix_timestamp(ctime) as ctime
 		from machine
 		order by pos, ctime
 ]]))
