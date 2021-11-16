@@ -1,14 +1,49 @@
 --[[
 
-	Many Machines, a SAAS Provisioning & Maintainance Plaform.
+	Many Machines, the independent man's SAAS provisioning tool.
 	Written by Cosmin Apreutesei. Public Domain.
+
+	Many Machines is a bare-bones provisioning and administration tool
+	for web apps deployed on dedicated machines or VPS, as opposed to cloud
+	services as it's customary these days (unless you count VPS as cloud).
+
+	Highlights:
+	- Lua API, web UI & cmdline for everything.
+	- Windows-native sysadmin tools (sshfs, putty, etc.).
+	- agentless.
+
+	Features:
+	- keep a database of machines and deployments.
+	- maintain secure access to all services via bulk key updates:
+		- ssh root access.
+		- MySQL root access.
+		- github access.
+	- "one-click" launcher for secure admin sessions:
+		- bash (cmd & putty).
+		- mysql (cmd & putty).
+		- remote fs mounts (Windows & Linux).
+		- ssh tunnels.
+	- machine "prepare" script (one-time install script for a new machine).
+	- task system with process tracking and output capturing.
+	- deploy script.
+	- remote logging server.
+	- MySQL backups: full, incremental, per-schema, per-table, hot-restore.
+	- file replication: full, incremental (hardlink-based).
+
+	Limitations:
+	- the machines need to run Linux (Debian 10) and have a public IP.
+	- all deployments connect to the same MySQL server instance.
+	- each deployment is given a single MySQL schema.
+	- code has to be on github (in a public or private repo).
+	- single github key for github access.
+	- apps have to be able to self-install and self-upgrade/downgrade.
 
 	TODO: make mm portable by using file rowsets instead of mysql.
 	TODO: make mm even more portable by saving the var dir to git-hosted encrypted zip files.
 
 	TODO: one-command-multiple-hosts: both web and cmdline.
 	TODO: use plink linux binary to gen the ppk on linux.
-	TODO: convert cmdline to posting mm tasks if mm server is running.
+	TODO: convert cmdline to posting mm tasks (via http?) if mm server is running.
 	TODO: bind libssh2 or see what is needed to implement ssh2 protocol in Lua.
 
 ]]
@@ -51,7 +86,7 @@ function mm.ppkfile(machine, suffix)
 end
 
 function mm.pubkey(machine, suffix)
-	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
+	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()..' mm'
 end
 
 --TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
@@ -97,10 +132,11 @@ function mm.mysql_root_pass(machine) --last line of the private key
 	assert(#s == 32)
 	return s
 end
-function cmd.mysql_root_pass(machine)
+function action.mysql_root_pass(machine)
 	setmime'txt'
 	out(mm.mysql_root_pass(machine))
 end
+cmd.mysql_root_pass = action.mysql_root_pass
 
 --config ---------------------------------------------------------------------
 
@@ -127,6 +163,11 @@ github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXY
 
 --database -------------------------------------------------------------------
 
+sqlpp.col_type_attrs.timestamp = {to_lua = timeago}
+sqlpp.col_name_attrs.ctime = {type = 'timestamp', text = 'Created At'}
+sqlpp.col_name_attrs.mtime = {type = 'timestamp', text = 'Last Modified At'}
+sqlpp.col_name_attrs.atime = {type = 'timestamp', text = 'Last Accessed At'}
+
 function mm.install()
 
 	create_schema()
@@ -134,8 +175,20 @@ function mm.install()
 	auth_create_tables()
 
 	query[[
+	$table provider (
+		provider    $strpk,
+		website     $url,
+		note        text,
+		pos         $pos,
+		ctime       $ctime
+	);
+	]]
+
+	query[[
 	$table machine (
 		machine     $strpk,
+		provider    $strid not null, $fk(machine, provider),
+		location    $strid not null,
 		public_ip   $strid,
 		local_ip    $strid,
 		fingerprint $b64key,
@@ -160,6 +213,7 @@ function mm.install()
 	$table deploy (
 		deploy      $strpk,
 		machine     $strid not null, $fk(deploy, machine),
+		master_deploy $strid, $fk(deploy, master_deploy, deploy),
 		repo        $url not null,
 		wanted_version $strid,
 		deployed_version $strid,
@@ -171,6 +225,42 @@ function mm.install()
 		pos         $pos
 	);
 	]]
+
+	query[[
+	$table bkp (
+		bkp         $pk,
+		parent_bkp  $id, $child_fk(bkp, parent_bkp, bkp),
+		deploy      $strid not null, $child_fk(bkp, deploy),
+		machine     $strid not null, $child_fk(bkp, machine),
+		start_time  timestamp,
+		duration    int unsigned,
+		size        bigint unsigned,
+		checksum    $hash,
+		name        $name
+	);
+	]]
+
+	--[=[
+
+	query[[
+	$table repl (
+		repl        $pk,
+		deploy      $str,
+		master      $strid not null, $fk(repl, master, machine),
+		path        $url not null
+	);
+	]]
+
+	query[[
+	$table repl_copy (
+		repl        $id not null, $child_fk(repl_copy, repl),
+		machine     $strid not null, $child_fk(repl, machine),
+		last_sync   timestamp,
+		primary key (repl, machine),
+	);
+	]]
+
+	]=]
 
 end
 
@@ -248,6 +338,7 @@ html[[
 			<x-settings-button></x-settings-button>
 		</div>
 		<x-listbox id=mm_actions_listbox>
+			<div action=providers>Providers</div>
 			<div action=machines>Machines</div>
 			<div action=deploys>Deployments</div>
 			<div action=config>Configuration</div>
@@ -255,6 +346,7 @@ html[[
 	</div>
 	<x-vsplit fixed_side=second>
 		<x-switcher nav_id=mm_actions_listbox>
+			<x-grid action=providers id=mm_providers_grid rowset_name=providers></x-grid>
 			<x-vsplit action=machines>
 				<x-grid id=mm_machines_grid rowset_name=machines></x-grid>
 			</x-vsplit>
@@ -265,7 +357,10 @@ html[[
 						<x-button action_name=deploy_button_action text="Deploy"></x-button>
 						<x-button action_name=deploy_remove_button_action text="Remove Deploy"></x-button>
 					</div>
-					<x-grid id=mm_deploy_log_grid rowset_name=deploy_log param_nav_id=mm_deploys_grid params=deploy></x-grid>
+					<x-pagelist>
+						<x-grid id=mm_deploy_log_grid rowset_name=deploy_log param_nav_id=mm_deploys_grid params=deploy title="Live Log"></x-grid>
+						<x-grid id=mm_backups rowset_name=backups param_nav_id=mm_deploys_grid params=deploy title="Backups"></x-grid>
+					</x-pagelist>
 				</x-split>
 			</x-vsplit>
 			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
@@ -437,12 +532,40 @@ function deploy_remove_button_action() {
 }
 ]]
 
+rowset.providers = sql_rowset{
+	select = [[
+		select
+			provider,
+			website,
+			note,
+			pos,
+			unix_timestamp(ctime) as ctime
+		from
+			provider
+	]],
+	pk = 'provider',
+	field_attrs = {
+		website = {type = 'url'},
+	},
+	insert_row = function(self, row)
+		insert_row('provider', row, 'provider website note pos')
+	end,
+	update_row = function(self, row)
+		update_row('provider', row, 'provider website note pos')
+	end,
+	delete_row = function(self, row)
+		delete_row('provider', row)
+	end,
+}
+
 rowset.machines = sql_rowset{
 	select = [[
 		select
 			pos,
 			machine as refresh,
 			machine,
+			provider,
+			location,
 			public_ip,
 			local_ip,
 			admin_page,
@@ -455,7 +578,8 @@ rowset.machines = sql_rowset{
 			hdd_gb,
 			hdd_free_gb,
 			os_ver,
-			mysql_ver
+			mysql_ver,
+			unix_timestamp(ctime) as ctime
 		from
 			machine
 	]],
@@ -477,10 +601,12 @@ rowset.machines = sql_rowset{
 		mysql_ver   = {readonly = true, text = 'MySQL Version'},
 	},
 	insert_row = function(self, row)
-		insert_row('machine', row, 'machine public_ip local_ip admin_page pos')
+		insert_row('machine', row, 'machine provider location public_ip local_ip admin_page pos')
+		cp(mm.keyfile(), mm.keyfile(row.machine))
+		cp(mm.ppkfile(), mm.ppkfile(row.machine))
 	end,
 	update_row = function(self, row)
-		update_row('machine', row, 'machine public_ip local_ip admin_page pos')
+		update_row('machine', row, 'machine provider location public_ip local_ip admin_page pos')
 		local m1 = row.machine
 		local m0 = row['machine:old']
 		if m1 and m1 ~= m0 then
@@ -489,7 +615,7 @@ rowset.machines = sql_rowset{
 		end
 	end,
 	delete_row = function(self, row)
-		delete_row('machine', row, 'machine')
+		delete_row('machine', row)
 		local m0 = row['machine:old']
 		rm(mm.keyfile(m0))
 		rm(mm.ppkfile(m0))
@@ -501,6 +627,7 @@ rowset.deploys = sql_rowset{
 		select
 			pos,
 			deploy,
+			master_deploy,
 			machine,
 			repo,
 			wanted_version,
@@ -511,18 +638,20 @@ rowset.deploys = sql_rowset{
 			deploy
 	]],
 	pk = 'deploy',
+	parent_col = 'master_deploy',
+	name_col = 'deploy',
 	field_attrs = {
 	},
 	insert_row = function(self, row)
 		row.secret = b64.encode(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64.encode(random_string(23)) --results in a 32 byte string
- 		insert_row('deploy', row, 'deploy machine repo wanted_version env secret mysql_pass pos')
+ 		insert_row('deploy', row, 'deploy master_deploy machine repo wanted_version env secret mysql_pass pos')
 	end,
 	update_row = function(self, row)
-		update_row('deploy', row, 'deploy machine repo wanted_version env pos')
+		update_row('deploy', row, 'deploy master_deploy machine repo wanted_version env pos')
 	end,
 	delete_row = function(self, row)
-		delete_row('deploy', row, 'deploy')
+		delete_row('deploy', row)
 	end,
 }
 
@@ -968,7 +1097,7 @@ ssh_update_pubkey() { # keyname key
 	local ak=$HOME/.ssh/authorized_keys
 	must mkdir -p $HOME/.ssh
 	[ -f $ak ] && must sed -i "/ $1/d" $ak
-	must printf "%s" "$2" >> $ak
+	must printf "%s\n" "$2" >> $ak
 	must chmod 600 $ak
 	must chown $USER:$USER -R $HOME/.ssh
 }
@@ -1013,7 +1142,13 @@ user_remove() {
 }
 
 query() {
-	MYSQL_PWD="$(cat /root/mysql_root_pass)" must mysql -N -B -u root -e "$1"
+	if [ -f /root/mysql_root_pass ]; then
+		MYSQL_PWD="$(cat /root/mysql_root_pass)" must mysql -N -B -h 127.0.0.1 -u root -e "$1"
+	else
+		# on a fresh mysql install we can login as root without a password
+		# because the default auth plugin for root@localhost is `unix_socket`.
+		must mysql -N -B -u root -e "$1"
+	fi
 }
 
 mysql_create_user() { # host user pass
@@ -1064,13 +1199,36 @@ mysql_grant_user() { # host user schema
 	"
 }
 
-ubuntu_install_packages() { # package1 ...
-	say "Installing Ubuntu packages: $@..."
-	run apt-get -y update
-	run apt-get -y install $@
+apt_get() {
+	export DEBIAN_FRONTEND=noninteractive
+	must apt-get -y -qq -o=Dpkg::Use-Pty=0 $@
 }
 
-mgit_install() {
+apt_get_install() { # package1 ...
+	say "Installing packages: $@..."
+	apt_get update
+	apt_get install $@
+}
+
+# make setup non-interactive and set the mysql root password.
+#must debconf-set-selections << EOF
+#percona-xtradb-cluster-server percona-xtradb-cluster-server/root-pass password
+#percona-xtradb-cluster-server percona-xtradb-cluster-server/re-root-pass password
+#EOF
+
+install_percona_pxc() {
+	local f=percona-release_latest.generic_all.deb
+	must wget -nv https://repo.percona.com/apt/$f
+	export DEBIAN_FRONTEND=noninteractive
+	must dpkg -i $f
+	apt_get update
+	apt_get install --fix-broken
+	must rm $f
+	must percona-release setup -y pxc80
+	apt_get_install percona-xtradb-cluster percona-xtrabackup-80 qpress
+}
+
+install_mgit() {
 	must mkdir -p /opt
 	must cd /opt
 	if [ -d mgit ]; then
@@ -1079,6 +1237,30 @@ mgit_install() {
 		must git clone git@github.com:capr/multigit.git mgit
 	fi
 	must ln -sf /opt/mgit/mgit /usr/local/bin/mgit
+}
+
+xbkp() {
+	local d="$1"; shift
+	must xtrabackup --target-dir="$d" \
+		--user=root --password="$(cat /root/mysql_root_pass)" $@
+}
+
+xbkp_backup() { # deploy bkp parent_bkp
+	local d="/root/mm-bkp/$1/$2"
+	must mkdir -f "$d"
+	xbkp "$d" --backup --compress --compress-threads=4
+}
+
+xbkp_restore() { # deploy bkp
+	local d="/root/mm-bkp/$1/$2"
+	xbkp "$d" --decompress --parallel
+	xbkp "$d" --prepare
+	xbkp "$d" --move-back
+}
+
+xbkp_remove() { # deploy bkp ...
+	[ "$1" ] || die "deploy missing"
+	rm_subdir "/root/mm-bkp/$1" "$2"
 }
 
 ]]
@@ -1296,23 +1478,33 @@ function mm.machine_prepare(machine)
 
 		#include utils
 
-		ubuntu_install_packages htop mc mysql-server
+		# ----------------------------------------------------------------------
+
+		apt_get_install htop mc git gnupg2 curl lsb-release
+
+		# ---------------------------------------------------------------------
 
 		git_install_git_up
+
 		git_config_user mm@allegory.ro "Many Machines"
+
 		ssh_hostkey_update github.com "$github_fingerprint"
 		ssh_host_key_update github.com mm_github "$github_key" moving_ip
 
-		mgit_install
+		install_mgit
 
-		touch /root/mysql_root_pass     # mysql works with password=no when root.
-		mysql_update_root_pass "$mysql_root_pass"
+		# ---------------------------------------------------------------------
+
+		install_percona_pxc
 
 		cat << 'EOF' > /etc/mysql/mysql.conf.d/z.cnf
 [mysqld]
 log_bin_trust_function_creators = 1
 EOF
-		must service mysql restart
+
+		must service mysql start
+
+		mysql_update_root_pass "$mysql_root_pass"
 
 		say "All done."
 
@@ -1331,7 +1523,7 @@ cmd.machine_prepare = action.machine_prepare
 
 --command: deploy ------------------------------------------------------------
 
-function mm.app_name(repo)
+function mm.repo_app_name(repo)
 	return repo:gsub('%.git$', ''):match'/(.-)$'
 end
 
@@ -1353,7 +1545,7 @@ function mm.deploy(deploy)
 			deploy = ?
 	]], deploy)
 
-	local app = mm.app_name(d.repo)
+	local app = mm.repo_app_name(d.repo)
 
 	mm.ssh_bash('deploy', d.machine, [[
 
@@ -1440,7 +1632,7 @@ cmd.deploy = action.deploy
 function mm.deploy_remove(deploy)
 	deploy = checkarg(str_arg(deploy), 'deploy required')
 	local d = first_row('select repo, machine from deploy where deploy = ?', deploy)
-	local app = mm.app_name(d.repo)
+	local app = mm.repo_app_name(d.repo)
 
 	mm.ssh_bash('deploy_remove', d.machine, [[
 
@@ -1594,6 +1786,52 @@ end
 
 cmd.log_server = mm.log_server
 
+--backups --------------------------------------------------------------------
+
+rowset.backups = sql_rowset{
+	select = [[
+		select
+			b.bkp        ,
+			b.parent_bkp ,
+			b.deploy     ,
+			d.machine deploy_machine,
+			b.store_machine,
+			b.start_time ,
+			b.duration   ,
+			b.size       ,
+			b.checksum   ,
+			b.name       ,
+		from bkp
+		inner join deploy d on d.deploy = b.deploy
+	]],
+	where_all = 'deploy in (:param:filter)',
+	pk = 'bkp',
+	parent_col = 'parent_bkp',
+	insert_row = function(self, row)
+ 		local bkp = insert_row('bkp', row, 'parent_bkp deploy machine name')
+		mm.ssh_bash('backup', row.deploy_machine, [[
+			#include utils
+			xbkp_backup "$deploy" "$bkp" "$parent_bkp"
+		]], {bkp = bkp, parent_bkp = parent_bkp, deploy = row.deploy})
+	end,
+	update_row = function(self, row)
+		update_row('bkp', row, 'name')
+	end,
+	delete_row = function(self, row)
+		local bkp = row['bkp:old']
+		local bkp = first_row([[
+			select machine, deploy
+			from bkp where bkp = ?
+		]], bkp)
+		local bkps = {bkp.bkp}
+		mm.ssh_bash('backups_remove '..concat(bkps, ' '), bkp.machine, [[
+			#include bkp
+			must xbkp_remove $bkps
+		]], {bkps = bkps})
+		delete_row('bkp', row)
+	end,
+}
+
 --remote access tools --------------------------------------------------------
 
 function cmd.machines()
@@ -1611,7 +1849,8 @@ function cmd.machines()
 			hdd_gb, hdd_free_gb,
 			cpu,
 			os_ver,
-			mysql_ver
+			mysql_ver,
+			unix_timestamp(ctime as ctime)
 		from machine
 		order by pos, ctime
 ]]))
@@ -1666,7 +1905,8 @@ local function censor_mysql_pwd(s)
 	return s:gsub('MYSQL_PWD=[^%s]+', 'MYSQL_PWD=censored')
 end
 function cmd.mysql(machine, sql)
-	local args = {'MYSQL_PWD='..mm.mysql_root_pass(machine), 'mysql', '-u', 'root', '-h', 'localhost'}
+	local args = {'MYSQL_PWD='..mm.mysql_root_pass(machine),
+		'mysql', '-u', 'root', '-h', 'localhost'}
 	if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
 	logging.censor.mysql_pwd = censor_mysql_pwd
 	mm.sshi(machine, args)
@@ -1722,7 +1962,7 @@ function cmd.deploys()
 	local to_lua = require'mysql_client'.to_lua
 	pqr(query({
 		compact=1,
-		field_attrs = {ctime = {to_lua = glue.timeago}},
+		field_attrs = {},
 	}, [[
 		select
 			deploy,
