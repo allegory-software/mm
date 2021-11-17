@@ -231,7 +231,6 @@ function mm.install()
 		bkp         $pk,
 		parent_bkp  $id, $child_fk(bkp, parent_bkp, bkp),
 		deploy      $strid not null, $child_fk(bkp, deploy),
-		machine     $strid not null, $child_fk(bkp, machine),
 		start_time  timestamp,
 		duration    int unsigned,
 		size        bigint unsigned,
@@ -1052,7 +1051,6 @@ rm_subdir() {
 	[ "$2" ] || { say "subdir required"; return 1; }
 	local dir="$1/$2"
 	say "Removing dir '$dir'..."
-	[ -d "$dir" ] || return 1
 	must rm -rf "$dir"
 }
 
@@ -1267,8 +1265,9 @@ schema_version() { # deploy
 xbkp_backup() { # deploy bkp parent_bkp
 	local sv="$(schema_version)"; [ "$sv" ] || sv=0
 	local d="/root/mm-bkp/$1/$sv-$2"
-	must mkdir -f "$d"
-	must xbkp "$d" --backup --compress --compress-threads=2 --databases="$1"
+	must mkdir -p "$d"
+	# --compress --compress-threads=2
+	must xbkp "$d" --backup # --databases="$1"
 }
 
 xbkp_restore() { # deploy bkp
@@ -1278,7 +1277,7 @@ xbkp_restore() { # deploy bkp
 	xbkp "$d" --move-back
 }
 
-xbkp_remove() { # deploy bkp ...
+xbkp_remove() { # deploy bkp
 	[ "$1" ] || die "deploy missing"
 	rm_subdir "/root/mm-bkp/$1" "$2"
 }
@@ -1506,7 +1505,7 @@ function mm.machine_prepare(machine)
 
 		# ----------------------------------------------------------------------
 
-		apt_get_install htop mc git gnupg2 curl lsb-release
+		apt_get_install sudo htop mc git gnupg2 curl lsb-release
 
 		# ---------------------------------------------------------------------
 
@@ -1829,40 +1828,44 @@ rowset.backups = sql_rowset{
 			b.bkp        ,
 			b.parent_bkp ,
 			b.deploy     ,
-			d.machine deploy_machine,
-			b.store_machine,
-			b.start_time ,
+			unix_timestamp(b.start_time) as start_time,
 			b.duration   ,
 			b.size       ,
 			b.checksum   ,
-			b.name       ,
-		from bkp
-		inner join deploy d on d.deploy = b.deploy
+			b.name
+		from bkp b
 	]],
-	where_all = 'deploy in (:param:filter)',
+	where_all = 'b.deploy in (:param:filter)',
 	pk = 'bkp',
+	field_attrs = {
+		start_time = {type = 'timestamp', to_lua = timeago},
+	},
 	parent_col = 'parent_bkp',
 	insert_row = function(self, row)
- 		local bkp = insert_row('bkp', row, 'parent_bkp deploy machine name')
-		mm.ssh_bash('backup', row.deploy_machine, [[
-			#include utils
-			xbkp_backup "$deploy" "$bkp" "$parent_bkp"
-		]], {bkp = bkp, parent_bkp = parent_bkp, deploy = row.deploy})
+		local machine = checkarg(first_row('select machine from deploy where deploy = ?', row.deploy))
+ 		row.bkp = insert_row('bkp', row, 'parent_bkp deploy name')
+		row.start_time = time()
+		query('update bkp set start_time = from_unixtime(?) where bkp = ?', row.start_time, row.bkp)
+		thread(function()
+			mm.ssh_bash('backup', machine, [[
+				#include utils
+				xbkp_backup "$deploy" "$bkp" "$parent_bkp"
+			]], {deploy = row.deploy, bkp = row.bkp, parent_bkp = parent_bkp})
+			update_row('bkp', {['bkp:old'] = row.bkp, duration = time() - row.start_time}, 'duration')
+			rowset_changed'backups'
+		end)
 	end,
 	update_row = function(self, row)
 		update_row('bkp', row, 'name')
 	end,
 	delete_row = function(self, row)
 		local bkp = row['bkp:old']
-		local bkp = first_row([[
-			select machine, deploy
-			from bkp where bkp = ?
-		]], bkp)
-		local bkps = {bkp.bkp}
-		mm.ssh_bash('backups_remove '..concat(bkps, ' '), bkp.machine, [[
-			#include bkp
-			must xbkp_remove $bkps
-		]], {bkps = bkps})
+		local deploy = checkarg(first_row('select deploy from bkp where bkp = ?', bkp))
+ 		local machine = checkarg(first_row('select machine from deploy where deploy = ?', deploy))
+		mm.ssh_bash('backup_remove '..bkp, machine, [[
+			#include utils
+			must xbkp_remove "$deploy" "$bkp"
+		]], {deploy = deploy, bkp = bkp})
 		delete_row('bkp', row)
 	end,
 }
