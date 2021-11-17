@@ -9,7 +9,8 @@ luapower/glue
 luapower/heap
 luapower/hmac
 luapower/http
-luapower/libb64
+luapower/linebuffer
+luapower/base64
 luapower/logging
 luapower/lpeg
 luapower/luajit
@@ -22,7 +23,6 @@ luapower/queue
 luapower/sha1
 luapower/sha2
 luapower/sock
-luapower/socketloop
 luapower/sqlpp
 luapower/time
 luapower/uri
