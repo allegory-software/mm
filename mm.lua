@@ -51,7 +51,7 @@
 require'$daemon'
 require'xmodule'
 
-local b64 = require'libb64'
+local b64 = require'base64'.encode
 local proc = require'proc'
 local sock = require'sock'
 local xapp = require'xapp'
@@ -642,8 +642,8 @@ rowset.deploys = sql_rowset{
 	field_attrs = {
 	},
 	insert_row = function(self, row)
-		row.secret = b64.encode(random_string(46)) --results in a 64 byte string
- 		row.mysql_pass = b64.encode(random_string(23)) --results in a 32 byte string
+		row.secret = b64(random_string(46)) --results in a 64 byte string
+ 		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
  		insert_row('deploy', row, 'deploy master_deploy machine repo wanted_version env secret mysql_pass pos')
 	end,
 	update_row = function(self, row)
