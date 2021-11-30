@@ -1,10 +1,12 @@
 # Many Machines
 
-Many Machines is a DevOp platform with a web UI. MM lets you add remote
-machines to a database and then run custom bash scripts on them and
-monitor/see the output of those scrips in real-time. It also lets you create
-deployments which you can then install on specific machines, move them
-from one machine to another, perform automatic updates, etc.
+Many Machines is a SAAS provisioning and administration tool with
+a web and command-line UI.
+
+MM keeps a database of your machines and deployments and provides you with
+a shell from which to do all your tedious sysadmin tasks, from SSH key
+management and backups to automated deployments and upgrades, app monitoring
+and database cluster configuration.
 
 ## Downloading
 
@@ -16,37 +18,20 @@ mgit clone-all
 
 ## Dependencies
 
-MySQL 8.
+Tarantool 2.8.
 
 ## Configuration
 
-```
-home.key            ssh private key that gives root access to any machine
-home.key.pub        ssh public key of home.key
-mm-github.key       github private key that allows pushing to github (optional)
-```
+I'll write it when it's stable.
 
 ## Installation
 
-```
-mm install
-```
-
-Creates a new database.
-
-__WARNING__: If a database already exists it is removed first!
-
-## Starting the server
-
-```
-mm start
-```
-
-You can now go to http://localhost/ and add your machines.
+I'll write it when it's stable.
 
 ## Adding machines
 
-Any machine you add must be preconfigured to allow root access using
-`home.key`. For that you need to put the contents of `home.key.pub`
-in `/root/.ssh/authorized_keys` (don't forget to chmod the file to `0600`
+Any machine you add must be preconfigured to allow SSH root access using
+`mm-var/mm.key`. For that you need to put the contents of the SSH public
+key (which you can get by typing `mm ssh-pubkey`) in the machine's
+`/root/.ssh/authorized_keys` (don't forget to chmod the file to `0600`
 if you had to create it).

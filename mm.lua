@@ -828,6 +828,8 @@ end
 
 mm.script = {} --{name->script}
 
+mm.script.mm = load(indir(app_dir, 'mm.sh'))
+
 function mm.bash_preprocess(vars)
 	return mustache.render(s, vars, nil, nil, nil, nil, proc.esc_unix)
 end
@@ -884,6 +886,10 @@ function mm.ssh_bash(task_name, machine, script, script_env, opt)
 	local s = mm.bash_script(script:outdent(), script_env, opt.pp_env, {})
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
 	return mm.ssh(task_name, machine, {'bash', '-s'}, opt)
+end
+
+function mm.ssh_mm(task_name, machine, script, ...)
+	return mm.ssh_bash(task_name, machine, '#include mm\n\n'..script:outdent(), ...)
 end
 
 --tasks ----------------------------------------------------------------------
@@ -1029,267 +1035,10 @@ local function checknostderr(task)
 	return task
 end
 
---bash utils -----------------------------------------------------------------
-
---die hard, see https://github.com/capr/die
-mm.script.die = [[
-say()   { echo "$@" >&2; }
-die()   { echo -n "ABORT: " >&2; echo "$@" >&2; exit 1; }
-debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
-run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
-must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
-]]
-
-mm.script.utils = [[
-
-#include die
-
-run_as() { sudo -u "$1" -s DEBUG="$DEBUG" VERBOSE="$VERBOSE" -s --; }
-
-rm_subdir() {
-	[ "${1:0:1}" == "/" ] || { say "base dir not absolute"; return 1; }
-	[ "$2" ] || { say "subdir required"; return 1; }
-	local dir="$1/$2"
-	say "Removing dir '$dir'..."
-	must rm -rf "$dir"
-}
-
-ssh_hostkey_update() { # host fingerprint
-	say "Updating SSH host fingerprint for host '$1' (/etc/ssh)..."
-	local kh=/etc/ssh/ssh_known_hosts
-	run ssh-keygen -R "$1" -f $kh
-	must printf "%s\n" "$2" >> $kh
-	must chmod 644 $kh
-}
-
-ssh_host_update() { # host keyname [moving_ip]
-	say "Assigning SSH key '$2' to host '$1' $HOME $3..."
-	must mkdir -p $HOME/.ssh
-	local CONFIG=$HOME/.ssh/config
-	sed < $CONFIG "/^$/d;s/Host /$NL&/" | sed '/^Host '"$1"'$/,/^$/d;' > $CONFIG
-	(
-		printf "%s\n" "Host $1"
-		printf "\t%s\n" "HostName $1"
-		printf "\t%s\n" "IdentityFile $HOME/.ssh/${2}.id_rsa"
-		[ "$3" ] && printf "\t%s\n" "CheckHostIP no"
-	) >> $CONFIG
-	must chown $USER:$USER -R $HOME/.ssh
-}
-
-ssh_key_update() { # keyname key
-	say "Updating SSH key '$1' ($HOME)..."
-	must mkdir -p $HOME/.ssh
-	local idf=$HOME/.ssh/${1}.id_rsa
-	must printf "%s" "$2" > $idf
-	must chmod 600 $idf
-	must chown $USER:$USER -R $HOME/.ssh
-}
-
-ssh_host_key_update() { # host keyname key [moving_ip]
-	ssh_key_update "$2" "$3"
-	ssh_host_update "$1" "$2" "$4"
-}
-
-ssh_update_pubkey() { # keyname key
-	say "Updating SSH public key '$1'..."
-	local ak=$HOME/.ssh/authorized_keys
-	must mkdir -p $HOME/.ssh
-	[ -f $ak ] && must sed -i "/ $1/d" $ak
-	must printf "%s\n" "$2" >> $ak
-	must chmod 600 $ak
-	must chown $USER:$USER -R $HOME/.ssh
-}
-
-ssh_pubkey() { # keyname
-	cat $HOME/.ssh/authorized_keys | grep " $1\$"
-}
-
-git_install_git_up() {
-	say "Installing 'git up' command..."
-	local git_up=/usr/lib/git-core/git-up
-	cat << 'EOF' > $git_up
-msg="$1"; [ "$msg" ] || msg="unimportant"
-git add -A .
-git commit -m "$msg"
-git push
-EOF
-	must chmod +x $git_up
-}
-
-git_config_user() { # email name
-	run git config --global user.email "$1"
-	run git config --global user.name "$2"
-}
-
-user_create() { # user
-	say "Creating user '$1'..."
-	must useradd -m $1
-	must chsh -s /bin/bash $1
-}
-
-user_lock_pass() { # user
-	say "Locking password for user '$1'..."
-	must passwd -l $1 >&2
-}
-
-user_remove() {
-	[ "$1" ] || die "user required"
-	say "Removing user '$1'..."
-	id -u $1 &>/dev/null && must userdel $1
-	rm_subdir /home $1
-}
-
-has_mysql() { which mysql >/dev/null; }
-
-query() {
-	if [ -f /root/mysql_root_pass ]; then
-		MYSQL_PWD="$(cat /root/mysql_root_pass)" must mysql -N -B -h 127.0.0.1 -u root -e "$1"
-	else
-		# on a fresh mysql install we can login from the `root` system user
-		# as mysql user `root` without a password because the default auth
-		# plugin for `root` (without hostname!) is `unix_socket`.
-		must mysql -N -B -u root -e "$1"
-	fi
-}
-
-mysql_create_user() { # host user pass
-	say "Creating MySQL user '$2@$1'..."
-	query "
-		create user '$2'@'$1' identified with mysql_native_password by '$3';
-		flush privileges;
-	"
-}
-
-mysql_drop_user() { # host user
-	say "Dropping MySQL user '$2@$1'..."
-	query "drop user if exists '$2'@'$1'; flush privileges;"
-}
-
-mysql_update_pass() { # host user pass
-	say "Updating MySQL password for user '$2@$1'..."
-	query "
-		alter user '$2'@'$1' identified with mysql_native_password by '$3';
-		flush privileges;
-	"
-}
-
-mysql_update_root_pass() { # pass
-	mysql_update_pass localhost root "$1"
-	must echo -n "$1" > /root/mysql_root_pass
-	must chmod 600 /root/mysql_root_pass
-}
-
-mysql_create_schema() { # schema
-	say "Creating MySQL schema '$1'..."
-	query "
-		create database $1
-			character set utf8mb4
-			collate utf8mb4_unicode_ci;
-	"
-}
-
-mysql_drop_schema() { # schema
-	say "Dropping MySQL schema '$1'..."
-	query "drop database if exists $1"
-}
-
-mysql_grant_user() { # host user schema
-	query "
-		grant all privileges on $3.* to '$2'@'$1';
-		flush privileges;
-	"
-}
-
-apt_get() {
-	export DEBIAN_FRONTEND=noninteractive
-	must apt-get -y -qq -o=Dpkg::Use-Pty=0 $@
-}
-
-apt_get_install() { # package1 ...
-	say "Installing packages: $@..."
-	apt_get update
-	apt_get install $@
-}
-
-# make setup non-interactive and set the mysql root password.
-#must debconf-set-selections << EOF
-#percona-xtradb-cluster-server percona-xtradb-cluster-server/root-pass password
-#percona-xtradb-cluster-server percona-xtradb-cluster-server/re-root-pass password
-#EOF
-
-install_percona_pxc() {
-	local f=percona-release_latest.generic_all.deb
-	must wget -nv https://repo.percona.com/apt/$f
-	export DEBIAN_FRONTEND=noninteractive
-	must dpkg -i $f
-	apt_get update
-	apt_get install --fix-broken
-	must rm $f
-	must percona-release setup -y pxc80
-	apt_get_install percona-xtradb-cluster percona-xtrabackup-80 qpress
-}
-
-install_mgit() {
-	must mkdir -p /opt
-	must cd /opt
-	if [ -d mgit ]; then
-		cd mgit && git pull
-	else
-		must git clone git@github.com:capr/multigit.git mgit
-	fi
-	must ln -sf /opt/mgit/mgit /usr/local/bin/mgit
-}
-
-xbkp() {
-	local d="$1"; shift
-	must xtrabackup --target-dir="$d" \
-		--user=root --password="$(cat /root/mysql_root_pass)" $@
-}
-
-mysql_table_exists() { # schema table
-	[ "$(query "select 1 from information_schema.tables
-		where table_schema = '$1' and table_name = '$2'")" ]
-}
-
-mysql_column_exists() { # schema table column
-	[ "$(query "select 1 from information_schema.columns
-		where table_schema = '$1' and table_name = '$2' and column_name = '$3'")" ]
-}
-
-schema_version() { # deploy
-	mysql_table_exists "$1" config \
-		&& mysql_column_exists "$1" config schema_version \
-		&& query "select schema_version from \`$1\`.config"
-}
-
-xbkp_backup() { # deploy bkp parent_bkp
-	local sv="$(schema_version)"; [ "$sv" ] || sv=0
-	local d="/root/mm-bkp/$1/$sv-$2"
-	must mkdir -p "$d"
-	# --compress --compress-threads=2
-	must xbkp "$d" --backup # --databases="$1"
-}
-
-xbkp_restore() { # deploy bkp
-	local d="/root/mm-bkp/$1/$2"
-	xbkp "$d" --decompress --parallel --decompress-threads=2
-	xbkp "$d" --prepare --export
-	xbkp "$d" --move-back
-}
-
-xbkp_remove() { # deploy bkp
-	[ "$1" ] || die "deploy missing"
-	rm_subdir "/root/mm-bkp/$1" "$2"
-}
-
-]]
-
 --command: machine-info-update -----------------------------------------------
 
 function mm.machine_info(machine)
-	local stdout = mm.ssh_bash('machine_info', machine, [=[
-
-		#include utils
+	local stdout = mm.ssh_mm('machine_info', machine, [=[
 
 		echo "           os_ver $(lsb_release -sd)"
 		echo "        mysql_ver $(has_mysql && query 'select version();')"
@@ -1322,17 +1071,20 @@ end
 function mm.machine_info_update(machine)
 	t = assert(mm.machine_info(machine))
 	t['machine:old'] = machine
-	assert(update_row('machine', t, [[
-		os_ver
-		mysql_ver
-		cpu
-		cores
-		ram_gb
-		ram_free_gb
-		hdd_gb
-		hdd_free_gb
-		last_seen
-	]]).affected_rows == 1)
+	assert(query([[
+	update machine set
+		os_ver      = :os_ver,
+		mysql_ver   = :mysql_ver,
+		cpu         = :cpu,
+		cores       = :cores,
+		ram_gb      = :ram_gb,
+		ram_free_gb = :ram_free_gb,
+		hdd_gb      = :hdd_gb,
+		hdd_free_gb = :hdd_free_gb,
+		last_seen   = from_unixtime(:last_seen)
+	where
+		machine = :machine:old
+	]], t).affected_rows == 1)
 	rowset_changed'machines'
 end
 action.machine_info_update = mm.machine_info_update
@@ -1410,8 +1162,7 @@ function mm.ssh_key_update(machine)
 
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.pubkey()
-	local stored_pubkey = mm.ssh_bash('ssh_key_update', machine, [=[
-		#include utils
+	local stored_pubkey = mm.ssh_mm('ssh_key_update', machine, [=[
 		has_mysql && mysql_update_root_pass "$mysql_root_pass"
 		ssh_update_pubkey mm "$pubkey"
 		user_lock_pass root
@@ -1446,8 +1197,7 @@ end
 cmd.ssh_key_update = action.ssh_key_update
 
 function mm.ssh_key_check(machine)
-	local host_pubkey = mm.ssh_bash('ssh_key_check', machine, [[
-		#include utils
+	local host_pubkey = mm.ssh_mm('ssh_key_check', machine, [[
 		ssh_pubkey mm
 	]]):stdout():trim()
 	return host_pubkey == mm.pubkey()
@@ -1471,8 +1221,7 @@ cmd.ssh_key_check = action.ssh_key_check
 --command: github-key-update -------------------------------------------------
 
 function mm.github_key_update(machine)
-	mm.ssh_bash('github_key_update', machine, [[
-		#include utils
+	mm.ssh_mm('github_key_update', machine, [[
 		ssh_hostkey_update github.com "$github_fingerprint"
 		ssh_host_key_update github.com mm_github "$github_key" moving_ip
 		must cd /home
@@ -1499,11 +1248,7 @@ cmd.github_key_update = action.github_key_update
 --command: machine-prepare ---------------------------------------------------
 
 function mm.machine_prepare(machine)
-	mm.ssh_bash('machine_prepare', machine, [=[
-
-		#include utils
-
-		# ----------------------------------------------------------------------
+	mm.ssh_mm('machine_prepare', machine, [=[
 
 		apt_get_install sudo htop mc git gnupg2 curl lsb-release
 
@@ -1516,11 +1261,11 @@ function mm.machine_prepare(machine)
 		ssh_hostkey_update github.com "$github_fingerprint"
 		ssh_host_key_update github.com mm_github "$github_key" moving_ip
 
-		install_mgit
+		mgit_install
 
 		# ---------------------------------------------------------------------
 
-		install_percona_pxc
+		percona_pxc_install
 
 		cat << 'EOF' > /etc/mysql/mysql.conf.d/z.cnf
 [mysqld]
@@ -1572,9 +1317,7 @@ function mm.deploy(deploy)
 
 	local app = mm.repo_app_name(d.repo)
 
-	mm.ssh_bash('deploy', d.machine, [[
-
-		#include utils
+	mm.ssh_mm('deploy', d.machine, [[
 
 		if [ ! -d "/home/$deploy" ]; then
 
@@ -1659,9 +1402,7 @@ function mm.deploy_remove(deploy)
 	local d = first_row('select repo, machine from deploy where deploy = ?', deploy)
 	local app = mm.repo_app_name(d.repo)
 
-	mm.ssh_bash('deploy_remove', d.machine, [[
-
-		#include utils
+	mm.ssh_mm('deploy_remove', d.machine, [[
 
 		[ -d /home/$deploy/$app ] && (
 			must cd /home/$deploy/$app
@@ -1798,8 +1539,7 @@ rowset.deploy_log = virtual_rowset(function(self)
 end)
 
 function action.testlog(machine)
-	mm.ssh_bash('testlog', machine, [[
-		#include utils
+	mm.ssh_mm('testlog', machine, [[
 		must run_as sp1 << EOF
 cd /home/sp1/sp || exit 1
 ./sp testlog || exit 1
@@ -1816,8 +1556,7 @@ cmd.log_server = mm.log_server
 function cmd.schema_version(deploy)
 	deploy = checkarg(str_arg(deploy))
 	local machine = checkarg((first_row('select machine from deploy where deploy = ?', deploy)))
-	local ver = tonumber(mm.ssh_bash('schema_version', machine, [[
-		#include utils
+	local ver = tonumber(mm.ssh_mm('schema_version', machine, [[
 		schema_version ]]..deploy):stdout():trim())
 	print(ver)
 end
@@ -1847,8 +1586,7 @@ rowset.backups = sql_rowset{
 		row.start_time = time()
 		query('update bkp set start_time = from_unixtime(?) where bkp = ?', row.start_time, row.bkp)
 		thread(function()
-			mm.ssh_bash('backup', machine, [[
-				#include utils
+			mm.ssh_mm('backup', machine, [[
 				xbkp_backup "$deploy" "$bkp" "$parent_bkp"
 			]], {deploy = row.deploy, bkp = row.bkp, parent_bkp = parent_bkp})
 			update_row('bkp', {['bkp:old'] = row.bkp, duration = time() - row.start_time}, 'duration')
@@ -1862,8 +1600,7 @@ rowset.backups = sql_rowset{
 		local bkp = row['bkp:old']
 		local deploy = checkarg(first_row('select deploy from bkp where bkp = ?', bkp))
  		local machine = checkarg(first_row('select machine from deploy where deploy = ?', deploy))
-		mm.ssh_bash('backup_remove '..bkp, machine, [[
-			#include utils
+		mm.ssh_mm('backup_remove '..bkp, machine, [[
 			must xbkp_remove "$deploy" "$bkp"
 		]], {deploy = deploy, bkp = bkp})
 		delete_row('bkp', row)
