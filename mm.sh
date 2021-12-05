@@ -141,8 +141,8 @@ mysql_update_root_pass() { # pass
 	must chmod 600 /root/mysql_root_pass
 }
 
-mysql_create_schema() { # schema
-	say "Creating MySQL schema '$1'..."
+mysql_create_db() { # db
+	say "Creating MySQL database '$1'..."
 	query "
 		create database $1
 			character set utf8mb4
@@ -150,12 +150,12 @@ mysql_create_schema() { # schema
 	"
 }
 
-mysql_drop_schema() { # schema
-	say "Dropping MySQL schema '$1'..."
+mysql_drop_db() { # db
+	say "Dropping MySQL database '$1'..."
 	query "drop database if exists $1"
 }
 
-mysql_grant_user() { # host user schema
+mysql_grant_user() { # host user db
 	query "
 		grant all privileges on $3.* to '$2'@'$1';
 		flush privileges;
@@ -202,12 +202,12 @@ xbkp() {
 		--user=root --password="$(cat /root/mysql_root_pass)" $@
 }
 
-mysql_table_exists() { # schema table
+mysql_table_exists() { # db table
 	[ "$(query "select 1 from information_schema.tables
 		where table_schema = '$1' and table_name = '$2'")" ]
 }
 
-mysql_column_exists() { # schema table column
+mysql_column_exists() { # db table column
 	[ "$(query "select 1 from information_schema.columns
 		where table_schema = '$1' and table_name = '$2' and column_name = '$3'")" ]
 }

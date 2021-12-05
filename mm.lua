@@ -27,13 +27,13 @@
 	- task system with process tracking and output capturing.
 	- deploy script.
 	- remote logging server.
-	- MySQL backups: full, incremental, per-schema, per-table, hot-restore.
+	- MySQL backups: full, incremental, per-db, per-table, hot-restore.
 	- file replication: full, incremental (hardlink-based).
 
 	Limitations:
 	- the machines need to run Linux (Debian 10) and have a public IP.
 	- all deployments connect to the same MySQL server instance.
-	- each deployment is given a single MySQL schema.
+	- each deployment is given a single MySQL db.
 	- code has to be on github (in a public or private repo).
 	- single github key for github access.
 	- apps have to be able to self-install and self-upgrade/downgrade.
@@ -170,7 +170,7 @@ sqlpp.col_name_attrs.atime = {type = 'timestamp', text = 'Last Accessed At'}
 
 function mm.install()
 
-	create_schema()
+	create_db()
 
 	auth_create_tables()
 
@@ -1327,7 +1327,7 @@ function mm.deploy(deploy)
 			HOME=/home/$deploy USER=$deploy ssh_host_key_update \
 				github.com mm_github "$github_key" moving_ip
 
-			must mysql_create_schema $deploy
+			must mysql_create_db $deploy
 			must mysql_create_user localhost $deploy "$mysql_pass"
 			must mysql_grant_user  localhost $deploy $deploy
 
@@ -1365,7 +1365,7 @@ EOF
 			DEPLOY="$deploy" \
 			ENV="$env" \
 			VERSION="$version" \
-			MYSQL_SCHEMA="$deploy" \
+			MYSQL_DB="$deploy" \
 			MYSQL_USER="$deploy" \
 			MYSQL_PASS="$mysql_pass" \
 			SECRET="$secret" \
@@ -1409,7 +1409,7 @@ function mm.deploy_remove(deploy)
 			run ./$app stop
 		)
 
-		mysql_drop_schema $deploy
+		mysql_drop_db $deploy
 		mysql_drop_user localhost $deploy
 
 		user_remove $deploy
