@@ -48,6 +48,100 @@
 
 ]]
 
+require'webb'
+local S = S
+
+local function mm_schema()
+
+	import'schema_std'
+	import'webb_lang'
+	import'webb_auth'
+
+	types.ctime.text = S('ctime_text', 'Created At')
+	types.mtime.text = S('mtime_text', 'Last Modified At')
+	types.atime.text = S('atime_text', 'Last Accessed At')
+
+	tables.provider = {
+		provider    , strpk,
+		website     , url,
+		note        , text,
+		pos         , pos,
+		ctime       , ctime,
+	}
+
+	tables.machine = {
+		machine     , strpk,
+		provider    , strid, not_null, fk,
+		location    , strid, not_null,
+		public_ip   , strid,
+		local_ip    , strid,
+		fingerprint , b64key,
+		ssh_key_ok  , bool,
+		admin_page  , url,
+		last_seen   , timestamp,
+		os_ver      , name,
+		mysql_ver   , name,
+		cpu         , name,
+		cores       , smallint,
+		ram_gb      , double,
+		ram_free_gb , double,
+		hdd_gb      , double,
+		hdd_free_gb , double,
+		log_port    , int,
+		pos         , pos,
+		ctime       , ctime,
+	}
+
+	tables.deploy = {
+		deploy           , strpk,
+		machine          , strid, not_null, fk,
+		master_deploy    , strid, fk(deploy),
+		repo             , url, not_null,
+		wanted_version   , strid,
+		deployed_version , strid,
+		env              , strid, not_null,
+		secret           , b64key, not_null, --multi-purpose
+		mysql_pass       , hash, not_null,
+		status           , strid,
+		ctime            , ctime,
+		pos              , pos,
+	}
+
+	tables.bkp = {
+		bkp         , pk,
+		parent_bkp  , id, child_fk(bkp),
+		deploy      , strid, not_null, child_fk,
+		start_time  , time,
+		duration    , uint,
+		size        , uint52,
+		checksum    , hash,
+		name        , name,
+	}
+
+	--[=[
+
+	query[[
+	$table repl (
+		repl        $pk,
+		deploy      $str,
+		master      $strid not_null, $fk(repl, master, machine),
+		path        $url not_null
+	);
+	]]
+
+	query[[
+	$table repl_copy (
+		repl        $id not_null, $child_fk(repl_copy, repl),
+		machine     $strid not_null, $child_fk(repl, machine),
+		last_sync   timestamp,
+		primary key (repl, machine),
+	);
+	]]
+
+	]=]
+
+end
+
 require'$daemon'
 require'xmodule'
 
@@ -57,6 +151,7 @@ local sock = require'sock'
 local xapp = require'xapp'
 local mustache = require'mustache'
 local queue = require'queue'
+local schema = require'schema'
 
 local sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 
@@ -163,103 +258,10 @@ github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXY
 
 --database -------------------------------------------------------------------
 
-sqlpp.col_type_attrs.timestamp = {to_lua = timeago}
-sqlpp.col_name_attrs.ctime = {type = 'timestamp', text = 'Created At'}
-sqlpp.col_name_attrs.mtime = {type = 'timestamp', text = 'Last Modified At'}
-sqlpp.col_name_attrs.atime = {type = 'timestamp', text = 'Last Accessed At'}
 
 function mm.install()
 
-	create_db()
-
-	auth_create_tables()
-
-	query[[
-	$table provider (
-		provider    $strpk,
-		website     $url,
-		note        text,
-		pos         $pos,
-		ctime       $ctime
-	);
-	]]
-
-	query[[
-	$table machine (
-		machine     $strpk,
-		provider    $strid not null, $fk(machine, provider),
-		location    $strid not null,
-		public_ip   $strid,
-		local_ip    $strid,
-		fingerprint $b64key,
-		ssh_key_ok  $bool,
-		admin_page  $url,
-		last_seen   timestamp,
-		os_ver      $name,
-		mysql_ver   $name,
-		cpu         $name,
-		cores       smallint,
-		ram_gb      double,
-		ram_free_gb double,
-		hdd_gb      double,
-		hdd_free_gb double,
-		log_port    int,
-		pos         $pos,
-		ctime       $ctime
-	);
-	]]
-
-	query[[
-	$table deploy (
-		deploy      $strpk,
-		machine     $strid not null, $fk(deploy, machine),
-		master_deploy $strid, $fk(deploy, master_deploy, deploy),
-		repo        $url not null,
-		wanted_version $strid,
-		deployed_version $strid,
-		env         $strid not null,
-		secret      $b64key not null, --multi-purpose
-		mysql_pass  $hash not null,
-		status      $strid,
-		ctime       $ctime,
-		pos         $pos
-	);
-	]]
-
-	query[[
-	$table bkp (
-		bkp         $pk,
-		parent_bkp  $id, $child_fk(bkp, parent_bkp, bkp),
-		deploy      $strid not null, $child_fk(bkp, deploy),
-		start_time  timestamp,
-		duration    int unsigned,
-		size        bigint unsigned,
-		checksum    $hash,
-		name        $name
-	);
-	]]
-
-	--[=[
-
-	query[[
-	$table repl (
-		repl        $pk,
-		deploy      $str,
-		master      $strid not null, $fk(repl, master, machine),
-		path        $url not null
-	);
-	]]
-
-	query[[
-	$table repl_copy (
-		repl        $id not null, $child_fk(repl_copy, repl),
-		machine     $strid not null, $child_fk(repl, machine),
-		last_sync   timestamp,
-		primary key (repl, machine),
-	);
-	]]
-
-	]=]
+	import(mm_schema)
 
 end
 
