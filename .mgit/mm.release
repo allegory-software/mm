@@ -15,7 +15,7 @@ luapower/logging
 luapower/lpeg
 luapower/luajit
 luapower/mustache
-luapower/mysql_client
+luapower/mysql
 luapower/path
 luapower/pp
 luapower/proc

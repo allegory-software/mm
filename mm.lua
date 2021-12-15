@@ -244,7 +244,7 @@ config('http_addr', '*')
 --logging.filter[''] = true
 require'http'.logging = logging
 require'http_server'.logging = logging
-require'mysql_client'.logging = logging
+require'mysql'.logging = logging
 
 config('db_host', '10.0.0.5')
 config('db_port', 3307)
@@ -1612,7 +1612,7 @@ rowset.backups = sql_rowset{
 --remote access tools --------------------------------------------------------
 
 function cmd.machines()
-	local to_lua = require'mysql_client'.to_lua
+	local to_lua = require'mysql'.to_lua
 	pqr(query({
 		compact=1,
 		field_attrs = {last_seen = {to_lua = glue.timeago}},
@@ -1736,7 +1736,7 @@ function cmd.mount_kill_all()
 end
 
 function cmd.deploys()
-	local to_lua = require'mysql_client'.to_lua
+	local to_lua = require'mysql'.to_lua
 	pqr(query({
 		compact=1,
 		field_attrs = {},
