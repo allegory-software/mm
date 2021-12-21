@@ -830,7 +830,9 @@ end
 
 mm.script = {} --{name->script}
 
-mm.script.mm = load(indir(app_dir, 'mm.sh'))
+after(mm, 'init', function()
+	mm.script.mm = load(indir(app_dir, 'mm.sh'))
+end)
 
 function mm.bash_preprocess(vars)
 	return mustache.render(s, vars, nil, nil, nil, nil, proc.esc_unix)
