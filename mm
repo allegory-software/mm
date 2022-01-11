@@ -67,6 +67,6 @@ done
 case "$1" in
 	""|help|--help)  usage ;;
 	deploy)          shift; deploy "$@" ;;
-	run|start|stop|restart|status|tail) SERVICE=$APP exec mgit service "$@" ;;
+	run|start|stop|restart|status|tail) SERVICE=$APP exec sh/service "$@" ;;
 	*)            exec_app "$@" ;;
 esac
