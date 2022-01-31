@@ -1,5 +1,7 @@
 #!/bin/bash
 
+SDK_VERSION=work
+
 # die hard, see https://github.com/capr/die
 say()   { echo "$@" >&2; }
 die()   { echo -n "ABORT: " >&2; echo "$@" >&2; exit 1; }
@@ -7,16 +9,23 @@ debug() { [ "$DEBUG" ] && echo "$@" >&2; }
 run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
 must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
 
-run_app()  {      ./luajit $APP.lua "$@"; }
-exec_app() { exec ./luajit $APP.lua "$@"; }
+run_app()  {      ./$APP "$@"; }
+exec_app() { exec ./$APP "$@"; }
 
 deploy() {
 	set -u # break on undefined vars.
 	say "Self-deploying APP=$APP ENV=$ENV VERSION=$VERSION..."
 
-	must mgit convert
-	must mgit baseurl luapower "git@github.com:luapower/"
-	must mgit -SS clone-release $APP
+	if USE_MGIT; then
+		must mgit convert
+		must mgit baseurl luapower "git@github.com:luapower/"
+		must mgit -SS clone-release $APP
+	else
+		local A=git@github.com:allegory-software
+		local O="--depth=1 -b $SDK_VERSION --single-branch"
+		must git clone $O $A/allegory-sdk               sdk
+		must git clone $O $A/allegory-sdk-bin-debian10  sdk/bin/linux
+	fi
 
 	cat << EOF > ${APP}_conf.lua
 return {

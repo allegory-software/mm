@@ -1,3 +1,5 @@
+--go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v start
+--go@ x:\sdk\bin\windows\luajit mm.lua -v start
 --[[
 
 	Many Machines, the independent man's SAAS provisioning tool.
@@ -7,13 +9,11 @@
 	for web apps deployed on dedicated machines or VPS, as opposed to cloud
 	services as it's customary these days (unless you count VPS as cloud).
 
-	Highlights:
+FEATURES
 	- Lua API, web UI & cmdline for everything.
 	- Windows-native sysadmin tools (sshfs, putty, etc.).
 	- agentless.
-
-	Features:
-	- keep a database of machines and deployments.
+	- keeps a database of machines and deployments.
 	- maintain secure access to all services via bulk key updates:
 		- ssh root access.
 		- MySQL root access.
@@ -30,7 +30,7 @@
 	- MySQL backups: full, incremental, per-db, per-table, hot-restore.
 	- file replication: full, incremental (hardlink-based).
 
-	Limitations:
+LIMITATIONS
 	- the machines need to run Linux (Debian 10) and have a public IP.
 	- all deployments connect to the same MySQL server instance.
 	- each deployment is given a single MySQL db.
@@ -54,7 +54,7 @@ local S = S
 local function mm_schema()
 
 	import'schema_std'
-	import'webb_lang'
+	import'schema_lang'
 	import'webb_auth'
 
 	types.ctime.text = S('ctime_text', 'Created At')
@@ -154,8 +154,9 @@ local queue = require'queue'
 local schema = require'schema'
 
 local sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
+local ssh_dir = [[x:\_luapower\bin\mingw64]] --[[C:\"Program Files"\Git\usr\bin\]]
 
-config('http_port', 8080)
+libwww_dir = indir(fs.scriptdir(), '../sdk/www')
 local mm = xapp(daemon'mm')
 mm.use_plink = false
 
@@ -166,7 +167,7 @@ local function NYI(event)
 end
 
 function sshcmd(cmd)
-	return win and indir(exedir, cmd) or cmd
+	return win and indir(ssh_dir, cmd) or cmd
 end
 
 function mm.keyfile(machine, suffix, ext)
@@ -213,7 +214,7 @@ function mm.ssh_key_gen_ppk(machine, suffix)
 	local key = mm.keyfile(machine, suffix)
 	local ppk = mm.ppkfile(machine, suffix)
 	if win then
-		exec(indir(exedir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
+		exec(indir(bin_dir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
 	else
 		--TODO: use plink linux binary to gen the ppk.
 		NYI'ssh_key_gen_ppk'
@@ -239,6 +240,7 @@ mm.known_hosts_file  = indir(var_dir, 'known_hosts')
 mm.github_key_file   = indir(var_dir, 'mm_github.key')
 mm.github_key        = readfile(mm.github_key_file, trim)
 
+config('http_port', 8080)
 config('http_addr', '*')
 
 --logging.filter[''] = true
@@ -255,6 +257,11 @@ config('secret' , '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 mm.github_fingerprint = ([[
 github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
 ]]):trim()
+
+mm.schema = schema.new()
+mm.schema.env.null = null
+mm.schema:import(mm_schema)
+config('db_schema', mm.schema)
 
 --database -------------------------------------------------------------------
 
@@ -799,7 +806,7 @@ function mm.ssh(task_name, machine, args, opt)
 	if Windows and (opt.use_plink or mm.use_plink) then
 		--TODO: plink is missing a timeout option (look for a putty fork which has it?).
 		return mm.exec(task_name, extend({
-			indir(exedir, 'plink'),
+			indir(bin_dir, 'plink'),
 			'-ssh',
 			'-load', 'mm',
 			opt.allocate_tty and '-t' or '-T',
@@ -826,42 +833,73 @@ function mm.sshi(machine, args, opt)
 	return mm.ssh(nil, machine, args, update({capture_stdout = false, allocate_tty = true}, opt))
 end
 
---remote bash scripts --------------------------------------------------------
+--remote sh scripts with stdin injection -------------------------------------
 
-mm.script = {} --{name->script}
+--passing both the script and the script's expected stdin contents through
+--ssh's stdin at the same time is only possible due to a ridiculous behavior
+--that only sh could have: sh reads its input one-byte-at-a-time and
+--stops reading exactly after the `exit` command, not one byte more, so we can
+--feed in stdin right after that. worse-is-better at its finest.
+function mm.ssh_sh(task_name, machine, script, script_env, opt)
+	opt = opt or {}
+	local script_env = update({
+		DEBUG   = env'DEBUG',
+		VERBOSE = env'VERBOSE',
+	}, script_env)
+	local s = mm.sh_script(script:outdent(), script_env, opt.pp_env)
+	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
+	return mm.ssh(task_name, machine, {'bash', '-s'}, opt)
+end
 
-after(mm, 'init', function()
-	mm.script.mm = load(indir(app_dir, 'mm.sh'))
-end)
+--shell scripts with preprocessor --------------------------------------------
 
-function mm.bash_preprocess(vars)
+local function load_shfile(self, name)
+	local path = indir(app_dir, 'shlib', name..'.sh')
+	return load(path, nil, true)
+end
+
+mm.shlib = {} --{name->code}
+setmetatable(mm.shlib, {__index = load_shfile})
+
+function mm.sh_preprocess(vars)
 	return mustache.render(s, vars, nil, nil, nil, nil, proc.esc_unix)
 end
 
-function mm.bash_script(s, env, pp_env, included)
+function mm.sh_script(s, env, pp_env, included)
+	included = included or {}
 	if type(s) == 'function' then
 		s = s(env)
 	end
 	s = s:gsub('\r\n', '\n')
-	local function include_force(s, included)
-		local s = assertf(mm.script[s], 'no script: %s', s)
-		return mm.bash_script(s, nil, mustache_vars, included)
-	end
-	local function include_force_lf(s, included)
-		return '\n'..include_force(s, included)
+	local function include_one(s)
+		local s = assertf(mm.shlib[s], 'no script: %s', s)
+		return mm.sh_script(s, nil, pp_env, included)
 	end
 	local function include(s)
-		if included[s] then return '' end
-		included[s] = true
-		return include_force(s, included)
+		local t = {}
+		for _,s in ipairs(names(s)) do
+			include_one(s)
+		end
+		return cat(t, '\n')
+	end
+	local function use(s)
+		local t = {}
+		for _,s in ipairs(names(s)) do
+			if not included[s] then
+				included[s] = true
+				add(t, include_one(s))
+			end
+		end
+		return cat(t, '\n')
 	end
 	local function include_lf(s)
 		return '\n'..include(s)
 	end
-	s = s:gsub( '^[ \t]*#include ([_%w]+)', include)
-	s = s:gsub('\n[ \t]*#include ([_%w]+)', include_lf)
-	s = s:gsub( '^[ \t]*#include! ([_%w]+)', include_force)
-	s = s:gsub('\n[ \t]*#include! ([_%w]+)', include_force_lf)
+	local function use_lf(s)
+		return '\n'..use(s)
+	end
+	s = s:gsub( '^[ \t]*#use[ \t]+([^#\r\n]+)', use)
+	s = s:gsub('\n[ \t]*#use[ \t]+([^#\r\n]+)', use_lf)
 	if env then
 		local t = {}
 		for k,v in sortedpairs(env) do
@@ -870,30 +908,10 @@ function mm.bash_script(s, env, pp_env, included)
 		s = concat(t, '\n')..'\n\n'..s
 	end
 	if pp_env then
-		return mm.bash_preprocess(s, pp_env)
+		return mm.sh_preprocess(s, pp_env)
 	else
 		return s
 	end
-end
-
---passing both the script and the script's expected stdin contents through
---ssh's stdin at the same time is only possible due to a ridiculous behavior
---that only bash could have: bash reads its input one-byte-at-a-time and
---stops reading exactly after the `exit` command, not one byte more, so we can
---feed in stdin right after that. worse-is-better at its finest.
-function mm.ssh_bash(task_name, machine, script, script_env, opt)
-	opt = opt or {}
-	local script_env = update({
-		DEBUG   = env'DEBUG',
-		VERBOSE = env'VERBOSE',
-	}, script_env)
-	local s = mm.bash_script(script:outdent(), script_env, opt.pp_env, {})
-	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
-	return mm.ssh(task_name, machine, {'bash', '-s'}, opt)
-end
-
-function mm.ssh_mm(task_name, machine, script, ...)
-	return mm.ssh_bash(task_name, machine, '#include mm\n\n'..script:outdent(), ...)
 end
 
 --tasks ----------------------------------------------------------------------
@@ -1042,7 +1060,9 @@ end
 --command: machine-info-update -----------------------------------------------
 
 function mm.machine_info(machine)
-	local stdout = mm.ssh_mm('machine_info', machine, [=[
+	local stdout = mm.ssh_sh('machine_info', machine, [=[
+
+		#use mysql
 
 		echo "           os_ver $(lsb_release -sd)"
 		echo "        mysql_ver $(has_mysql && query 'select version();')"
@@ -1166,7 +1186,8 @@ function mm.ssh_key_update(machine)
 
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.pubkey()
-	local stored_pubkey = mm.ssh_mm('ssh_key_update', machine, [=[
+	local stored_pubkey = mm.ssh_sh('ssh_key_update', machine, [=[
+		#use ssh mysql user
 		has_mysql && mysql_update_root_pass "$mysql_root_pass"
 		ssh_update_pubkey mm "$pubkey"
 		user_lock_pass root
@@ -1201,7 +1222,8 @@ end
 cmd.ssh_key_update = action.ssh_key_update
 
 function mm.ssh_key_check(machine)
-	local host_pubkey = mm.ssh_mm('ssh_key_check', machine, [[
+	local host_pubkey = mm.ssh_sh('ssh_key_check', machine, [[
+		#use ssh
 		ssh_pubkey mm
 	]]):stdout():trim()
 	return host_pubkey == mm.pubkey()
@@ -1225,13 +1247,14 @@ cmd.ssh_key_check = action.ssh_key_check
 --command: github-key-update -------------------------------------------------
 
 function mm.github_key_update(machine)
-	mm.ssh_mm('github_key_update', machine, [[
+	mm.ssh_sh('github_key_update', machine, [[
+		#use ssh
 		ssh_hostkey_update github.com "$github_fingerprint"
-		ssh_host_key_update github.com mm_github "$github_key" moving_ip
+		ssh_host_key_update github.com mm_github "$github_key" unstable_ip
 		must cd /home
 		for user in *; do
 			[ -d /home/$user/.ssh ] && \
-				HOME=/home/$user USER=$user ssh_host_key_update github.com mm_github "$github_key" moving_ip
+				HOME=/home/$user USER=$user ssh_host_key_update github.com mm_github "$github_key" unstable_ip
 		done
 	]], {
 		github_fingerprint = mm.github_fingerprint,
@@ -1252,32 +1275,21 @@ cmd.github_key_update = action.github_key_update
 --command: machine-prepare ---------------------------------------------------
 
 function mm.machine_prepare(machine)
-	mm.ssh_mm('machine_prepare', machine, [=[
+	mm.ssh_sh('machine_prepare', machine, [=[
+
+		#use apt git ssh mysql
 
 		apt_get_install sudo htop mc git gnupg2 curl lsb-release
 
-		# ---------------------------------------------------------------------
-
 		git_install_git_up
-
 		git_config_user mm@allegory.ro "Many Machines"
 
 		ssh_hostkey_update github.com "$github_fingerprint"
-		ssh_host_key_update github.com mm_github "$github_key" moving_ip
-
-		mgit_install
-
-		# ---------------------------------------------------------------------
+		ssh_host_key_update github.com mm_github "$github_key" unstable_ip
 
 		percona_pxc_install
-
-		cat << 'EOF' > /etc/mysql/mysql.conf.d/z.cnf
-[mysqld]
-log_bin_trust_function_creators = 1
-EOF
-
+		mysql_config "log_bin_trust_function_creators = 1"
 		must service mysql start
-
 		mysql_update_root_pass "$mysql_root_pass"
 
 		say "All done."
@@ -1321,7 +1333,9 @@ function mm.deploy(deploy)
 
 	local app = mm.repo_app_name(d.repo)
 
-	mm.ssh_mm('deploy', d.machine, [[
+	mm.ssh_sh('deploy', d.machine, [[
+
+		#use die user mysql
 
 		if [ ! -d "/home/$deploy" ]; then
 
@@ -1329,7 +1343,7 @@ function mm.deploy(deploy)
 			must user_lock_pass $deploy
 
 			HOME=/home/$deploy USER=$deploy ssh_host_key_update \
-				github.com mm_github "$github_key" moving_ip
+				github.com mm_github "$github_key" unstable_ip
 
 			must mysql_create_db $deploy
 			must mysql_create_user localhost $deploy "$mysql_pass"
@@ -1406,7 +1420,7 @@ function mm.deploy_remove(deploy)
 	local d = first_row('select repo, machine from deploy where deploy = ?', deploy)
 	local app = mm.repo_app_name(d.repo)
 
-	mm.ssh_mm('deploy_remove', d.machine, [[
+	mm.ssh_sh('deploy_remove', d.machine, [[
 
 		[ -d /home/$deploy/$app ] && (
 			must cd /home/$deploy/$app
@@ -1658,7 +1672,7 @@ end
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
 function wincmd.putty(machine)
 	local ip = mm.ip(machine)
-	proc.exec(indir(exedir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
+	proc.exec(indir(bin_dir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
 end
 
 function mm.tunnel(task_name, machine, ports, opt)
