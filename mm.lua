@@ -1,5 +1,5 @@
---go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v start
---go@ x:\sdk\bin\windows\luajit mm.lua -v start
+--go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ x:\sdk\bin\windows\luajit mm.lua -v run
 --[[
 
 	Many Machines, the independent man's SAAS provisioning tool.
@@ -277,7 +277,6 @@ cmd.install = mm.install
 --admin web UI ---------------------------------------------------------------
 
 mm.title = 'Many Machines'
---mm.font = 'opensans'
 
 css[[
 body {
@@ -855,7 +854,7 @@ end
 
 local function load_shfile(self, name)
 	local path = indir(app_dir, 'shlib', name..'.sh')
-	return load(path, nil, true)
+	return reload(path)
 end
 
 mm.shlib = {} --{name->code}
