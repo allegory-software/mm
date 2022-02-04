@@ -1,4 +1,4 @@
---go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v
 --go@ x:\sdk\bin\windows\luajit mm.lua -v run
 --[[
 
@@ -153,88 +153,14 @@ local mustache = require'mustache'
 local queue = require'queue'
 local schema = require'schema'
 
-local sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
-local ssh_dir = [[x:\_luapower\bin\mingw64]] --[[C:\"Program Files"\Git\usr\bin\]]
-
-libwww_dir = indir(fs.scriptdir(), '../sdk/www')
-local mm = xapp(daemon'mm')
-mm.use_plink = false
-
---tools ----------------------------------------------------------------------
-
-local function NYI(event)
-	logerror('mm', event, 'NYI')
-end
-
-function sshcmd(cmd)
-	return win and indir(ssh_dir, cmd) or cmd
-end
-
-function mm.keyfile(machine, suffix, ext)
-	machine = machine and machine:trim()
-	local file = 'mm'..(machine and '-'..machine or '')
-		..(suffix and '.'..suffix or '')..'.'..(ext or 'key')
-	return indir(var_dir, file)
-end
-
-function mm.ppkfile(machine, suffix)
-	return mm.keyfile(machine, suffix, 'ppk')
-end
-
-function mm.pubkey(machine, suffix)
-	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()..' mm'
-end
-
---TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
-function mm.ssh_hostkey(machine)
-	machine = checkarg(str_arg(machine))
-	local key = first_row('select fingerprint from machine where machine = ?', machine):trim()
-	return mm.exec('hostkey', {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}, {stdin = key})
-		:stdout():trim():match'%s([^%s]+)'
-end
-function action.ssh_hostkey(machine)
-	setmime'txt'
-	out(mm.ssh_hostkey(machine))
-end
-cmd.ssh_hostkey = action.ssh_hostkey
-
---run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
-function mm.ssh_key_fix_perms(machine)
-	if not win then return end
-	local s = mm.keyfile(machine)
-	readpipe('icacls %s /c /t /Inheritance:d', s)
-	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
-	readpipe('takeown /F %s', s)
-	readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
-	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
-	readpipe('icacls %s', s)
-end
-
-function mm.ssh_key_gen_ppk(machine, suffix)
-	local key = mm.keyfile(machine, suffix)
-	local ppk = mm.ppkfile(machine, suffix)
-	if win then
-		exec(indir(bin_dir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
-	else
-		--TODO: use plink linux binary to gen the ppk.
-		NYI'ssh_key_gen_ppk'
-	end
-end
-cmd.ssh_key_gen_ppk = mm.ssh_key_gen_ppk
-
-function mm.mysql_root_pass(machine) --last line of the private key
-	local s = load(mm.keyfile(machine))
-		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
-	assert(#s == 32)
-	return s
-end
-function action.mysql_root_pass(machine)
-	setmime'txt'
-	out(mm.mysql_root_pass(machine))
-end
-cmd.mysql_root_pass = action.mysql_root_pass
-
 --config ---------------------------------------------------------------------
+
+local mm = xapp(daemon'mm')
+
+mm.sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
+mm.ssh_dir = [[x:\_luapower\bin\mingw64]] --[[C:\"Program Files"\Git\usr\bin\]]
+
+mm.use_plink = false
 
 mm.known_hosts_file  = indir(var_dir, 'known_hosts')
 mm.github_key_file   = indir(var_dir, 'mm_github.key')
@@ -263,6 +189,14 @@ mm.schema.env.null = null
 mm.schema:import(mm_schema)
 config('db_schema', mm.schema)
 
+local cmd_ssh_keys    = cmdsection'SSH KEY MANAGEMENT'
+local cmd_ssh         = cmdsection'SSH'
+local cmd_ssh_tunnels = cmdsection'SSH TUNNELS'
+local cmd_ssh_mounts  = cmdsection'SSH-FS MOUNTS'
+local cmd_mysql       = cmdsection'MYSQL'
+local cmd_machines    = cmdsection'MACHINES'
+local cmd_deployments = cmdsection'DEPLOYMENTS'
+
 --database -------------------------------------------------------------------
 
 
@@ -272,7 +206,81 @@ function mm.install()
 
 end
 
-cmd.install = mm.install
+cmd('install', 'Create database, etc.', mm.install)
+
+--tools ----------------------------------------------------------------------
+
+local function NYI(event)
+	logerror('mm', event, 'NYI')
+end
+
+function sshcmd(cmd)
+	return win and indir(mm.ssh_dir, cmd) or cmd
+end
+
+function mm.keyfile(machine, suffix, ext)
+	machine = machine and machine:trim()
+	local file = 'mm'..(machine and '-'..machine or '')
+		..(suffix and '.'..suffix or '')..'.'..(ext or 'key')
+	return indir(var_dir, file)
+end
+
+function mm.ppkfile(machine, suffix)
+	return mm.keyfile(machine, suffix, 'ppk')
+end
+
+function mm.pubkey(machine, suffix)
+	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()..' mm'
+end
+
+--TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
+function mm.ssh_hostkey(machine)
+	machine = checkarg(str_arg(machine))
+	local key = first_row('select fingerprint from machine where machine = ?', machine):trim()
+	return mm.exec('hostkey', {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}, {stdin = key})
+		:stdout():trim():match'%s([^%s]+)'
+end
+function action.ssh_hostkey(machine)
+	setmime'txt'
+	out(mm.ssh_hostkey(machine))
+end
+cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', action.ssh_hostkey)
+
+--run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
+function mm.ssh_key_fix_perms(machine)
+	if not win then return end
+	local s = mm.keyfile(machine)
+	readpipe('icacls %s /c /t /Inheritance:d', s)
+	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
+	readpipe('takeown /F %s', s)
+	readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
+	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
+	readpipe('icacls %s', s)
+end
+
+function mm.ssh_key_gen_ppk(machine, suffix)
+	local key = mm.keyfile(machine, suffix)
+	local ppk = mm.ppkfile(machine, suffix)
+	if win then
+		exec(indir(bin_dir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
+	else
+		--TODO: use plink linux binary to gen the ppk.
+		NYI'ssh_key_gen_ppk'
+	end
+end
+cmd_ssh_keys('ssh-key-gen-ppk MACHINE', 'Generate .ppk file for a SSH key', mm.ssh_key_gen_ppk)
+
+function mm.mysql_root_pass(machine) --last line of the private key
+	local s = load(mm.keyfile(machine))
+		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
+	assert(#s == 32)
+	return s
+end
+function action.mysql_root_pass(machine)
+	setmime'txt'
+	out(mm.mysql_root_pass(machine))
+end
+cmd_mysql('mysql_root_pass MACHINE', 'Show the MySQL root password', action.mysql_root_pass)
 
 --admin web UI ---------------------------------------------------------------
 
@@ -854,7 +862,7 @@ end
 
 local function load_shfile(self, name)
 	local path = indir(app_dir, 'shlib', name..'.sh')
-	return reload(path)
+	return load(path)
 end
 
 mm.shlib = {} --{name->code}
@@ -1058,6 +1066,8 @@ end
 
 --command: machine-info-update -----------------------------------------------
 
+cmdsection'MACHINES'
+
 function mm.machine_info(machine)
 	local stdout = mm.ssh_sh('machine_info', machine, [=[
 
@@ -1084,12 +1094,12 @@ function mm.machine_info(machine)
 	return t
 end
 
-function cmd.machine_info(machine)
+cmd_machines('machine_info MACHINE', 'Show machine info', function(machine)
 	local t = mm.machine_info(machine)
 	for i,k in ipairs(t) do
 		print(_('%20s %s', k, t[k]))
 	end
-end
+end)
 
 function mm.machine_info_update(machine)
 	t = assert(mm.machine_info(machine))
@@ -1111,9 +1121,9 @@ function mm.machine_info_update(machine)
 	rowset_changed'machines'
 end
 action.machine_info_update = mm.machine_info_update
-cmd.machine_info_update = action.machine_info_update
+cmd_machines('machine_info_update MACHINE', 'Update machine info', action.machine_info_update)
 
---command: ssh-hostkey-update ---------------------------------------
+--command: ssh-hostkey-update ------------------------------------------------
 
 function mm.gen_known_hosts_file()
 	local t = {}
@@ -1139,7 +1149,7 @@ function action.ssh_hostkey_update(machine)
 	mm.ssh_hostkey_update(machine)
 	out_json{machine = machine, notify = 'Host fingerprint updated for '..machine}
 end
-cmd.ssh_hostkey_update = action.ssh_hostkey_update
+cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us', action.ssh_hostkey_update)
 
 --command: ssh-key-gen -------------------------------------------------------
 
@@ -1158,7 +1168,7 @@ function action.ssh_key_gen()
 	mm.ssh_key_gen()
 	out_json{notify = 'SSH key generated'}
 end
-cmd.ssh_key_gen = action.ssh_key_gen
+cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', action.ssh_key_gen)
 
 --command: pubkey ------------------------------------------------------------
 
@@ -1167,7 +1177,7 @@ function action.ssh_pubkey(machine)
 	setmime'txt'
 	out(mm.pubkey(machine)..'\n')
 end
-cmd.ssh_pubkey = action.ssh_pubkey
+cmd_ssh_keys('ssh-pubkey', 'Show the current SSH public key', action.ssh_pubkey)
 
 --command: ssh-key-update ----------------------------------------------------
 
@@ -1218,7 +1228,7 @@ function action.ssh_key_update(machine)
 			or 'SSH key update tasks created',
 	}
 end
-cmd.ssh_key_update = action.ssh_key_update
+cmd_ssh_keys('ssh_key_update MACHINE', 'Update SSH key for a machine', action.ssh_key_update)
 
 function mm.ssh_key_check(machine)
 	local host_pubkey = mm.ssh_sh('ssh_key_check', machine, [[
@@ -1241,7 +1251,7 @@ function action.ssh_key_check(machine)
 		ssh_key_ok = ok,
 	}
 end
-cmd.ssh_key_check = action.ssh_key_check
+cmd_ssh_keys('ssh_key_check MACHINE', 'Check SSH key for a machine', action.ssh_key_check)
 
 --command: github-key-update -------------------------------------------------
 
@@ -1269,7 +1279,7 @@ function action.github_key_update(machine)
 	mm.github_key_update(machine)
 	out_json{machine = machine, notify = 'Github key updated'}
 end
-cmd.github_key_update = action.github_key_update
+cmd_ssh_keys('github_key_update MACHINE', 'Updage SSH github key for a machine', action.github_key_update)
 
 --command: machine-prepare ---------------------------------------------------
 
@@ -1304,7 +1314,7 @@ function action.machine_prepare(machine)
 	mm.machine_prepare(machine)
 	out_json{machine = machine, notify = 'Machine prepared: '..machine}
 end
-cmd.machine_prepare = action.machine_prepare
+cmd_machines('machine_prepare MACHINE', 'Prepare a new machine', action.machine_prepare)
 
 --command: deploy ------------------------------------------------------------
 
@@ -1412,7 +1422,7 @@ EOF
 end
 
 action.deploy = mm.deploy
-cmd.deploy = action.deploy
+cmd_deployments('deploy DEPLOY', 'Make a deployment', action.deploy)
 
 function mm.deploy_remove(deploy)
 	deploy = checkarg(str_arg(deploy), 'deploy required')
@@ -1439,7 +1449,7 @@ function mm.deploy_remove(deploy)
 	})
 end
 action.deploy_remove = mm.deploy_remove
-cmd.deploy_remove = action.deploy_remove
+cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment', action.deploy_remove)
 
 --remote logging -------------------------------------------------------------
 
@@ -1555,28 +1565,17 @@ rowset.deploy_log = virtual_rowset(function(self)
 	end
 end)
 
-function action.testlog(machine)
-	mm.ssh_mm('testlog', machine, [[
-		must run_as sp1 << EOF
-cd /home/sp1/sp || exit 1
-./sp testlog || exit 1
-EOF
-	]])
-	--for _, machine, lport in ech_row_vals'select machine, log_port from machine' do
-	--end
-end
-
-cmd.log_server = mm.log_server
+cmd_deployments('log_server_start MACHINE', 'Start log server for a machine', mm.log_server_start)
 
 --backups --------------------------------------------------------------------
 
-function cmd.schema_version(deploy)
+cmd_deployments('schema_version DEPLOY', 'Schema version', function(deploy)
 	deploy = checkarg(str_arg(deploy))
 	local machine = checkarg((first_row('select machine from deploy where deploy = ?', deploy)))
 	local ver = tonumber(mm.ssh_mm('schema_version', machine, [[
 		schema_version ]]..deploy):stdout():trim())
 	print(ver)
-end
+end)
 
 rowset.backups = sql_rowset{
 	select = [[
@@ -1626,7 +1625,7 @@ rowset.backups = sql_rowset{
 
 --remote access tools --------------------------------------------------------
 
-function cmd.machines()
+cmd_machines('m[achines]', 'Show machines', function()
 	local to_lua = require'mysql'.to_lua
 	pqr(query({
 		compact=1,
@@ -1646,18 +1645,17 @@ function cmd.machines()
 		from machine
 		order by pos, ctime
 ]]))
-end
-cmd.ls = cmd.machines
+end)
 
-function cmd.ssh(machine, cmd)
+cmd_ssh('ssh', 'SSH into machine', function(machine, cmd)
 	mm.sshi(machine, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)})
-end
+end)
 
-function wincmd.plink(machine, cmd)
+cmd_ssh(Windows, 'plink MACHINE CMD', 'SSH into machine with plink', function(machine, cmd)
 	mm.sshi(machine, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)}, {use_plink = true})
-end
+end)
 
-function cmd.ssh_all(command)
+cmd_ssh('ssh-all CMD', 'Execute command on all machines', function(command)
 	command = checkarg(str_arg(command), 'command expected')
 	for _, machine in each_row_vals'select machine from machine' do
 		thread(function()
@@ -1665,18 +1663,18 @@ function cmd.ssh_all(command)
 			mm.ssh(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
 		end)
 	end
-end
+end)
 
 --TIP: make a putty session called `mm` where you set the window size,
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
-function wincmd.putty(machine)
+cmd_ssh(Windows, 'putty MACHINE', 'SSH into machine with putty', function(machine)
 	local ip = mm.ip(machine)
 	proc.exec(indir(bin_dir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
-end
+end)
 
 function mm.tunnel(task_name, machine, ports, opt)
 	local args = {'-N'}
-	ports = checkarg(str_arg(ports), 'Usage: mm tunnel MACHINE LPORT1[:RPORT1],...')
+	ports = checkarg(str_arg(ports), 'ports expected')
 	for ports in ports:gmatch'([^,]+)' do
 		local rport, lport = ports:match'(.-):(.*)'
 		add(args, opt and opt.reverse_tunnel and '-R' or '-L')
@@ -1686,24 +1684,25 @@ function mm.tunnel(task_name, machine, ports, opt)
 		opt and opt.interactive and update({capture_stdout = false, allocate_tty = true}, opt))
 end
 
-function cmd.tunnel(machine, ports)
+cmd_ssh_tunnels('tunnel MACHINE LPORT1[:RPORT1],...', 'SSH tunnel to machine', function(machine, ports)
 	return mm.tunnel(nil, machine, ports, {interactive = true})
-end
-function cmd.rtunnel(machine, ports)
+end)
+
+cmd_ssh_tunnels('rtunnel MACHINE LPORT1[:RPORT1],...', 'Reverse SSH tunnel to machine', function(machine, ports)
 	return mm.tunnel(nil, machine, ports, {interactive = true, reverse_tunnel = true})
-end
+end)
 
 local function censor_mysql_pwd(s)
 	return s:gsub('MYSQL_PWD=[^%s]+', 'MYSQL_PWD=censored')
 end
-function cmd.mysql(machine, sql)
+cmd_mysql('mysql MACHINE [SQL]', 'Execute MySQL command or remote REPL', function(machine, sql)
 	local args = {'MYSQL_PWD='..mm.mysql_root_pass(machine),
 		'mysql', '-u', 'root', '-h', 'localhost'}
 	if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
 	logging.censor.mysql_pwd = censor_mysql_pwd
 	mm.sshi(machine, args)
 	logging.censor.mysql_pwd = nil
-end
+end)
 
 --TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
 function mm.mount(machine, rem_path, drive, bg)
@@ -1712,7 +1711,7 @@ function mm.mount(machine, rem_path, drive, bg)
 		rem_path = rem_path or '/'
 		machine = str_arg(machine)
 		local cmd =
-			'"'..indir(sshfs_dir, 'sshfs.exe')..'"'..
+			'"'..indir(mm.sshfs_dir, 'sshfs.exe')..'"'..
 			' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
 			(bg and '' or ' -f')..
 			--' -odebug'.. --good stuff (implies -f)
@@ -1720,7 +1719,7 @@ function mm.mount(machine, rem_path, drive, bg)
 			' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
 			' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
 			--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
-			' -ossh_command='..path.sep(indir(sshfs_dir, 'ssh'), nil, '/')..
+			' -ossh_command='..path.sep(indir(mm.sshfs_dir, 'ssh'), nil, '/')..
 			' -oBatchMode=yes'..
 			' -oRequestTTY=no'..
 			' -oPreferredAuthentications=publickey'..
@@ -1735,22 +1734,22 @@ function mm.mount(machine, rem_path, drive, bg)
 		NYI'mount'
 	end
 end
+cmd_ssh_mounts('mount MACHINE PATH LOCAL-DRIVE', 'Mount remote path to drive', mm.mount)
 
-cmd.mount = mm.mount
-
-function cmd.mount_bg(machine, drive, rem_path)
+cmd_ssh_mounts('mount-bg MACHINE PATH LOCAL-DRIVE', 'Mount remote path to drive in background',
+function(machine, drive, rem_path)
 	return mm.mount(machine, drive, rem_path, true)
-end
+end)
 
-function cmd.mount_kill_all()
+cmd_ssh_mounts('mount-kill-all', 'Kill all SSH-FS mounts', function()
 	if win then
 		exec'taskkill /f /im sshfs.exe'
 	else
 		NYI'mount_kill_all'
 	end
-end
+end)
 
-function cmd.deploys()
+cmd_deployments('d[eployments]', 'Show defined deployments', function()
 	local to_lua = require'mysql'.to_lua
 	pqr(query({
 		compact=1,
@@ -1768,10 +1767,6 @@ function cmd.deploys()
 		from deploy
 		order by pos, ctime
 	]]))
-end
-
-webb.run(function()
-	--add_column('machine', 'log_port', 'int after hdd_free_gb')
 end)
 
 return mm:run(...)
