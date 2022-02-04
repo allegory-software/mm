@@ -280,7 +280,7 @@ function action.mysql_root_pass(machine)
 	setmime'txt'
 	out(mm.mysql_root_pass(machine))
 end
-cmd_mysql('mysql_root_pass MACHINE', 'Show the MySQL root password', action.mysql_root_pass)
+cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', action.mysql_root_pass)
 
 --admin web UI ---------------------------------------------------------------
 
@@ -1064,9 +1064,51 @@ local function checknostderr(task)
 	return task
 end
 
---command: machine-info-update -----------------------------------------------
+--listings -------------------------------------------------------------------
 
-cmdsection'MACHINES'
+cmd_machines('m|machines', 'Show the list of machines', function()
+	local to_lua = require'mysql'.to_lua
+	pqr(query({
+		compact=1,
+		field_attrs = {last_seen = {to_lua = glue.timeago}},
+	}, [[
+		select
+			machine,
+			public_ip,
+			unix_timestamp(last_seen) as last_seen,
+			cores,
+			ram_gb, ram_free_gb,
+			hdd_gb, hdd_free_gb,
+			cpu,
+			os_ver,
+			mysql_ver,
+			unix_timestamp(ctime) as ctime
+		from machine
+		order by pos, ctime
+]]))
+end)
+
+cmd_deployments('d|deployments', 'Show the list of deployments', function()
+	local to_lua = require'mysql'.to_lua
+	pqr(query({
+		compact=1,
+		field_attrs = {},
+	}, [[
+		select
+			deploy,
+			machine,
+			repo,
+			wanted_version,
+			deployed_version,
+			env,
+			status,
+			unix_timestamp(ctime) as ctime
+		from deploy
+		order by pos, ctime
+	]]))
+end)
+
+--command: machine-info-update -----------------------------------------------
 
 function mm.machine_info(machine)
 	local stdout = mm.ssh_sh('machine_info', machine, [=[
@@ -1094,7 +1136,7 @@ function mm.machine_info(machine)
 	return t
 end
 
-cmd_machines('machine_info MACHINE', 'Show machine info', function(machine)
+cmd_machines('machine-info MACHINE', 'Show machine info', function(machine)
 	local t = mm.machine_info(machine)
 	for i,k in ipairs(t) do
 		print(_('%20s %s', k, t[k]))
@@ -1121,7 +1163,7 @@ function mm.machine_info_update(machine)
 	rowset_changed'machines'
 end
 action.machine_info_update = mm.machine_info_update
-cmd_machines('machine_info_update MACHINE', 'Update machine info', action.machine_info_update)
+cmd_machines('machine-info-update MACHINE', 'Update machine info', action.machine_info_update)
 
 --command: ssh-hostkey-update ------------------------------------------------
 
@@ -1422,7 +1464,7 @@ EOF
 end
 
 action.deploy = mm.deploy
-cmd_deployments('deploy DEPLOY', 'Make a deployment', action.deploy)
+cmd_deployments('deploy DEPLOY', 'Run a deployment', action.deploy)
 
 function mm.deploy_remove(deploy)
 	deploy = checkarg(str_arg(deploy), 'deploy required')
@@ -1625,33 +1667,11 @@ rowset.backups = sql_rowset{
 
 --remote access tools --------------------------------------------------------
 
-cmd_machines('m[achines]', 'Show machines', function()
-	local to_lua = require'mysql'.to_lua
-	pqr(query({
-		compact=1,
-		field_attrs = {last_seen = {to_lua = glue.timeago}},
-	}, [[
-		select
-			machine,
-			public_ip,
-			unix_timestamp(last_seen) as last_seen,
-			cores,
-			ram_gb, ram_free_gb,
-			hdd_gb, hdd_free_gb,
-			cpu,
-			os_ver,
-			mysql_ver,
-			unix_timestamp(ctime) as ctime
-		from machine
-		order by pos, ctime
-]]))
-end)
-
-cmd_ssh('ssh', 'SSH into machine', function(machine, cmd)
+cmd_ssh('ssh MACHINE [CMD]', 'SSH into machine', function(machine, cmd)
 	mm.sshi(machine, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)})
 end)
 
-cmd_ssh(Windows, 'plink MACHINE CMD', 'SSH into machine with plink', function(machine, cmd)
+cmd_ssh(Windows, 'plink MACHINE [CMD]', 'SSH into machine with plink', function(machine, cmd)
 	mm.sshi(machine, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)}, {use_plink = true})
 end)
 
@@ -1684,11 +1704,11 @@ function mm.tunnel(task_name, machine, ports, opt)
 		opt and opt.interactive and update({capture_stdout = false, allocate_tty = true}, opt))
 end
 
-cmd_ssh_tunnels('tunnel MACHINE LPORT1[:RPORT1],...', 'SSH tunnel to machine', function(machine, ports)
+cmd_ssh_tunnels('tunnel MACHINE LPORT1[:RPORT1],...', 'Create SSH tunnel(s) to machine', function(machine, ports)
 	return mm.tunnel(nil, machine, ports, {interactive = true})
 end)
 
-cmd_ssh_tunnels('rtunnel MACHINE LPORT1[:RPORT1],...', 'Reverse SSH tunnel to machine', function(machine, ports)
+cmd_ssh_tunnels('rtunnel MACHINE LPORT1[:RPORT1],...', 'Create reverse SSH tunnel(s) to machine', function(machine, ports)
 	return mm.tunnel(nil, machine, ports, {interactive = true, reverse_tunnel = true})
 end)
 
@@ -1734,39 +1754,19 @@ function mm.mount(machine, rem_path, drive, bg)
 		NYI'mount'
 	end
 end
-cmd_ssh_mounts('mount MACHINE PATH LOCAL-DRIVE', 'Mount remote path to drive', mm.mount)
+cmd_ssh_mounts('mount MACHINE PATH [DRIVE]', 'Mount remote path to drive', mm.mount)
 
-cmd_ssh_mounts('mount-bg MACHINE PATH LOCAL-DRIVE', 'Mount remote path to drive in background',
+cmd_ssh_mounts('mount-bg MACHINE PATH [DRIVE]', 'Mount remote path to drive in background',
 function(machine, drive, rem_path)
 	return mm.mount(machine, drive, rem_path, true)
 end)
 
-cmd_ssh_mounts('mount-kill-all', 'Kill all SSH-FS mounts', function()
+cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	if win then
 		exec'taskkill /f /im sshfs.exe'
 	else
 		NYI'mount_kill_all'
 	end
-end)
-
-cmd_deployments('d[eployments]', 'Show defined deployments', function()
-	local to_lua = require'mysql'.to_lua
-	pqr(query({
-		compact=1,
-		field_attrs = {},
-	}, [[
-		select
-			deploy,
-			machine,
-			repo,
-			wanted_version,
-			deployed_version,
-			env,
-			status,
-			unix_timestamp(ctime) as ctime
-		from deploy
-		order by pos, ctime
-	]]))
 end)
 
 return mm:run(...)
