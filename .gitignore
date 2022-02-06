@@ -2,3 +2,5 @@
 /tmp/
 /sdk
 /*.conf
+*.pid
+*.log
