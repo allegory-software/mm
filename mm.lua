@@ -1,5 +1,5 @@
---go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v
 --go@ x:\sdk\bin\windows\luajit mm.lua -v run
+--go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v
 --[[
 
 	Many Machines, the independent man's SAAS provisioning tool.
@@ -48,18 +48,7 @@ LIMITATIONS
 
 ]]
 
-require'webb'
-local S = S
-
 local function mm_schema()
-
-	import'schema_std'
-	import'schema_lang'
-	import'webb_auth'
-
-	types.ctime.text = S('ctime_text', 'Created At')
-	types.mtime.text = S('mtime_text', 'Last Modified At')
-	types.atime.text = S('atime_text', 'Last Accessed At')
 
 	tables.provider = {
 		provider    , strpk,
@@ -142,37 +131,30 @@ local function mm_schema()
 
 end
 
-require'$daemon'
-require'xmodule'
+local mm = require('$xapp')('mm', ...)
+
+--load_opensans()
+
+mm.schema:import(mm_schema)
 
 local b64 = require'base64'.encode
-local proc = require'proc'
-local sock = require'sock'
-local xapp = require'xapp'
 local mustache = require'mustache'
 local queue = require'queue'
-local schema = require'schema'
 
 --config ---------------------------------------------------------------------
 
-local mm = xapp(daemon'mm')
-
-mm.sshfs_dir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
-mm.ssh_dir = [[x:\_luapower\bin\mingw64]] --[[C:\"Program Files"\Git\usr\bin\]]
+mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
+mm.sshdir   = mm.bindir
 
 mm.use_plink = false
 
-mm.known_hosts_file  = indir(var_dir, 'known_hosts')
-mm.github_key_file   = indir(var_dir, 'mm_github.key')
+mm.known_hosts_file  = indir(mm.vardir, 'known_hosts')
+mm.github_key_file   = indir(mm.vardir, 'mm_github.key')
 mm.github_key        = readfile(mm.github_key_file, trim)
 
-config('http_port', 8080)
-config('http_addr', '*')
+config('https_addr', false)
 
 --logging.filter[''] = true
-require'http'.logging = logging
-require'http_server'.logging = logging
-require'mysql'.logging = logging
 
 config('db_host', '10.0.0.5')
 config('db_port', 3307)
@@ -184,13 +166,8 @@ mm.github_fingerprint = ([[
 github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
 ]]):trim()
 
-mm.schema = schema.new()
-mm.schema.env.null = null
-mm.schema:import(mm_schema)
-config('db_schema', mm.schema)
-
 local cmd_ssh_keys    = cmdsection'SSH KEY MANAGEMENT'
-local cmd_ssh         = cmdsection'SSH'
+local cmd_ssh         = cmdsection'SSH TERMINALS'
 local cmd_ssh_tunnels = cmdsection'SSH TUNNELS'
 local cmd_ssh_mounts  = cmdsection'SSH-FS MOUNTS'
 local cmd_mysql       = cmdsection'MYSQL'
@@ -199,11 +176,8 @@ local cmd_deployments = cmdsection'DEPLOYMENTS'
 
 --database -------------------------------------------------------------------
 
-
 function mm.install()
-
-	import(mm_schema)
-
+	--TODO
 end
 
 cmd('install', 'Create database, etc.', mm.install)
@@ -215,14 +189,14 @@ local function NYI(event)
 end
 
 function sshcmd(cmd)
-	return win and indir(mm.ssh_dir, cmd) or cmd
+	return win and indir(mm.sshdir, cmd) or cmd
 end
 
 function mm.keyfile(machine, suffix, ext)
 	machine = machine and machine:trim()
 	local file = 'mm'..(machine and '-'..machine or '')
 		..(suffix and '.'..suffix or '')..'.'..(ext or 'key')
-	return indir(var_dir, file)
+	return indir(mm.vardir, file)
 end
 
 function mm.ppkfile(machine, suffix)
@@ -230,7 +204,7 @@ function mm.ppkfile(machine, suffix)
 end
 
 function mm.pubkey(machine, suffix)
-	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()..' mm'
+	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
 end
 
 --TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
@@ -262,7 +236,7 @@ function mm.ssh_key_gen_ppk(machine, suffix)
 	local key = mm.keyfile(machine, suffix)
 	local ppk = mm.ppkfile(machine, suffix)
 	if win then
-		exec(indir(bin_dir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
+		exec(indir(mm.bindir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
 	else
 		--TODO: use plink linux binary to gen the ppk.
 		NYI'ssh_key_gen_ppk'
@@ -292,14 +266,6 @@ body {
 	display: flex;
 	flex-flow: column;
 }
-
-body { font-family: sans-serif; font-size: 13px; }
-.x-grid-header-cell { font-size: 13px; }
-
-/*
-body { font-family: monospace; font-size: 12px; }
-.x-grid-header-cell { font-size: 13px; }
-*/
 
 .header {
 	display: flex;
@@ -695,6 +661,7 @@ function mm.exec(task_name, cmd, opt)
 	local capture_stderr = opt.capture_stderr ~= false and not cx().fake
 
 	local task = mm.task(task_name, opt)
+	task.cmd = cmd
 
 	local p, err = proc.exec{
 		cmd = cmd,
@@ -788,7 +755,7 @@ function mm.exec(task_name, cmd, opt)
 	end
 
 	if #task.errors > 0 then
-		error(concat(task.errors, '\n'))
+		error(cat(task.errors, '\n'))
 	end
 	assertf(task.exit_code == 0, 'Task finished with exit code %d', task.exit_code)
 
@@ -813,7 +780,7 @@ function mm.ssh(task_name, machine, args, opt)
 	if Windows and (opt.use_plink or mm.use_plink) then
 		--TODO: plink is missing a timeout option (look for a putty fork which has it?).
 		return mm.exec(task_name, extend({
-			indir(bin_dir, 'plink'),
+			indir(mm.bindir, 'plink'),
 			'-ssh',
 			'-load', 'mm',
 			opt.allocate_tty and '-t' or '-T',
@@ -861,7 +828,7 @@ end
 --shell scripts with preprocessor --------------------------------------------
 
 local function load_shfile(self, name)
-	local path = indir(app_dir, 'shlib', name..'.sh')
+	local path = indir(mm.dir, 'shlib', name..'.sh')
 	return load(path)
 end
 
@@ -912,7 +879,7 @@ function mm.sh_script(s, env, pp_env, included)
 		for k,v in sortedpairs(env) do
 			t[#t+1] = k..'='..proc.quote_arg_unix(tostring(v))
 		end
-		s = concat(t, '\n')..'\n\n'..s
+		s = cat(t, '\n')..'\n\n'..s
 	end
 	if pp_env then
 		return mm.sh_preprocess(s, pp_env)
@@ -936,7 +903,6 @@ function mm.task(task_name, opt)
 		id = last_task_id,
 		name = task_name,
 		affects = opt.affects,
-		cmd = cmd,
 		start_time = time(),
 		duration = 0,
 		status = 'new',
@@ -995,9 +961,9 @@ function task:err(s)
 	self:changed()
 end
 
-function task:stdout    () return concat(self._out) end
-function task:stderr    () return concat(self._err) end
-function task:stdouterr () return concat(self._outerr) end
+function task:stdout    () return cat(self._out) end
+function task:stderr    () return cat(self._err) end
+function task:stdouterr () return cat(self._outerr) end
 
 rowset.tasks = virtual_rowset(function(self, ...)
 
@@ -1027,7 +993,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 			task.status,
 			task.start_time,
 			task.duration,
-			concat(task.cmd, ' '),
+			task.cmd and cat(imap(task.cmd, proc.quote_arg_unix), ' ') or '',
 			task.stdin,
 			task:stdouterr(),
 			task.exit_code,
@@ -1303,10 +1269,13 @@ function mm.github_key_update(machine)
 		ssh_hostkey_update github.com "$github_fingerprint"
 		ssh_host_key_update github.com mm_github "$github_key" unstable_ip
 		must cd /home
+		shopt -s nullglob
 		for user in *; do
 			[ -d /home/$user/.ssh ] && \
-				HOME=/home/$user USER=$user ssh_host_key_update github.com mm_github "$github_key" unstable_ip
+				HOME=/home/$user USER=$user ssh_host_key_update \
+					github.com mm_github "$github_key" unstable_ip
 		done
+		exit 0
 	]], {
 		github_fingerprint = mm.github_fingerprint,
 		github_key = mm.github_key,
@@ -1675,6 +1644,13 @@ cmd_ssh(Windows, 'plink MACHINE [CMD]', 'SSH into machine with plink', function(
 	mm.sshi(machine, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)}, {use_plink = true})
 end)
 
+--TIP: make a putty session called `mm` where you set the window size,
+--uncheck "warn on close" and whatever else you need to make putty comfortable.
+cmd_ssh(Windows, 'putty MACHINE', 'SSH into machine with putty', function(machine)
+	local ip = mm.ip(machine)
+	proc.exec(indir(mm.bindir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
+end)
+
 cmd_ssh('ssh-all CMD', 'Execute command on all machines', function(command)
 	command = checkarg(str_arg(command), 'command expected')
 	for _, machine in each_row_vals'select machine from machine' do
@@ -1683,13 +1659,6 @@ cmd_ssh('ssh-all CMD', 'Execute command on all machines', function(command)
 			mm.ssh(nil, machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
 		end)
 	end
-end)
-
---TIP: make a putty session called `mm` where you set the window size,
---uncheck "warn on close" and whatever else you need to make putty comfortable.
-cmd_ssh(Windows, 'putty MACHINE', 'SSH into machine with putty', function(machine)
-	local ip = mm.ip(machine)
-	proc.exec(indir(bin_dir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
 end)
 
 function mm.tunnel(task_name, machine, ports, opt)
@@ -1731,7 +1700,7 @@ function mm.mount(machine, rem_path, drive, bg)
 		rem_path = rem_path or '/'
 		machine = str_arg(machine)
 		local cmd =
-			'"'..indir(mm.sshfs_dir, 'sshfs.exe')..'"'..
+			'"'..indir(mm.sshfsdir, 'sshfs.exe')..'"'..
 			' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
 			(bg and '' or ' -f')..
 			--' -odebug'.. --good stuff (implies -f)
@@ -1739,7 +1708,7 @@ function mm.mount(machine, rem_path, drive, bg)
 			' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
 			' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
 			--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
-			' -ossh_command='..path.sep(indir(mm.sshfs_dir, 'ssh'), nil, '/')..
+			' -ossh_command='..path.sep(indir(mm.sshfsdir, 'ssh'), nil, '/')..
 			' -oBatchMode=yes'..
 			' -oRequestTTY=no'..
 			' -oPreferredAuthentications=publickey'..
