@@ -396,7 +396,7 @@ rowset_field_attrs['machines.refresh'] = {
 }
 
 // output textarea auto-scroll.
-document.on('mm_task_out_textarea.init', function(e) {
+on('mm_task_out_textarea.init', function(e) {
 	e.do_after('do_update_val', function() {
 		let te = e.$1('textarea')
 		if (te)
@@ -410,7 +410,7 @@ function check_notify(t) {
 }
 
 // machines grid context menu items.
-document.on('mm_machines_grid.init', function(e) {
+on('mm_machines_grid.init', function(e) {
 
 	e.on('init_context_menu_items', function(items) {
 
