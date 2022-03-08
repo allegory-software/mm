@@ -67,11 +67,11 @@ local function mm_schema()
 		fingerprint , b64key,
 		ssh_key_ok  , bool,
 		admin_page  , url,
-		last_seen   , timestamp,
+		last_seen   , datetime_s,
 		os_ver      , name,
 		mysql_ver   , name,
 		cpu         , name,
-		cores       , smallint,
+		cores       , uint16,
 		ram_gb      , double,
 		ram_free_gb , double,
 		hdd_gb      , double,
@@ -97,10 +97,10 @@ local function mm_schema()
 	}
 
 	tables.bkp = {
-		bkp         , pk,
+		bkp         , idpk,
 		parent_bkp  , id, child_fk(bkp),
 		deploy      , strid, not_null, child_fk,
-		start_time  , time,
+		start_time  , datetime_s,
 		duration    , uint,
 		size        , uint52,
 		checksum    , hash,
@@ -160,6 +160,7 @@ config('db_host', '10.0.0.5')
 config('db_port', 3307)
 config('db_pass', 'root')
 config('secret' , '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
+config('auto_create_user', false)
 
 --https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 mm.github_fingerprint = ([[
@@ -176,11 +177,16 @@ local cmd_deployments = cmdsection'DEPLOYMENTS'
 
 --database -------------------------------------------------------------------
 
-function mm.install()
-	--TODO
-end
-
-cmd('install', 'Create database, etc.', mm.install)
+cmd('install', 'Install the app', function(doit)
+	say'INSTALL'
+	create_db()
+	local dry = doit ~= 'forealz'
+	db():sync_schema(mm.schema, {dry = dry})
+	if not dry then
+		create_user()
+	end
+	say'All done.'
+end)
 
 --tools ----------------------------------------------------------------------
 
@@ -295,11 +301,11 @@ body[theme=dark] .header {
 	max-width: 400px;
 	grid-template-areas:
 		"h1"
-		"mm_"
+		"mm_pubkey"
 		"ssh_key_gen_button"
 		"ssh_key_updates_button"
 		"h2"
-		"mys"
+		"mysql_root_pass"
 	;
 }
 
@@ -316,7 +322,7 @@ html[[
 	<div theme=dark vflex class="x-flex">
 		<div class=header>
 			<div b><span class="fa fa-server"></span> MANY MACHINES</div>
-			<x-settings-button></x-settings-button>
+			<x-usr-button></x-usr-button>
 		</div>
 		<x-listbox id=mm_actions_listbox>
 			<div action=providers>Providers</div>
@@ -346,7 +352,7 @@ html[[
 			</x-vsplit>
 			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
 				<x-bare-nav id=mm_config_nav rowset_name=config></x-bare-nav>
-				<x-form nav_id=mm_config_nav id=mm_config_form>
+				<x-form nav_id=mm_config_nav id=mm_config_form templated>
 					<h2 area=h1>SSH</h2>
 					<x-textarea rows=12 col=mm_pubkey infomode=under
 						info="This is the SSH key used to log in as root on all machines.">
@@ -520,7 +526,7 @@ rowset.providers = sql_rowset{
 			website,
 			note,
 			pos,
-			unix_timestamp(ctime) as ctime
+			ctime
 		from
 			provider
 	]],
@@ -551,7 +557,7 @@ rowset.machines = sql_rowset{
 			local_ip,
 			admin_page,
 			ssh_key_ok,
-			unix_timestamp(last_seen) as last_seen,
+			last_seen,
 			cpu,
 			cores,
 			ram_gb,
@@ -560,7 +566,7 @@ rowset.machines = sql_rowset{
 			hdd_free_gb,
 			os_ver,
 			mysql_ver,
-			unix_timestamp(ctime) as ctime
+			ctime
 		from
 			machine
 	]],
@@ -571,7 +577,7 @@ rowset.machines = sql_rowset{
 		local_ip    = {text = 'Local IP Address', hidden = true},
 		admin_page  = {type = 'url', text = 'VPS admin page of this machine'},
 		ssh_key_ok  = {readonly = true, text = 'SSH key is up-to-date'},
-		last_seen   = {readonly = true, type = 'timestamp'},
+		last_seen   = {readonly = true},
 		cpu         = {readonly = true, text = 'CPU'},
 		cores       = {readonly = true, w = 20},
 		ram_gb      = {readonly = true, w = 40, decimals = 1, text = 'RAM (GB)'},
@@ -973,7 +979,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		{name = 'name'      , },
 		{name = 'affects'   , hint = 'Entities that this task affects'},
 		{name = 'status'    , },
-		{name = 'start_time', type = 'timestamp'},
+		{name = 'start_time', },
 		{name = 'duration'  , type = 'number', decimals = 2,  w = 20,
 			hint = 'Duration till last change in input, output or status'},
 		{name = 'command'   , hidden = true},
@@ -1036,19 +1042,21 @@ cmd_machines('m|machines', 'Show the list of machines', function()
 	local to_lua = require'mysql'.to_lua
 	pqr(query({
 		compact=1,
-		field_attrs = {last_seen = {to_lua = glue.timeago}},
+		field_attrs = {
+			last_seen = {to_lua = glue.timeago},
+		},
 	}, [[
 		select
 			machine,
 			public_ip,
-			unix_timestamp(last_seen) as last_seen,
+			last_seen,
 			cores,
 			ram_gb, ram_free_gb,
 			hdd_gb, hdd_free_gb,
 			cpu,
 			os_ver,
 			mysql_ver,
-			unix_timestamp(ctime) as ctime
+			ctime
 		from machine
 		order by pos, ctime
 ]]))
@@ -1068,7 +1076,7 @@ cmd_deployments('d|deployments', 'Show the list of deployments', function()
 			deployed_version,
 			env,
 			status,
-			unix_timestamp(ctime) as ctime
+			ctime
 		from deploy
 		order by pos, ctime
 	]]))
@@ -1551,7 +1559,7 @@ action.log_server_start = mm.log_server_start
 rowset.deploy_log = virtual_rowset(function(self)
 	self.fields = {
 		{name = 'id'      , hidden = true},
-		{name = 'time'    , max_w = 100, type = 'timestamp'},
+		{name = 'time'    , max_w = 100},
 		{name = 'deploy'  , max_w =  80},
 		{name = 'severity', max_w =  60},
 		{name = 'module'  , max_w =  60},
@@ -1594,7 +1602,7 @@ rowset.backups = sql_rowset{
 			b.bkp        ,
 			b.parent_bkp ,
 			b.deploy     ,
-			unix_timestamp(b.start_time) as start_time,
+			b.start_time ,
 			b.duration   ,
 			b.size       ,
 			b.checksum   ,
@@ -1604,7 +1612,7 @@ rowset.backups = sql_rowset{
 	where_all = 'b.deploy in (:param:filter)',
 	pk = 'bkp',
 	field_attrs = {
-		start_time = {type = 'timestamp', to_lua = timeago},
+		start_time = {to_lua = glue.timeago},
 	},
 	parent_col = 'parent_bkp',
 	insert_row = function(self, row)
