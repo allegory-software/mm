@@ -365,7 +365,7 @@ html[[
 			</div>
 		</x-switcher>
 		<x-split action=tasks fixed_side=second fixed_size=600>
-			<x-grid id=mm_tasks_grid rowset_name=tasks save_row_on=input></x-grid>
+			<x-grid id=mm_tasks_grid rowset_name=tasks save_on_input action_band_visible=no></x-grid>
 			<x-pagelist>
 				<x-textarea mono console class=x-stretched title="OUT/ERR" id=mm_task_out_textarea nav_id=mm_tasks_grid col=out></x-textarea>
 				<x-textarea mono console class=x-stretched title="STDIN" id=mm_task_stdin_textarea nav_id=mm_tasks_grid col=stdin></x-textarea>
@@ -984,6 +984,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		{name = 'errors'    , },
 	}
 	self.pk = 'id'
+	self.rw_cols = 'pinned'
 
 	local function task_row(task)
 		return {
