@@ -755,10 +755,8 @@ function mm.exec(task_name, cmd, opt)
 		end)
 	end
 
-	if #task.errors > 0 then
-		error(cat(task.errors, '\n'))
-	end
-	assertf(task.exit_code == 0, 'Task finished with exit code %d', task.exit_code)
+	check500(#task.errors == 0, cat(task.errors, '\n'))
+	check500(task.exit_code == 0, 'Task finished with exit code %d', task.exit_code)
 
 	return task
 end
@@ -1024,22 +1022,20 @@ rowset.tasks = virtual_rowset(function(self, ...)
 
 end)
 
---command helpers ------------------------------------------------------------
-
-local function checknostderr(task)
-	local stderr = task:stderr()
-	check500(stderr == '', stderr)
-	return task
-end
-
 --listings -------------------------------------------------------------------
 
+local mysql = require'mysql'
+local function timeago(s)
+	--NOTE: this only works if both the MySQL server and the app server have
+	--the same timezone. The correct way is to get the date in UTC.
+	return glue.timeago(false, mysql.datetime_to_timestamp(s))
+end
+
 cmd_machines('m|machines', 'Show the list of machines', function()
-	local to_lua = require'mysql'.to_lua
 	pqr(query({
 		compact=1,
 		field_attrs = {
-			last_seen = {to_lua = glue.timeago},
+			last_seen = {mysql_to_lua = timeago},
 		},
 	}, [[
 		select
@@ -1055,11 +1051,10 @@ cmd_machines('m|machines', 'Show the list of machines', function()
 			ctime
 		from machine
 		order by pos, ctime
-]]))
+	]]))
 end)
 
 cmd_deployments('d|deployments', 'Show the list of deployments', function()
-	local to_lua = require'mysql'.to_lua
 	pqr(query({
 		compact=1,
 		field_attrs = {},
@@ -1416,7 +1411,7 @@ EOF
 			-s -- << EOF
 
 cd /home/$deploy/$app || exit
-./$app deploy
+./$app-deploy
 
 EOF
 
@@ -1610,7 +1605,7 @@ rowset.backups = sql_rowset{
 	where_all = 'b.deploy in (:param:filter)',
 	pk = 'bkp',
 	field_attrs = {
-		start_time = {to_lua = glue.timeago},
+		start_time = {mysql_to_lua = timeago},
 	},
 	parent_col = 'parent_bkp',
 	insert_row = function(self, row)

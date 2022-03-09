@@ -1,8 +1,8 @@
 #!/bin/bash
+APP=mm
 SDK_VERSION=dev
 set -u # break on undefined vars.
 cd "$(dirname "$0")" || exit 1
-APP="$(basename "$0")"
 echo "Self-deploying APP=$APP ENV=$ENV VERSION=$VERSION..." >&2
 must git clone --depth=1 -b "$SDK_VERSION" --single-branch \
 	git@github.com:allegory-software/allegory-sdk  sdk
