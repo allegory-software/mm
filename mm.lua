@@ -150,17 +150,26 @@ mm.use_plink = false
 
 mm.known_hosts_file  = indir(mm.vardir, 'known_hosts')
 mm.github_key_file   = indir(mm.vardir, 'mm_github.key')
-mm.github_key        = readfile(mm.github_key_file, trim)
+mm.github_key        = load(mm.github_key_file):trim()
 
 config('https_addr', false)
 
 --logging.filter[''] = true
 
-config('db_host', '10.0.0.5')
-config('db_port', 3307)
-config('db_pass', 'root')
-config('secret' , '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
+config('db_host'  , '10.0.0.5')
+config('db_port'  , 3307)
+config('db_pass'  , 'root')
+config('secret'   , '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
+config('smtp_host', 'mail.bpnpart.com')
+config('smtp_user', 'admin@bpnpart.com')
+config('host'     , 'bpnpart.com')
+config('noreply_email', 'admin@bpnpart.com')
+config('dev_email', 'cosmin.apreutesei@gmail.com')
+
+config('allow_create_user', false)
 config('auto_create_user', false)
+config('page_title_suffix', 'Many Machines')
+config('sign_in_logo', '/sign-in-logo.png')
 
 --https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 mm.github_fingerprint = ([[
@@ -264,15 +273,7 @@ cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', action.my
 
 --admin web UI ---------------------------------------------------------------
 
-mm.title = 'Many Machines'
-
 css[[
-body {
-	/* layout content: center limited-width body to window */
-	display: flex;
-	flex-flow: column;
-}
-
 .header {
 	display: flex;
 	border-bottom: 1px solid var(--x-smoke);
@@ -311,15 +312,10 @@ body[theme=dark] .header {
 
 ]]
 
-js[[
-sign_in_options = {
-	logo: 'sign-in-logo.png',
-}
-]]
-
 html[[
+<x-if global=signed_in>
 <x-split>
-	<div theme=dark vflex class="x-flex">
+	<div theme=dark vflex>
 		<div class=header>
 			<div b><span class="fa fa-server"></span> MANY MACHINES</div>
 			<x-usr-button></x-usr-button>
@@ -350,7 +346,7 @@ html[[
 					</x-pagelist>
 				</x-split>
 			</x-vsplit>
-			<div action=config class="x-container x-flex x-stretched" style="justify-content: center">
+			<div action=config class="x-container" style="justify-content: center">
 				<x-bare-nav id=mm_config_nav rowset_name=config></x-bare-nav>
 				<x-form nav_id=mm_config_nav id=mm_config_form templated>
 					<h2 area=h1>SSH</h2>
@@ -377,6 +373,7 @@ html[[
 		</x-split>
 	</x-vsplit>
 </x-split>
+</x-if>
 ]]
 
 js[[
@@ -385,9 +382,6 @@ init_xmodule({
 	modules: {
 		user: {icon: 'user'},
 	},
-	slots: {
-		user: {color: '#99f', icon: 'user'},
-	},
 	layers: [],
 })
 
@@ -395,7 +389,7 @@ init_xmodule({
 rowset_field_attrs['machines.refresh'] = {
 	type: 'button',
 	w: 40,
-	button_options: {icon: 'fa fa-sync', bare: true, text: '', load_spin: true},
+	button_options: {icon: 'fas fa fa-sync', bare: true, text: '', load_spin: true},
 	action: function(machine) {
 		this.load(['', 'machine-info-update', machine])
 	},
@@ -661,6 +655,7 @@ end)
 --async exec -----------------------------------------------------------------
 
 function mm.exec(task_name, cmd, opt)
+
 	opt = opt or empty
 
 	local capture_stdout = opt.capture_stdout ~= false
@@ -1198,9 +1193,11 @@ cmd_ssh_keys('ssh-pubkey', 'Show the current SSH public key', action.ssh_pubkey)
 --command: ssh-key-update ----------------------------------------------------
 
 function mm.each_machine(f)
+	local threads = sock.threadset()
 	for _, machine in each_row_vals'select machine from machine' do
-		thread(f, machine)
+		threads:thread(f, machine)
 	end
+	assert(threads:wait())
 end
 
 function mm.ssh_key_update(machine)
