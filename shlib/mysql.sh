@@ -107,7 +107,7 @@ mysql_update_root_pass() { # pass
 mysql_create_db() { # db
 	say "Creating MySQL database '$1'..."
 	query "
-		create database $1
+		create database \`$1\`
 			character set utf8mb4
 			collate utf8mb4_unicode_ci;
 	"
@@ -115,12 +115,12 @@ mysql_create_db() { # db
 
 mysql_drop_db() { # db
 	say "Dropping MySQL database '$1'..."
-	query "drop database if exists $1"
+	query "drop database if exists \`$1\`"
 }
 
 mysql_grant_user() { # host user db
 	query "
-		grant all privileges on $3.* to '$2'@'$1';
+		grant all privileges on \`$3\`.* to '$2'@'$1';
 		flush privileges;
 	"
 }

@@ -1,4 +1,4 @@
-#use die
+#use die fs
 
 user_create() { # user
 	say "Creating user '$1'..."

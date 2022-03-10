@@ -86,6 +86,7 @@ local function mm_schema()
 		machine          , strid, not_null, fk,
 		master_deploy    , strid, fk(deploy),
 		repo             , url, not_null,
+		app              , strid, not_null,
 		wanted_version   , strid,
 		deployed_version , strid,
 		env              , strid, not_null,
@@ -603,6 +604,17 @@ rowset.machines = sql_rowset{
 	end,
 }
 
+local function validate_deploy(d)
+	if not d then return end
+	d = d:trim()
+	if d == '' then return 'cannot be empty' end
+	if d:find'^[^a-z]' then return 'must start with a small letter' end
+	if d:find'[_%-]$' then return 'cannot end in a hyphen or underscore' end
+	if d:find'[^a-z0-9_%-]' then return 'can only contain small letters, digits, hyphens and underscores' end
+	if not d:find'%-%-' then return 'cannot contain double-hyphens' end
+	if not d:find'__' then return 'cannot contain double-underscores' end
+end
+
 rowset.deploys = sql_rowset{
 	select = [[
 		select
@@ -611,6 +623,7 @@ rowset.deploys = sql_rowset{
 			master_deploy,
 			machine,
 			repo,
+			app,
 			wanted_version,
 			deployed_version,
 			env,
@@ -622,14 +635,17 @@ rowset.deploys = sql_rowset{
 	parent_col = 'master_deploy',
 	name_col = 'deploy',
 	field_attrs = {
+		deploy = {
+			validate = validate_deploy,
+		},
 	},
 	insert_row = function(self, row)
 		row.secret = b64(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
- 		insert_row('deploy', row, 'deploy master_deploy machine repo wanted_version env secret mysql_pass pos')
+ 		insert_row('deploy', row, 'deploy master_deploy machine repo app wanted_version env secret mysql_pass pos')
 	end,
 	update_row = function(self, row)
-		update_row('deploy', row, 'deploy master_deploy machine repo wanted_version env pos')
+		update_row('deploy', row, 'deploy master_deploy machine repo app wanted_version env pos')
 	end,
 	delete_row = function(self, row)
 		delete_row('deploy', row)
@@ -1063,6 +1079,7 @@ cmd_deployments('d|deployments', 'Show the list of deployments', function()
 			deploy,
 			machine,
 			repo,
+			app,
 			wanted_version,
 			deployed_version,
 			env,
@@ -1330,10 +1347,6 @@ cmd_machines('machine_prepare MACHINE', 'Prepare a new machine', action.machine_
 
 --command: deploy ------------------------------------------------------------
 
-function mm.repo_app_name(repo)
-	return repo:gsub('%.git$', ''):match'/(.-)$'
-end
-
 function mm.deploy(deploy)
 
 	deploy = checkarg(str_arg(deploy), 'deploy required')
@@ -1342,6 +1355,7 @@ function mm.deploy(deploy)
 		select
 			d.machine,
 			d.repo,
+			d.app,
 			d.wanted_version,
 			d.env,
 			d.mysql_pass,
@@ -1352,11 +1366,9 @@ function mm.deploy(deploy)
 			deploy = ?
 	]], deploy)
 
-	local app = mm.repo_app_name(d.repo)
-
 	mm.ssh_sh('deploy', d.machine, [[
 
-		#use die user mysql
+		#use die ssh user mysql
 
 		if [ ! -d "/home/$deploy" ]; then
 
@@ -1418,7 +1430,7 @@ EOF
 	]], {
 		deploy = deploy,
 		repo = d.repo,
-		app = app,
+		app = d.app,
 		version = d.wanted_version,
 		env = d.env or 'dev',
 		secret = d.secret,
@@ -1438,10 +1450,11 @@ cmd_deployments('deploy DEPLOY', 'Run a deployment', action.deploy)
 
 function mm.deploy_remove(deploy)
 	deploy = checkarg(str_arg(deploy), 'deploy required')
-	local d = first_row('select repo, machine from deploy where deploy = ?', deploy)
-	local app = mm.repo_app_name(d.repo)
+	local d = first_row('select repo, app, machine from deploy where deploy = ?', deploy)
 
 	mm.ssh_sh('deploy_remove', d.machine, [[
+
+		#use mysql user
 
 		[ -d /home/$deploy/$app ] && (
 			must cd /home/$deploy/$app
@@ -1456,7 +1469,7 @@ function mm.deploy_remove(deploy)
 		say "All done."
 
 	]], {
-		app = app,
+		app = d.app,
 		deploy = deploy,
 	})
 end
