@@ -17,7 +17,7 @@ FEATURES
 	- maintain secure access to all services via bulk key updates:
 		- ssh root access.
 		- MySQL root access.
-		- github access.
+		- github & azure devops access.
 	- "one-click" launcher for secure admin sessions:
 		- bash (cmd & putty).
 		- mysql (cmd & putty).
@@ -34,8 +34,8 @@ LIMITATIONS
 	- the machines need to run Linux (Debian 10) and have a public IP.
 	- all deployments connect to the same MySQL server instance.
 	- each deployment is given a single MySQL db.
-	- code has to be on github (in a public or private repo).
-	- single github key for github access.
+	- code has to be on github or azure devops (in a public or private repo).
+	- single ssh key for git access.
 	- apps have to be able to self-install and self-upgrade/downgrade.
 
 	TODO: make mm portable by using file rowsets instead of mysql.
@@ -84,7 +84,6 @@ local function mm_schema()
 	tables.deploy = {
 		deploy           , strpk,
 		machine          , strid, not_null, fk,
-		master_deploy    , strid, fk(deploy),
 		repo             , url, not_null,
 		app              , strid, not_null,
 		wanted_version   , strid,
@@ -94,7 +93,14 @@ local function mm_schema()
 		mysql_pass       , hash, not_null,
 		status           , strid,
 		ctime            , ctime,
+		mtime            , mtime,
 		pos              , pos,
+	}
+
+	tables.deploy_vars = {
+		deploy           , strid, not_null,
+		name             , strid, not_null, pk,
+		val              , text, not_null,
 	}
 
 	tables.bkp = {
@@ -150,8 +156,26 @@ mm.sshdir   = mm.bindir
 mm.use_plink = false
 
 mm.known_hosts_file  = indir(mm.vardir, 'known_hosts')
-mm.github_key_file   = indir(mm.vardir, 'mm_github.key')
-mm.github_key        = load(mm.github_key_file):trim()
+
+mm.git_hosting = {
+	github = {
+		host = 'github.com',
+		fingerprint = [[
+			ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
+		]],
+	},
+	azure = {
+		host = 'ssh.dev.azure.com',
+		fingerprint = [[
+			ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOfGJ4NakVyIzf1rXYd4d7wo6jBlkLvCA4odBlL0mDUyZ0/QUfTTqeu+tm22gOsv+VrVTMk6vwRU75gY/y9ut5Mb3bR5BV58dKXyq9A9UeB5Cakehn5Zgm6x1mKoVyf+FFn26iYqXJRgzIZZcZ5V6hrE0Qg39kZm4az48o0AUbf6Sp4SLdvnuMa2sVNwHBboS7EJkm57XQPVU3/QpyNLHbWDdzwtrlS+ez30S3AdYhLKEOxAG8weOnyrtLJAUen9mTkol8oII1edf7mWWbWVf0nBmly21+nZcmCTISQBtdcyPaEno7fFQMDD26/s0lfKob4Kw8H
+		]],
+	},
+}
+for name, t in pairs(mm.git_hosting) do
+	t.name = name
+	t.key = load(indir(mm.vardir, _('mm_%s.key', name))):trim()
+	t.fingerprint = t.host .. ' ' .. t.fingerprint:trim()
+end
 
 config('https_addr', false)
 
@@ -171,11 +195,7 @@ config('allow_create_user', false)
 config('auto_create_user', false)
 config('page_title_suffix', 'Many Machines')
 config('sign_in_logo', '/sign-in-logo.png')
-
---https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
-mm.github_fingerprint = ([[
-github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
-]]):trim()
+config('favicon_href', '/favicon1.ico')
 
 local cmd_ssh_keys    = cmdsection'SSH KEY MANAGEMENT'
 local cmd_ssh         = cmdsection'SSH TERMINALS'
@@ -227,7 +247,7 @@ end
 function mm.ssh_hostkey(machine)
 	machine = checkarg(str_arg(machine))
 	local key = first_row('select fingerprint from machine where machine = ?', machine):trim()
-	return mm.exec('hostkey', {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}, {stdin = key})
+	return mm.exec('ssh_hostkey', {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}, {stdin = key})
 		:stdout():trim():match'%s([^%s]+)'
 end
 function action.ssh_hostkey(machine)
@@ -292,11 +312,8 @@ body[theme=dark] .header {
 	background-color: #111;
 }
 
-.x-textarea[console] {
+textarea.x-editbox-input[console] {
 	opacity: 1;
-	white-space: pre;
-	overflow-wrap: normal;
-	overflow-x: scroll;
 }
 
 #mm_config_form.maxcols1 {
@@ -311,14 +328,43 @@ body[theme=dark] .header {
 	;
 }
 
+#mm_deploys_form.maxcols1 {
+	grid-template-rows: 0fr 0fr 0fr 0fr 0fr 1fr 0fr 0fr;
+	grid-template-areas:
+		"deploy      deploy           machine            status "
+		"app         wanted_version   deployed_version   env    "
+		"repo        repo             repo               repo   "
+		"secret      secret           secret             secret "
+		"mysql_pass  mysql_pass       mysql_pass         mysql_pass"
+		"ctime       ctime            mtime              mtime  "
+		"dep         dep              dep                dep    "
+		"remdep      remdep           remdep             remdep "
+	;
+}
+
+.signed-out-bg {
+	background-image: url("https://source.unsplash.com/random/1920x1080");
+	background-position: center;
+}
+
+.mm-logo {
+	max-width: 18px;
+	display: inline;
+	vertical-align: bottom;
+	padding-right: 2px;
+}
+
 ]]
 
 html[[
+<x-if global=signed_out>
+	<div class=signed-out-bg></div>
+</x-if>
 <x-if global=signed_in>
-<x-split>
+<x-split fixed_size=140>
 	<div theme=dark vflex>
 		<div class=header>
-			<div b><span class="fa fa-server"></span> MANY MACHINES</div>
+			<div><b><img src=/favicon1.ico class=mm-logo> MANY MACHINES</b></div>
 			<x-usr-button></x-usr-button>
 		</div>
 		<x-listbox id=mm_actions_listbox>
@@ -334,24 +380,60 @@ html[[
 			<x-vsplit action=machines>
 				<x-grid id=mm_machines_grid rowset_name=machines></x-grid>
 			</x-vsplit>
-			<x-vsplit action=deploys>
-				<x-grid id=mm_deploys_grid rowset_name=deploys></x-grid>
-				<x-split>
-					<div>
-						<x-button action_name=deploy_button_action text="Deploy"></x-button>
-						<x-button action_name=deploy_remove_button_action text="Remove Deploy"></x-button>
-					</div>
+			<x-split action=deploys fixed_size=400>
+				<x-pagelist>
+					<x-grid title=Deployments id=mm_deploys_grid rowset_name=deploys></x-grid>
+				</x-pagelist>
+				<x-split fixed_size=400>
 					<x-pagelist>
-						<x-grid id=mm_deploy_log_grid rowset_name=deploy_log param_nav_id=mm_deploys_grid params=deploy title="Live Log"></x-grid>
-						<x-grid id=mm_backups rowset_name=backups param_nav_id=mm_deploys_grid params=deploy title="Backups"></x-grid>
+						<x-form title="Deploy" id=mm_deploys_form nav_id=mm_deploys_grid grid>
+							<x-input col=deploy           ></x-input>
+							<x-input col=machine          ></x-input>
+							<x-input col=status           ></x-input>
+							<x-input col=app              ></x-input>
+							<x-input col=wanted_version   ></x-input>
+							<x-input col=deployed_version ></x-input>
+							<x-input col=env              ></x-input>
+							<x-input col=repo             ></x-input>
+							<x-input col=secret           widget.copy></x-input>
+							<x-input col=mysql_pass       widget.copy></x-input>
+							<x-input col=ctime            ></x-input>
+							<x-input col=mtime            ></x-input>
+							<x-button area=dep
+								action_name=deploy_button_action
+								text="Deploy"
+								style="align-self: bootom"></x-button>
+							<x-button area=remdep
+								action_name=deploy_remove_button_action
+								text="Remove Deploy" danger></x-button>
+						</x-form>
+						<x-grid
+							title="Custom Vars"
+							param_nav_id=mm_deploys_grid params=deploy
+							rowset_name=deploy_vars
+						></x-grid>
+					</x-pagelist>
+					<x-pagelist>
+						<x-grid
+							title="Live Log"
+							id=mm_deploy_log_grid
+							rowset_name=deploy_log
+							param_nav_id=mm_deploys_grid params=deploy
+						></x-grid>
+						<x-grid
+							title="Backups"
+							id=mm_backups
+							rowset_name=backups
+							param_nav_id=mm_deploys_grid params=deploy
+						></x-grid>
 					</x-pagelist>
 				</x-split>
-			</x-vsplit>
+			</x-split>
 			<div action=config class="x-container" style="justify-content: center">
 				<x-bare-nav id=mm_config_nav rowset_name=config></x-bare-nav>
-				<x-form nav_id=mm_config_nav id=mm_config_form templated>
+				<x-form nav_id=mm_config_nav id=mm_config_form grid>
 					<h2 area=h1>SSH</h2>
-					<x-textarea rows=12 col=mm_pubkey infomode=under
+					<x-textarea mono rows=12 col=mm_pubkey infomode=under
 						info="This is the SSH key used to log in as root on all machines.">
 					</x-textarea>
 					<x-button danger action_name=ssh_key_gen_button_action style="grid-area: ssh_key_gen_button"
@@ -361,12 +443,16 @@ html[[
 						text="Upload key to all machines" icon="fa fa-upload">
 					</x-button>
 					<div area=h2><hr><h2>MySQL</h2></div>
-					<x-passedit col=mysql_root_pass copy_to_clipboard_button></x-passedit>
+					<x-passedit col=mysql_root_pass copy
+						info="Derived from the SSH Key. When updating the SSH key
+							the MySQL root password is updated too."></x-passedit>
 				</x-form>
 			</div>
 		</x-switcher>
 		<x-split action=tasks fixed_side=second fixed_size=600>
-			<x-grid id=mm_tasks_grid rowset_name=tasks save_on_input action_band_visible=no></x-grid>
+			<x-pagelist>
+				<x-grid title=Tasks id=mm_tasks_grid rowset_name=tasks save_on_input action_band_visible=no></x-grid>
+			</x-pagelist>
 			<x-pagelist>
 				<x-textarea mono console class=x-stretched title="OUT/ERR" id=mm_task_out_textarea nav_id=mm_tasks_grid col=out></x-textarea>
 				<x-textarea mono console class=x-stretched title="STDIN" id=mm_task_stdin_textarea nav_id=mm_tasks_grid col=stdin></x-textarea>
@@ -469,7 +555,16 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'github-key-update', machine], check_notify)
+					get(['', 'git-key-update', 'github', machine], check_notify)
+			},
+		})
+
+		items.push({
+			text: 'Update azure devops key',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					get(['', 'git-key-update', 'azure', machine], check_notify)
 			},
 		})
 
@@ -530,13 +625,13 @@ rowset.providers = sql_rowset{
 		website = {type = 'url'},
 	},
 	insert_row = function(self, row)
-		insert_row('provider', row, 'provider website note pos')
+		self:insert_into('provider', row, 'provider website note pos')
 	end,
 	update_row = function(self, row)
-		update_row('provider', row, 'provider website note pos')
+		self:update_into('provider', row, 'provider website note pos')
 	end,
 	delete_row = function(self, row)
-		delete_row('provider', row)
+		self:delete_from('provider', row)
 	end,
 }
 
@@ -583,12 +678,12 @@ rowset.machines = sql_rowset{
 		mysql_ver   = {readonly = true, text = 'MySQL Version'},
 	},
 	insert_row = function(self, row)
-		insert_row('machine', row, 'machine provider location public_ip local_ip admin_page pos')
+		self:insert_into('machine', row, 'machine provider location public_ip local_ip admin_page pos')
 		cp(mm.keyfile(), mm.keyfile(row.machine))
 		cp(mm.ppkfile(), mm.ppkfile(row.machine))
 	end,
 	update_row = function(self, row)
-		update_row('machine', row, 'machine provider location public_ip local_ip admin_page pos')
+		self:update_into('machine', row, 'machine provider location public_ip local_ip admin_page pos')
 		local m1 = row.machine
 		local m0 = row['machine:old']
 		if m1 and m1 ~= m0 then
@@ -597,7 +692,7 @@ rowset.machines = sql_rowset{
 		end
 	end,
 	delete_row = function(self, row)
-		delete_row('machine', row)
+		self:delete_from('machine', row)
 		local m0 = row['machine:old']
 		rm(mm.keyfile(m0))
 		rm(mm.ppkfile(m0))
@@ -611,8 +706,8 @@ local function validate_deploy(d)
 	if d:find'^[^a-z]' then return 'must start with a small letter' end
 	if d:find'[_%-]$' then return 'cannot end in a hyphen or underscore' end
 	if d:find'[^a-z0-9_%-]' then return 'can only contain small letters, digits, hyphens and underscores' end
-	if not d:find'%-%-' then return 'cannot contain double-hyphens' end
-	if not d:find'__' then return 'cannot contain double-underscores' end
+	if d:find'%-%-' then return 'cannot contain double-hyphens' end
+	if d:find'__' then return 'cannot contain double-underscores' end
 end
 
 rowset.deploys = sql_rowset{
@@ -620,35 +715,62 @@ rowset.deploys = sql_rowset{
 		select
 			pos,
 			deploy,
-			master_deploy,
 			machine,
-			repo,
+			status,
 			app,
 			wanted_version,
 			deployed_version,
 			env,
-			status
+			repo,
+			secret,
+			mysql_pass,
+			ctime,
+			mtime
 		from
 			deploy
 	]],
 	pk = 'deploy',
-	parent_col = 'master_deploy',
 	name_col = 'deploy',
 	field_attrs = {
 		deploy = {
 			validate = validate_deploy,
 		},
 	},
+	ro_cols = 'secret mysql_pass',
+	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
 		row.secret = b64(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
- 		insert_row('deploy', row, 'deploy master_deploy machine repo app wanted_version env secret mysql_pass pos')
+ 		self:insert_into('deploy', row, 'deploy machine repo app wanted_version env secret mysql_pass pos')
 	end,
 	update_row = function(self, row)
-		update_row('deploy', row, 'deploy master_deploy machine repo app wanted_version env pos')
+		self:update_into('deploy', row, 'deploy machine repo app wanted_version env pos')
 	end,
 	delete_row = function(self, row)
-		delete_row('deploy', row)
+		self:delete_from('deploy', row)
+	end,
+}
+
+rowset.deploy_vars = sql_rowset{
+	select = [[
+		select
+			deploy,
+			name,
+			val
+		from
+			deploy_vars
+	]],
+	hide_cols = 'deploy',
+	where_all = 'deploy in (:param:filter)',
+	pk = 'deploy name',
+	insert_row = function(self, row)
+		self:insert_into('deploy_vars', row, 'deploy name val')
+	end,
+	update_row = function(self, row)
+		self:update_into('deploy_vars', row, 'name val')
+	end,
+	delete_row = function(self, row)
+		self:delete_from('deploy_vars', row)
 	end,
 }
 
@@ -854,6 +976,14 @@ function mm.sh_preprocess(vars)
 	return mustache.render(s, vars, nil, nil, nil, nil, proc.esc_unix)
 end
 
+function mm.pp_vars(vars, format)
+	local t = {}
+	for k,v in sortedpairs(vars) do
+		add(t, _(format or '%s=%s\n', k, proc.quote_arg_unix(tostring(v))))
+	end
+	return cat(t)
+end
+
 function mm.sh_script(s, env, pp_env, included)
 	included = included or {}
 	if type(s) == 'function' then
@@ -889,13 +1019,7 @@ function mm.sh_script(s, env, pp_env, included)
 	end
 	s = s:gsub( '^[ \t]*#use[ \t]+([^#\r\n]+)', use)
 	s = s:gsub('\n[ \t]*#use[ \t]+([^#\r\n]+)', use_lf)
-	if env then
-		local t = {}
-		for k,v in sortedpairs(env) do
-			t[#t+1] = k..'='..proc.quote_arg_unix(tostring(v))
-		end
-		s = cat(t, '\n')..'\n\n'..s
-	end
+	s = env and mm.pp_vars(env)..'\n'..s or s
 	if pp_env then
 		return mm.sh_preprocess(s, pp_env)
 	else
@@ -1163,7 +1287,7 @@ function mm.gen_known_hosts_file()
 end
 
 function mm.ssh_hostkey_update(machine)
-	local fp = mm.exec('get_host_fingerprint',
+	local fp = mm.exec('ssh-keyscan',
 		{sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', mm.ip(machine)}):stdout()
 	assert(update_row('machine', {fingerprint = fp, ['machine:old'] = machine}, 'fingerprint').affected_rows == 1)
 	mm.gen_known_hosts_file()
@@ -1279,36 +1403,37 @@ function action.ssh_key_check(machine)
 end
 cmd_ssh_keys('ssh_key_check MACHINE', 'Check SSH key for a machine', action.ssh_key_check)
 
---command: github-key-update -------------------------------------------------
+--git key update -------------------------------------------------------------
 
-function mm.github_key_update(machine)
-	mm.ssh_sh('github_key_update', machine, [[
+function mm.git_key_update(hosting_name, machine)
+	local hosting = assert(mm.git_hosting[hosting_name])
+	mm.ssh_sh('git_key_update', machine, [[
 		#use ssh
-		ssh_hostkey_update github.com "$github_fingerprint"
-		ssh_host_key_update github.com mm_github "$github_key" unstable_ip
+		ssh_hostkey_update  $host "$fingerprint"
+		ssh_host_key_update $host mm_$name "$key" unstable_ip
 		must cd /home
 		shopt -s nullglob
 		for user in *; do
 			[ -d /home/$user/.ssh ] && \
 				HOME=/home/$user USER=$user ssh_host_key_update \
-					github.com mm_github "$github_key" unstable_ip
+					$host mm_$name "$key" unstable_ip
 		done
 		exit 0
-	]], {
-		github_fingerprint = mm.github_fingerprint,
-		github_key = mm.github_key,
-	})
+	]], hosting)
 end
 
-function action.github_key_update(machine)
+function action.git_key_update(hosting_name, machine)
 	if not machine then
-		mm.each_machine(mm.github_key_update)
+		mm.each_machine(function(machine)
+			mm.git_key_update(hosting_name, machine)
+		end)
 		return true
 	end
-	mm.github_key_update(machine)
-	out_json{machine = machine, notify = 'Github key updated'}
+	mm.git_key_update(hosting_name, machine)
+	out_json{machine = machine, notify = hosting_name .. ' key updated for ' .. machine}
 end
-cmd_ssh_keys('github_key_update MACHINE', 'Updage SSH github key for a machine', action.github_key_update)
+cmd_ssh_keys('git_key_update github|azure MACHINE',
+	'Updage Git SSH key for a machine', action.git_key_update)
 
 --command: machine-prepare ---------------------------------------------------
 
@@ -1322,19 +1447,30 @@ function mm.machine_prepare(machine)
 		git_install_git_up
 		git_config_user mm@allegory.ro "Many Machines"
 
-		ssh_hostkey_update github.com "$github_fingerprint"
-		ssh_host_key_update github.com mm_github "$github_key" unstable_ip
+		ssh_hostkey_update  $github_host "$github_fingerprint"
+		ssh_host_key_update $github_host mm_github "$github_key" unstable_ip
+
+		ssh_hostkey_update  $azure_host "$azure_fingerprint"
+		ssh_host_key_update $azure_host mm_azure "$azure_key" unstable_ip
 
 		percona_pxc_install
 		mysql_config "log_bin_trust_function_creators = 1"
 		must service mysql start
 		mysql_update_root_pass "$mysql_root_pass"
 
+		# allow binding to ports < 1024.
+		echo 'net.ipv4.ip_unprivileged_port_start=0' > /etc/sysctl.d/50-unprivileged-ports.conf
+		sysctl --system
+
 		say "All done."
 
 	]=], {
-		github_fingerprint = mm.github_fingerprint,
-		github_key = mm.github_key,
+		github_host = mm.git_hosting.github.host,
+		github_fingerprint = mm.git_hosting.github.fingerprint,
+		github_key = mm.git_hosting.github.key,
+		azure_host = mm.git_hosting.azure.host,
+		azure_fingerprint = mm.git_hosting.azure.fingerprint,
+		azure_key = mm.git_hosting.azure.key,
 		mysql_root_pass = mm.mysql_root_pass(),
 	})
 end
@@ -1366,6 +1502,18 @@ function mm.deploy(deploy)
 			deploy = ?
 	]], deploy)
 
+	local vars = {}
+	for _, name, val in each_row_vals([[
+		select
+			name, val
+		from
+			deploy_vars
+		where
+			deploy = ?
+	]], deploy) do
+		vars[name] = val
+	end
+
 	mm.ssh_sh('deploy', d.machine, [[
 
 		#use die ssh user mysql
@@ -1376,7 +1524,10 @@ function mm.deploy(deploy)
 			must user_lock_pass $deploy
 
 			HOME=/home/$deploy USER=$deploy ssh_host_key_update \
-				github.com mm_github "$github_key" unstable_ip
+				$github_host mm_github "$github_key" unstable_ip
+
+			HOME=/home/$deploy USER=$deploy ssh_host_key_update \
+				$azure_host mm_azure "$azure_key" unstable_ip
 
 			must mysql_create_db $deploy
 			must mysql_create_user localhost $deploy "$mysql_pass"
@@ -1420,7 +1571,7 @@ EOF
 			MYSQL_USER="$deploy" \
 			MYSQL_PASS="$mysql_pass" \
 			SECRET="$secret" \
-			-s -- << EOF
+			]]..mm.pp_vars(vars, '%s=%s \\\n\t\t\t')..[[-s -- << EOF
 
 cd /home/$deploy/$app || exit
 ./$app-deploy
@@ -1428,6 +1579,7 @@ cd /home/$deploy/$app || exit
 EOF
 
 	]], {
+
 		deploy = deploy,
 		repo = d.repo,
 		app = d.app,
@@ -1435,7 +1587,14 @@ EOF
 		env = d.env or 'dev',
 		secret = d.secret,
 		mysql_pass = d.mysql_pass,
-		github_key = mm.github_key,
+
+		github_host = mm.git_hosting.github.host,
+		github_fingerprint = mm.git_hosting.github.fingerprint,
+		github_key = mm.git_hosting.github.key,
+		azure_host = mm.git_hosting.azure.host,
+		azure_fingerprint = mm.git_hosting.azure.fingerprint,
+		azure_key = mm.git_hosting.azure.key,
+
 	})
 
 	update_row('deploy', {
@@ -1623,7 +1782,7 @@ rowset.backups = sql_rowset{
 	parent_col = 'parent_bkp',
 	insert_row = function(self, row)
 		local machine = checkarg(first_row('select machine from deploy where deploy = ?', row.deploy))
- 		row.bkp = insert_row('bkp', row, 'parent_bkp deploy name')
+ 		row.bkp = self:insert_into('bkp', row, 'parent_bkp deploy name')
 		row.start_time = time()
 		query('update bkp set start_time = from_unixtime(?) where bkp = ?', row.start_time, row.bkp)
 		thread(function()
@@ -1635,7 +1794,7 @@ rowset.backups = sql_rowset{
 		end)
 	end,
 	update_row = function(self, row)
-		update_row('bkp', row, 'name')
+		self:update_into('bkp', row, 'name')
 	end,
 	delete_row = function(self, row)
 		local bkp = row['bkp:old']
@@ -1644,7 +1803,7 @@ rowset.backups = sql_rowset{
 		mm.ssh_mm('backup_remove '..bkp, machine, [[
 			must xbkp_remove "$deploy" "$bkp"
 		]], {deploy = deploy, bkp = bkp})
-		delete_row('bkp', row)
+		self:delete_from('bkp', row)
 	end,
 }
 

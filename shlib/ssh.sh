@@ -12,13 +12,15 @@ ssh_host_update() { # host keyname [unstable_ip]
 	say "Assigning SSH key '$2' to host '$1' $HOME $3..."
 	must mkdir -p $HOME/.ssh
 	local CONFIG=$HOME/.ssh/config
-	sed < $CONFIG "/^$/d;s/Host /$NL&/" | sed '/^Host '"$1"'$/,/^$/d;' > $CONFIG
+	touch "$CONFIG"
+	local s="$(sed 's/^Host/\n&/' $CONFIG | sed '/^Host '"$1"'$/,/^$/d;/^$/d')"
 	(
+		echo "$s"
 		printf "%s\n" "Host $1"
 		printf "\t%s\n" "HostName $1"
 		printf "\t%s\n" "IdentityFile $HOME/.ssh/${2}.id_rsa"
 		[ "$3" ] && printf "\t%s\n" "CheckHostIP no"
-	) >> $CONFIG
+	) > $CONFIG
 	must chown $USER:$USER -R $HOME/.ssh
 }
 
