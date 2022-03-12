@@ -342,8 +342,8 @@ textarea.x-editbox-input[console] {
 	;
 }
 
-.signed-out-bg {
-	background-image: url("https://source.unsplash.com/random/1920x1080");
+.splash-img {
+	background-image: url("https://source.unsplash.com/random/1920x1080?city");
 	background-position: center;
 }
 
@@ -357,10 +357,10 @@ textarea.x-editbox-input[console] {
 ]]
 
 html[[
-<x-if global=signed_out>
-	<div class=signed-out-bg></div>
+<x-if hidden global=signed_out>
+	<div class=splash-img></div>
 </x-if>
-<x-if global=signed_in>
+<x-if hidden global=signed_in>
 <x-split fixed_size=140>
 	<div theme=dark vflex>
 		<div class=header>
@@ -464,13 +464,6 @@ html[[
 ]]
 
 js[[
-
-init_xmodule({
-	modules: {
-		user: {icon: 'user'},
-	},
-	layers: [],
-})
 
 // machines gre / refresh button field attrs & action
 rowset_field_attrs['machines.refresh'] = {
