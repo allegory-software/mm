@@ -381,12 +381,12 @@ html[[
 				<x-grid id=mm_machines_grid rowset_name=machines></x-grid>
 			</x-vsplit>
 			<x-split action=deploys fixed_size=400>
-				<x-pagelist>
-					<x-grid title=Deployments id=mm_deploys_grid rowset_name=deploys></x-grid>
-				</x-pagelist>
+				<x-tabs>
+					<x-grid label=Deployments id=mm_deploys_grid rowset_name=deploys></x-grid>
+				</x-tabs>
 				<x-split fixed_size=400>
-					<x-pagelist>
-						<x-form title="Deploy" id=mm_deploys_form nav_id=mm_deploys_grid grid>
+					<x-tabs>
+						<x-form label="Deploy" id=mm_deploys_form nav_id=mm_deploys_grid grid>
 							<x-input col=deploy           ></x-input>
 							<x-input col=machine          ></x-input>
 							<x-input col=status           ></x-input>
@@ -408,25 +408,25 @@ html[[
 								text="Remove Deploy" danger></x-button>
 						</x-form>
 						<x-grid
-							title="Custom Vars"
+							label="Custom Vars"
 							param_nav_id=mm_deploys_grid params=deploy
 							rowset_name=deploy_vars
 						></x-grid>
-					</x-pagelist>
-					<x-pagelist>
+					</x-tabs>
+					<x-tabs>
 						<x-grid
-							title="Live Log"
+							label="Live Log"
 							id=mm_deploy_log_grid
 							rowset_name=deploy_log
 							param_nav_id=mm_deploys_grid params=deploy
 						></x-grid>
 						<x-grid
-							title="Backups"
+							label="Backups"
 							id=mm_backups
 							rowset_name=backups
 							param_nav_id=mm_deploys_grid params=deploy
 						></x-grid>
-					</x-pagelist>
+					</x-tabs>
 				</x-split>
 			</x-split>
 			<div action=config class="x-container" style="justify-content: center">
@@ -450,13 +450,13 @@ html[[
 			</div>
 		</x-switcher>
 		<x-split action=tasks fixed_side=second fixed_size=600>
-			<x-pagelist>
-				<x-grid title=Tasks id=mm_tasks_grid rowset_name=tasks save_on_input action_band_visible=no></x-grid>
-			</x-pagelist>
-			<x-pagelist>
-				<x-textarea mono console class=x-stretched title="OUT/ERR" id=mm_task_out_textarea nav_id=mm_tasks_grid col=out></x-textarea>
-				<x-textarea mono console class=x-stretched title="STDIN" id=mm_task_stdin_textarea nav_id=mm_tasks_grid col=stdin></x-textarea>
-			</x-pagelist>
+			<x-tabs>
+				<x-grid label=Tasks id=mm_tasks_grid rowset_name=tasks save_on_input action_band_visible=no></x-grid>
+			</x-tabs>
+			<x-tabs>
+				<x-textarea mono console class=x-stretched label="OUT/ERR" id=mm_task_out_textarea nav_id=mm_tasks_grid col=out></x-textarea>
+				<x-textarea mono console class=x-stretched label="STDIN" id=mm_task_stdin_textarea nav_id=mm_tasks_grid col=stdin></x-textarea>
+			</x-tabs>
 		</x-split>
 	</x-vsplit>
 </x-split>
