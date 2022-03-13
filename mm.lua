@@ -91,7 +91,6 @@ local function mm_schema()
 		env              , strid, not_null,
 		secret           , b64key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
-		status           , strid,
 		ctime            , ctime,
 		mtime            , mtime,
 		pos              , pos,
@@ -331,20 +330,15 @@ textarea.x-editbox-input[console] {
 #mm_deploys_form.maxcols1 {
 	grid-template-rows: 0fr 0fr 0fr 0fr 0fr 1fr 0fr 0fr;
 	grid-template-areas:
-		"deploy      deploy           machine            status "
+		"deploy      status           status             machine"
 		"app         wanted_version   deployed_version   env    "
 		"repo        repo             repo               repo   "
 		"secret      secret           secret             secret "
 		"mysql_pass  mysql_pass       mysql_pass         mysql_pass"
 		"ctime       ctime            mtime              mtime  "
-		"dep         dep              dep                dep    "
-		"remdep      remdep           remdep             remdep "
+		"restart            restart   start              stop   "
+		"dep         dep              remdep             remdep "
 	;
-}
-
-.splash-img {
-	background-image: url("https://source.unsplash.com/random/1920x1080?city");
-	background-position: center;
 }
 
 .mm-logo {
@@ -357,9 +351,6 @@ textarea.x-editbox-input[console] {
 ]]
 
 html[[
-<x-if hidden global=signed_out>
-	<div class=splash-img></div>
-</x-if>
 <x-if hidden global=signed_in>
 <x-split fixed_size=140>
 	<div theme=dark vflex>
@@ -388,8 +379,8 @@ html[[
 					<x-tabs>
 						<x-form label="Deploy" id=mm_deploys_form nav_id=mm_deploys_grid grid>
 							<x-input col=deploy           ></x-input>
-							<x-input col=machine          ></x-input>
 							<x-input col=status           ></x-input>
+							<x-input col=machine          ></x-input>
 							<x-input col=app              ></x-input>
 							<x-input col=wanted_version   ></x-input>
 							<x-input col=deployed_version ></x-input>
@@ -399,13 +390,29 @@ html[[
 							<x-input col=mysql_pass       widget.copy></x-input>
 							<x-input col=ctime            ></x-input>
 							<x-input col=mtime            ></x-input>
-							<x-button area=dep
-								action_name=deploy_button_action
-								text="Deploy"
+
+							<x-button icon="fa fa-arrow-rotate-left" area=restart
+								action_name=deploy_restart
+								text="Restart"></x-button>
+
+							<x-button icon="fa fa-play" area=start
+								action_name=deploy_start
+								text="Start"
 								style="align-self: bootom"></x-button>
-							<x-button area=remdep
-								action_name=deploy_remove_button_action
-								text="Remove Deploy" danger></x-button>
+
+							<x-button icon="fa fa-power-off" area=stop danger
+								action_name=deploy_stop
+								text="Stop"></x-button>
+
+							<x-button icon="fa fa-pizza-slice" area=dep
+								action_name=deploy_deploy
+								text="Deploy"></x-button>
+
+							<x-button icon="fa fa-trash" area=remdep danger
+								action_name=deploy_remove
+								text="Remove App"
+								confirm="Are you sure you want to remove the app?"></x-button>
+
 						</x-form>
 						<x-grid
 							label="Custom Vars"
@@ -436,10 +443,10 @@ html[[
 					<x-textarea mono rows=12 col=mm_pubkey infomode=under
 						info="This is the SSH key used to log in as root on all machines.">
 					</x-textarea>
-					<x-button danger action_name=ssh_key_gen_button_action style="grid-area: ssh_key_gen_button"
+					<x-button danger action_name=ssh_key_gen style="grid-area: ssh_key_gen_button"
 						text="Generate new key" icon="fa fa-key">
 					</x-button>
-					<x-button danger action_name=ssh_key_updates_button_action style="grid-area: ssh_key_updates_button"
+					<x-button danger action_name=ssh_key_updates style="grid-area: ssh_key_updates_button"
 						text="Upload key to all machines" icon="fa fa-upload">
 					</x-button>
 					<div area=h2><hr><h2>MySQL</h2></div>
@@ -583,23 +590,24 @@ on('mm_machines_grid.init', function(e) {
 
 })
 
-function ssh_key_gen_button_action() {
+function ssh_key_gen() {
 	this.load(['', 'ssh-key-gen'], check_notify)
 }
 
-function ssh_key_updates_button_action() {
+function ssh_key_updates() {
 	this.load(['', 'ssh-key-update'], check_notify)
 }
 
-function deploy_button_action() {
+function deploy_action(btn, action) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
-	this.load(['', 'deploy', deploy], check_notify)
+	btn.load(['', action, deploy], check_notify)
 }
+function deploy_start   () { deploy_action(this, 'deploy-start') }
+function deploy_stop    () { deploy_action(this, 'deploy-stop') }
+function deploy_restart () { deploy_action(this, 'deploy-restart') }
+function deploy_deploy  () { deploy_action(this, 'deploy') }
+function deploy_remove  () { deploy_action(this, 'deploy-remove') }
 
-function deploy_remove_button_action() {
-	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
-	this.load(['', 'deploy-remove', deploy], check_notify)
-}
 ]]
 
 rowset.providers = sql_rowset{
@@ -708,8 +716,8 @@ rowset.deploys = sql_rowset{
 		select
 			pos,
 			deploy,
+			'' as live,
 			machine,
-			status,
 			app,
 			wanted_version,
 			deployed_version,
@@ -727,6 +735,15 @@ rowset.deploys = sql_rowset{
 	field_attrs = {
 		deploy = {
 			validate = validate_deploy,
+		},
+		live = {
+			compute = function(self, vals)
+				local vars = mm.deploy_state_vars[vals.deploy]
+				local live = vars and vars.live
+				if not live then return null end
+				local t = time()
+				return glue.timeago(min(live, t - 0.01), t)
+			end,
 		},
 	},
 	ro_cols = 'secret mysql_pass',
@@ -1652,6 +1669,7 @@ end
 
 mm.log_server_tasks = {}
 mm.deploy_logs = {}
+mm.deploy_state_vars = {}
 
 function mm.log_server_start(machine)
 	machine = checkarg(str_arg(machine))
@@ -1689,19 +1707,24 @@ function mm.log_server_start(machine)
 						local s = ffi.string(buf, len)
 						local msg = loadstring('return '..s)()
 						msg.machine = machine
-						local q = mm.deploy_logs[msg.deploy]
-						if not q then
-							q = queue.new(mm.log_queue_size)
-							q.next_id = 1
-							mm.deploy_logs[msg.deploy] = q
+						if msg.event == 'set' then
+							attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
+							rowset_changed'deploys'
+						else
+							local q = mm.deploy_logs[msg.deploy]
+							if not q then
+								q = queue.new(mm.log_queue_size)
+								q.next_id = 1
+								mm.deploy_logs[msg.deploy] = q
+							end
+							if q:full() then
+								q:pop()
+							end
+							msg.id = q.next_id
+							q.next_id = q.next_id + 1
+							q:push(msg)
+							rowset_changed'deploy_log'
 						end
-						if q:full() then
-							q:pop()
-						end
-						msg.id = q.next_id
-						q.next_id = q.next_id + 1
-						q:push(msg)
-						rowset_changed'deploy_log'
 					end
 					ctcp:close()
 				end)
