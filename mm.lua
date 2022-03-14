@@ -76,7 +76,7 @@ local function mm_schema()
 		ram_free_gb , double,
 		hdd_gb      , double,
 		hdd_free_gb , double,
-		log_port    , int,
+		log_server_started, bool,
 		pos         , pos,
 		ctime       , ctime,
 	}
@@ -100,6 +100,15 @@ local function mm_schema()
 		deploy           , strid, not_null,
 		name             , strid, not_null, pk,
 		val              , text, not_null,
+	}
+
+	tables.deploy_logs = {
+		deploy   , strid, not_null, child_fk,
+		ctime    , ctime, pk,
+		severity , strid,
+		module   , strid,
+		event    , strid,
+		message  , text,
 	}
 
 	tables.bkp = {
@@ -806,8 +815,9 @@ function mm.exec(task_name, cmd, opt)
 
 	opt = opt or empty
 
+	local webb_cx = cx() and not cx().fake
 	local capture_stdout = opt.capture_stdout ~= false
-	local capture_stderr = opt.capture_stderr ~= false and not cx().fake
+	local capture_stderr = opt.capture_stderr ~= false and webb_cx
 
 	local task = mm.task(task_name, opt)
 	task.cmd = cmd
@@ -891,7 +901,7 @@ function mm.exec(task_name, cmd, opt)
 		task:finish(exit_code)
 	end
 
-	if opt and cx().fake then
+	if opt and webb_cx then
 		task:free()
 	else
 		thread(function()
@@ -1319,7 +1329,7 @@ function mm.ssh_key_gen()
 	mm.ssh_key_gen_ppk()
 	rowset_changed'config'
 	query'update machine set ssh_key_ok = 0'
-	rowset_changed'machine'
+	rowset_changed'machines'
 end
 
 function action.ssh_key_gen()
@@ -1649,22 +1659,18 @@ cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment', action.deploy_rem
 
 mm.log_port = 5555
 mm.log_local_port1 = 6000
+mm.log_ports = {} --{port->machine}
 mm.log_queue_size = 10000
-
-function mm.alloc_log_tunnel_ports()
-	local lport1 = mm.log_local_port1
-	local lport2 = first_row'select max(log_port) from machine where log_port is not null' or lport1-1
-	for i, machine in each_row_vals'select machine from machine where log_port is null' do
-		update_row('machine', {
-			log_port = lport2 + i,
-			['machine:old'] = machine,
-		}, 'log_port')
-	end
-end
 
 function mm.logport(machine)
 	machine = checkarg(str_arg(machine))
-	return first_row('select log_port from machine where machine = ?', machine)
+	for port = mm.log_local_port1, 65535 do
+		if not mm.log_ports[port] then
+			mm.log_ports[port] = machine
+			return port
+		end
+	end
+	error'all ports are used'
 end
 
 mm.log_server_tasks = {}
@@ -1675,10 +1681,6 @@ function mm.log_server_start(machine)
 	machine = checkarg(str_arg(machine))
 	if not mm.log_server_tasks[machine] then
 		local lport = mm.logport(machine)
-		if not lport then
-			mm.alloc_log_tunnel_ports()
-			lport = assert(mm.logport(machine))
-		end
 		thread(function()
 			mm.tunnel('log_tunnel', machine,
 				lport..':'..mm.log_port, {reverse_tunnel = true})
@@ -1691,6 +1693,7 @@ function mm.log_server_start(machine)
 			assert(tcp:listen('127.0.0.1', lport))
 			note('mm', 'LISTEN', '127.0.0.1:%d', lport)
 			task:setstatus'running'
+			update_row('machine', {machine, log_server_started = true})
 			while not task.stop do
 				local ctcp = assert(tcp:accept())
 				thread(function()
@@ -1730,8 +1733,17 @@ function mm.log_server_start(machine)
 				end)
 			end
 			task:free()
+			update_row('machine', {machine, log_server_started = false})
 		end)
 		mm.log_server_tasks[machine] = task
+	end
+end
+
+function mm.log_servers_auto_start()
+	for i, machine in each_row_vals[[
+		select machine from machine where log_server_started = 1
+	]] do
+		mm.log_server_start(machine)
 	end
 end
 
@@ -1926,5 +1938,13 @@ cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 		NYI'mount_kill_all'
 	end
 end)
+
+function mm:init(cmd, ...)
+	if cmd == 'run' then
+		thread(function()
+			mm.log_servers_auto_start()
+		end)
+	end
+end
 
 return mm:run(...)
