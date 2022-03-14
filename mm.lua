@@ -770,6 +770,10 @@ rowset.deploys = sql_rowset{
 	end,
 }
 
+runevery(1, function()
+	rowset_changed'deploys'
+end)
+
 rowset.deploy_vars = sql_rowset{
 	select = [[
 		select
@@ -934,6 +938,7 @@ end
 function mm.ssh(task_name, machine, args, opt)
 	opt = opt or {}
 	opt.affects = machine
+	note('mm', 'ssh', '[%s] %s', machine, cat(imap(args, logging.arg), ' '))
 	if Windows and (opt.use_plink or mm.use_plink) then
 		--TODO: plink is missing a timeout option (look for a putty fork which has it?).
 		return mm.exec(task_name, extend({
@@ -1684,7 +1689,6 @@ function mm.log_server_start(machine)
 		thread(function()
 			mm.tunnel('log_tunnel', machine,
 				lport..':'..mm.log_port, {reverse_tunnel = true})
-			note('mm', 'TUNNEL', '%d <- %s:%d', lport, machine, mm.logport)
 		end)
 		local task = mm.task('log_server', {affects = machine})
 		thread(function()
@@ -1712,7 +1716,6 @@ function mm.log_server_start(machine)
 						msg.machine = machine
 						if msg.event == 'set' then
 							attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
-							rowset_changed'deploys'
 						else
 							local q = mm.deploy_logs[msg.deploy]
 							if not q then
@@ -1867,8 +1870,12 @@ function mm.tunnel(task_name, machine, ports, opt)
 	ports = checkarg(str_arg(ports), 'ports expected')
 	for ports in ports:gmatch'([^,]+)' do
 		local rport, lport = ports:match'(.-):(.*)'
-		add(args, opt and opt.reverse_tunnel and '-R' or '-L')
-		add(args, '127.0.0.1:'..(lport or ports)..':127.0.0.1:'..(rport or ports))
+		rport = rport or ports
+		lport = lport or ports
+		local rev = opt and opt.reverse_tunnel
+		add(args, rev and '-R' or '-L')
+		add(args, '127.0.0.1:'..lport..':127.0.0.1:'..rport)
+		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
 	end
 	return mm.ssh(task_name, machine, args,
 		opt and opt.interactive and update({capture_stdout = false, allocate_tty = true}, opt))
@@ -1941,7 +1948,7 @@ end)
 
 function mm:init(cmd, ...)
 	if cmd == 'run' then
-		thread(function()
+		webb.thread(function()
 			mm.log_servers_auto_start()
 		end)
 	end
