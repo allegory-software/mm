@@ -1514,13 +1514,15 @@ local function deploy_vars(deploy)
 	local vars = {}
 	for k,v in pairs(first_row([[
 		select
-			d.deploy         ,
-			d.machine        ,
-			d.repo           ,
-			d.app            ,
-			d.wanted_version ,
+			d.deploy,
+			d.machine,
+			d.repo,
+			d.app,
+			coalesce(d.wanted_version, '') version,
 			coalesce(d.env, 'dev') env,
-			d.mysql_pass     ,
+			d.deploy mysql_db,
+			d.deploy mysql_user,
+			d.mysql_pass,
 			d.secret
 		from
 			deploy d
@@ -1529,8 +1531,6 @@ local function deploy_vars(deploy)
 	]], deploy)) do
 		vars[k:upper()] = v
 	end
-
-	update(vars, git_hosting_vars())
 
 	for _, name, val in each_row_vals([[
 		select
@@ -1548,6 +1548,7 @@ end
 
 function mm.deploy(deploy)
 	local vars = deploy_vars(deploy)
+	update(vars, git_hosting_vars())
 	mm.ssh_sh('deploy', vars.MACHINE, [[
 
 		#use die ssh user mysql
@@ -1569,7 +1570,7 @@ function mm.deploy(deploy)
 
 			must run_as $DEPLOY << EOF
 
-cd /home/$DEPLOY || exit
+cd /home/$DEPLOY || exit 1
 opt=; [ "$VERSION" ] && opt="-b $VERSION"
 git clone -q $REPO $APP
 
@@ -1600,7 +1601,8 @@ EOF
 			VERBOSE="$VERBOSE" \
 			]]..mm.pp_vars(vars, '%s=%s \\\n\t\t\t')..[[-s -- << EOF
 
-cd /home/$DEPLOY/$APP || exit
+echo /home/$DEPLOY/$APP
+cd /home/$DEPLOY/$APP || exit 1
 ./$APP-deploy
 
 EOF
@@ -1702,13 +1704,11 @@ function mm.log_server_start(machine)
 			local tcp = assert(sock.tcp())
 			assert(tcp:setopt('reuseaddr', true))
 			assert(tcp:listen('127.0.0.1', lport))
-			note('mm', 'LISTEN', '127.0.0.1:%d', lport)
 			task:setstatus'running'
 			update_row('machine', {machine, log_server_started = true})
 			while not task.stop do
 				local ctcp = assert(tcp:accept())
 				thread(function()
-					note('mm', 'ACCEPT', '%d <- %s', lport, machine)
 					local lenbuf = u32a(1)
 					local msgbuf = buffer()
 					local plenbuf = cast(u8p, lenbuf)
@@ -1762,7 +1762,7 @@ action.log_server_start = mm.log_server_start
 rowset.deploy_log = virtual_rowset(function(self)
 	self.fields = {
 		{name = 'id'      , hidden = true},
-		{name = 'time'    , max_w = 100},
+		{name = 'time'    , max_w = 100, type = 'timestamp'},
 		{name = 'deploy'  , max_w =  80},
 		{name = 'severity', max_w =  60},
 		{name = 'module'  , max_w =  60},
