@@ -275,6 +275,7 @@ function mm.ssh_key_fix_perms(machine)
 	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
 	readpipe('icacls %s', s)
 end
+cmd_ssh_keys('ssh-key-fix-perms [MACHINE]', 'Fix SSH key perms for VBOX', mm.ssh_key_fix_perms)
 
 function mm.ssh_key_gen_ppk(machine, suffix)
 	local key = mm.keyfile(machine, suffix)
@@ -750,8 +751,8 @@ rowset.deploys = sql_rowset{
 				local vars = mm.deploy_state_vars[vals.deploy]
 				local live = vars and vars.live
 				if not live then return null end
-				local t = time()
-				return glue.timeago(min(live, t - 0.01), t)
+				local dt = max(0, time() - live)
+				return dt < 3 and 'live now' or 'live '..glue.timeago(-dt, 0)
 			end,
 		},
 	},
@@ -769,10 +770,6 @@ rowset.deploys = sql_rowset{
 		self:delete_from('deploy', row)
 	end,
 }
-
-runevery(1, function()
-	rowset_changed'deploys'
-end)
 
 rowset.deploy_vars = sql_rowset{
 	select = [[
@@ -905,7 +902,7 @@ function mm.exec(task_name, cmd, opt)
 		task:finish(exit_code)
 	end
 
-	if opt and webb_cx then
+	if opt and not webb_cx then
 		task:free()
 	else
 		thread(function()
@@ -938,7 +935,6 @@ end
 function mm.ssh(task_name, machine, args, opt)
 	opt = opt or {}
 	opt.affects = machine
-	note('mm', 'ssh', '[%s] %s', machine, cat(imap(args, logging.arg), ' '))
 	if Windows and (opt.use_plink or mm.use_plink) then
 		--TODO: plink is missing a timeout option (look for a putty fork which has it?).
 		return mm.exec(task_name, extend({
@@ -984,6 +980,7 @@ function mm.ssh_sh(task_name, machine, script, script_env, opt)
 	}, script_env)
 	local s = mm.sh_script(script:outdent(), script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
+	note('mm', 'ssh-sh', '%s@%s %s', task_name, machine, script_env)
 	return mm.ssh(task_name, machine, {'bash', '-s'}, opt)
 end
 
@@ -1462,6 +1459,16 @@ cmd_ssh_keys('git_key_update github|azure MACHINE',
 
 --command: machine-prepare ---------------------------------------------------
 
+local function git_hosting_vars()
+	local vars = {}
+	for host,t in pairs(mm.git_hosting) do
+		for k,v in pairs(t) do
+			vars[(host..'_'..k):upper()] = v
+		end
+	end
+	return vars
+end
+
 function mm.machine_prepare(machine)
 	mm.ssh_sh('machine_prepare', machine, [=[
 
@@ -1472,16 +1479,16 @@ function mm.machine_prepare(machine)
 		git_install_git_up
 		git_config_user mm@allegory.ro "Many Machines"
 
-		ssh_hostkey_update  $github_host "$github_fingerprint"
-		ssh_host_key_update $github_host mm_github "$github_key" unstable_ip
+		ssh_hostkey_update  $GITHUB_HOST "$github_fingerprint"
+		ssh_host_key_update $GITHUB_HOST mm_github "$GITHUB_KEY" unstable_ip
 
-		ssh_hostkey_update  $azure_host "$azure_fingerprint"
-		ssh_host_key_update $azure_host mm_azure "$azure_key" unstable_ip
+		ssh_hostkey_update  $AZURE_HOST "$AZURE_FINGERPRINT"
+		ssh_host_key_update $AZURE_HOST mm_azure "$AZURE_KEY" unstable_ip
 
 		percona_pxc_install
 		mysql_config "log_bin_trust_function_creators = 1"
 		must service mysql start
-		mysql_update_root_pass "$mysql_root_pass"
+		mysql_update_root_pass "$MYSQL_ROOT_PASS"
 
 		# allow binding to ports < 1024.
 		echo 'net.ipv4.ip_unprivileged_port_start=0' > /etc/sysctl.d/50-unprivileged-ports.conf
@@ -1489,15 +1496,7 @@ function mm.machine_prepare(machine)
 
 		say "All done."
 
-	]=], {
-		github_host = mm.git_hosting.github.host,
-		github_fingerprint = mm.git_hosting.github.fingerprint,
-		github_key = mm.git_hosting.github.key,
-		azure_host = mm.git_hosting.azure.host,
-		azure_fingerprint = mm.git_hosting.azure.fingerprint,
-		azure_key = mm.git_hosting.azure.key,
-		mysql_root_pass = mm.mysql_root_pass(),
-	})
+	]=], git_hosting_vars())
 end
 
 function action.machine_prepare(machine)
@@ -1506,28 +1505,33 @@ function action.machine_prepare(machine)
 end
 cmd_machines('machine_prepare MACHINE', 'Prepare a new machine', action.machine_prepare)
 
---command: deploy ------------------------------------------------------------
+--deploy commands ------------------------------------------------------------
 
-function mm.deploy(deploy)
+local function deploy_vars(deploy)
 
 	deploy = checkarg(str_arg(deploy), 'deploy required')
 
-	local d = first_row([[
+	local vars = {}
+	for k,v in pairs(first_row([[
 		select
-			d.machine,
-			d.repo,
-			d.app,
-			d.wanted_version,
-			d.env,
-			d.mysql_pass,
+			d.deploy         ,
+			d.machine        ,
+			d.repo           ,
+			d.app            ,
+			d.wanted_version ,
+			coalesce(d.env, 'dev') env,
+			d.mysql_pass     ,
 			d.secret
 		from
 			deploy d
 		where
 			deploy = ?
-	]], deploy)
+	]], deploy)) do
+		vars[k:upper()] = v
+	end
 
-	local vars = {}
+	update(vars, git_hosting_vars())
+
 	for _, name, val in each_row_vals([[
 		select
 			name, val
@@ -1539,126 +1543,129 @@ function mm.deploy(deploy)
 		vars[name] = val
 	end
 
-	mm.ssh_sh('deploy', d.machine, [[
+	return vars, d
+end
+
+function mm.deploy(deploy)
+	local vars = deploy_vars(deploy)
+	mm.ssh_sh('deploy', vars.MACHINE, [[
 
 		#use die ssh user mysql
 
-		if [ ! -d "/home/$deploy" ]; then
+		if [ ! -d "/home/$DEPLOY" ]; then
 
-			must user_create $deploy
-			must user_lock_pass $deploy
+			must user_create $DEPLOY
+			must user_lock_pass $DEPLOY
 
-			HOME=/home/$deploy USER=$deploy ssh_host_key_update \
-				$github_host mm_github "$github_key" unstable_ip
+			HOME=/home/$DEPLOY USER=$DEPLOY ssh_host_key_update \
+				$GITHUB_HOST mm_github "$GITHUB_KEY" unstable_ip
 
-			HOME=/home/$deploy USER=$deploy ssh_host_key_update \
-				$azure_host mm_azure "$azure_key" unstable_ip
+			HOME=/home/$DEPLOY USER=$DEPLOY ssh_host_key_update \
+				$AZURE_HOST mm_azure "$AZURE_KEY" unstable_ip
 
-			must mysql_create_db $deploy
-			must mysql_create_user localhost $deploy "$mysql_pass"
-			must mysql_grant_user  localhost $deploy $deploy
+			must mysql_create_db $DEPLOY
+			must mysql_create_user localhost $DEPLOY "$MYSQL_PASS"
+			must mysql_grant_user  localhost $DEPLOY $DEPLOY
 
-			must run_as "$deploy" << EOF
+			must run_as $DEPLOY << EOF
 
-cd /home/$deploy || exit
-opt=; [ "$version" ] && opt="-b $version"
-git clone $opt $repo $app
+cd /home/$DEPLOY || exit
+opt=; [ "$VERSION" ] && opt="-b $VERSION"
+git clone -q $REPO $APP
 
 EOF
 
 		else
 
-			must run_as "$deploy" << EOF
+			must run_as $DEPLOY << EOF
 
-cd /home/$deploy/$app || { echo "Could not cd to $app dir" >&2; exit 1; }
+cd /home/$DEPLOY/$APP || { echo "Could not cd to $APP dir" >&2; exit 1; }
 
 if [ -d .mgit ]; then # repo converted itself to mgit
-	mgit clone "$app=$version"
+	mgit clone -q "$APP=$VERSION"
 else
-	git fetch || exit
-	if [ "$version" ]; then
-		git -c advice.detachedHead=false checkout "$version"
+	git fetch -q || exit
+	if [ "$VERSION" ]; then
+		git -q -c advice.detachedHead=false checkout "$VERSION"
 	else
-		git checkout -B master origin/master
+		git checkout -q -B master origin/master
 	fi
 fi
 
 EOF
 		fi
 
-		must sudo -u "$deploy" \
+		must sudo -u $DEPLOY \
 			DEBUG="$DEBUG" \
 			VERBOSE="$VERBOSE" \
-			DEPLOY="$deploy" \
-			ENV="$env" \
-			VERSION="$version" \
-			MYSQL_DB="$deploy" \
-			MYSQL_USER="$deploy" \
-			MYSQL_PASS="$mysql_pass" \
-			SECRET="$secret" \
 			]]..mm.pp_vars(vars, '%s=%s \\\n\t\t\t')..[[-s -- << EOF
 
-cd /home/$deploy/$app || exit
-./$app-deploy
+cd /home/$DEPLOY/$APP || exit
+./$APP-deploy
 
 EOF
 
-	]], {
+	]], vars)
 
-		deploy = deploy,
-		repo = d.repo,
-		app = d.app,
-		version = d.wanted_version,
-		env = d.env or 'dev',
-		secret = d.secret,
-		mysql_pass = d.mysql_pass,
-
-		github_host = mm.git_hosting.github.host,
-		github_fingerprint = mm.git_hosting.github.fingerprint,
-		github_key = mm.git_hosting.github.key,
-		azure_host = mm.git_hosting.azure.host,
-		azure_fingerprint = mm.git_hosting.azure.fingerprint,
-		azure_key = mm.git_hosting.azure.key,
-
-	})
-
-	update_row('deploy', {
-		deployed_version = d.wanted_version,
-		['deploy:old'] = deploy,
-	}, 'deployed_version')
-
+	update_row('deploy', {vars.DEPLOY, deployed_version = vars.VERSION})
 end
 
 action.deploy = mm.deploy
 cmd_deployments('deploy DEPLOY', 'Run a deployment', action.deploy)
 
 function mm.deploy_remove(deploy)
-	deploy = checkarg(str_arg(deploy), 'deploy required')
-	local d = first_row('select repo, app, machine from deploy where deploy = ?', deploy)
-
-	mm.ssh_sh('deploy_remove', d.machine, [[
+	local vars = deploy_vars(deploy)
+	mm.ssh_sh('deploy_remove', vars.MACHINE, [[
 
 		#use mysql user
 
-		[ -d /home/$deploy/$app ] && (
-			must cd /home/$deploy/$app
-			run ./$app stop
+		[ -d /home/$DEPLOY/$APP ] && (
+			must cd /home/$DEPLOY/$APP
+			run ./$APP stop
 		)
 
-		mysql_drop_db $deploy
-		mysql_drop_user localhost $deploy
+		mysql_drop_db $DEPLOY
+		mysql_drop_user localhost $DEPLOY
 
-		user_remove $deploy
+		user_remove $DEPLOY
 
 		say "All done."
 
 	]], {
-		app = d.app,
-		deploy = deploy,
+		DEPLOY = vars.DEPLOY,
+		APP = vars.APP,
 	})
 end
 action.deploy_remove = mm.deploy_remove
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment', action.deploy_remove)
+
+local function deploy_cmd(task_name, cmd)
+	return function(deploy)
+		local vars = deploy_vars(deploy)
+		mm.ssh_sh(task_name, vars.MACHINE, [[
+			cd /home/$DEPLOY/$APP || exit 1
+			sudo -u "$DEPLOY" \
+				DEBUG="$DEBUG" \
+				VERBOSE="$VERBOSE" \
+				]]..mm.pp_vars(vars, '%s=%s \\\n\t\t\t')..[[-s ./$APP $cmd
+			]], {
+				DEPLOY = vars.DEPLOY,
+				APP = vars.APP,
+				cmd = cmd,
+			})
+	end
+end
+mm.deploy_start   = deploy_cmd('deploy_start'  , 'start')
+mm.deploy_stop    = deploy_cmd('deploy_stop'   , 'stop')
+mm.deploy_restart = deploy_cmd('deploy_restart', 'restart')
+
+cmd_deployments('deploy-start   DEPLOY', 'Start a deployed app'  , mm.deploy_start)
+cmd_deployments('deploy-stop    DEPLOY', 'Stop a deployed app'   , mm.deploy_stop)
+cmd_deployments('deploy-restart DEPLOY', 'Restart a deployed app', mm.deploy_restart)
+
+action.deploy_start   = mm.deploy_start
+action.deploy_stop    = mm.deploy_stop
+action.deploy_restart = mm.deploy_restart
 
 --remote logging -------------------------------------------------------------
 
@@ -1852,7 +1859,8 @@ end)
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
 cmd_ssh(Windows, 'putty MACHINE', 'SSH into machine with putty', function(machine)
 	local ip = mm.ip(machine)
-	proc.exec(indir(mm.bindir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip):forget()
+	local cmd = indir(mm.bindir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip
+	proc.exec(cmd):forget()
 end)
 
 cmd_ssh('ssh-all CMD', 'Execute command on all machines', function(command)
@@ -1950,6 +1958,9 @@ function mm:init(cmd, ...)
 	if cmd == 'run' then
 		webb.thread(function()
 			mm.log_servers_auto_start()
+		end)
+		runevery(1, function()
+			rowset_changed'deploys'
 		end)
 	end
 end
