@@ -86,8 +86,10 @@ local function mm_schema()
 		machine          , strid, not_null, fk,
 		repo             , url, not_null,
 		app              , strid, not_null,
-		wanted_version   , strid,
-		deployed_version , strid,
+		wanted_version       , strid,
+		wanted_sdk_version   , strid,
+		deployed_version     , strid,
+		deployed_sdk_version , strid,
 		env              , strid, not_null,
 		secret           , b64key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
@@ -340,14 +342,16 @@ textarea.x-editbox-input[console] {
 #mm_deploys_form.maxcols1 {
 	grid-template-rows: 0fr 0fr 0fr 0fr 0fr 1fr 0fr 0fr;
 	grid-template-areas:
-		"deploy      status           status             machine"
-		"app         wanted_version   deployed_version   env    "
-		"repo        repo             repo               repo   "
-		"secret      secret           secret             secret "
-		"mysql_pass  mysql_pass       mysql_pass         mysql_pass"
-		"ctime       ctime            mtime              mtime  "
-		"restart            restart   start              stop   "
-		"dep         dep              remdep             remdep "
+		"deploy      status               status                 machine"
+		"app         app                  env                    env    "
+		"wanted_version    wanted_version   wanted_sdk_version    wanted_sdk_version"
+		"deployed_version  deployed_version deployed_sdk_version  deployed_sdk_version"
+		"repo        repo                 repo                   repo   "
+		"secret      secret               secret                 secret "
+		"mysql_pass  mysql_pass           mysql_pass             mysql_pass"
+		"ctime       ctime                mtime                  mtime  "
+		"restart     restart              start                  stop   "
+		"dep         dep                  remdep                 remdep "
 	;
 }
 
@@ -392,8 +396,10 @@ html[[
 							<x-input col=status           ></x-input>
 							<x-input col=machine          ></x-input>
 							<x-input col=app              ></x-input>
-							<x-input col=wanted_version   ></x-input>
-							<x-input col=deployed_version ></x-input>
+							<x-input col=wanted_version       ></x-input>
+							<x-input col=deployed_version     ></x-input>
+							<x-input col=wanted_sdk_version   ></x-input>
+							<x-input col=deployed_sdk_version ></x-input>
 							<x-input col=env              ></x-input>
 							<x-input col=repo             ></x-input>
 							<x-input col=secret           widget.copy></x-input>
@@ -726,7 +732,7 @@ rowset.deploys = sql_rowset{
 		select
 			pos,
 			deploy,
-			'' as live,
+			'' as status,
 			machine,
 			app,
 			wanted_version,
@@ -746,12 +752,12 @@ rowset.deploys = sql_rowset{
 		deploy = {
 			validate = validate_deploy,
 		},
-		live = {
+		status = {
 			compute = function(self, vals)
 				local vars = mm.deploy_state_vars[vals.deploy]
-				local live = vars and vars.live
-				if not live then return null end
-				local dt = max(0, time() - live)
+				local t = vars and vars.live
+				if not t then return null end
+				local dt = max(0, time() - t)
 				return dt < 3 and 'live now' or 'live '..glue.timeago(-dt, 0)
 			end,
 		},
@@ -817,7 +823,7 @@ function mm.exec(task_name, cmd, opt)
 	opt = opt or empty
 
 	local webb_cx = cx() and not cx().fake
-	local capture_stdout = opt.capture_stdout ~= false
+	local capture_stdout = opt.capture_stdout ~= false and webb_cx
 	local capture_stderr = opt.capture_stderr ~= false and webb_cx
 
 	local task = mm.task(task_name, opt)
@@ -975,8 +981,8 @@ end
 function mm.ssh_sh(task_name, machine, script, script_env, opt)
 	opt = opt or {}
 	local script_env = update({
-		DEBUG   = env'DEBUG',
-		VERBOSE = env'VERBOSE',
+		DEBUG   = env'DEBUG' or '',
+		VERBOSE = env'VERBOSE' or '',
 	}, script_env)
 	local s = mm.sh_script(script:outdent(), script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
@@ -996,14 +1002,6 @@ setmetatable(mm.shlib, {__index = load_shfile})
 
 function mm.sh_preprocess(vars)
 	return mustache.render(s, vars, nil, nil, nil, nil, proc.esc_unix)
-end
-
-function mm.pp_vars(vars, format)
-	local t = {}
-	for k,v in sortedpairs(vars) do
-		add(t, _(format or '%s=%s\n', k, proc.quote_arg_unix(tostring(v))))
-	end
-	return cat(t)
 end
 
 function mm.sh_script(s, env, pp_env, included)
@@ -1041,7 +1039,7 @@ function mm.sh_script(s, env, pp_env, included)
 	end
 	s = s:gsub( '^[ \t]*#use[ \t]+([^#\r\n]+)', use)
 	s = s:gsub('\n[ \t]*#use[ \t]+([^#\r\n]+)', use_lf)
-	s = env and mm.pp_vars(env)..'\n'..s or s
+	s = env and proc.quote_vars(env, nil, 'unix')..'\n'..s or s
 	if pp_env then
 		return mm.sh_preprocess(s, pp_env)
 	else
@@ -1104,6 +1102,20 @@ function task:finish(exit_code)
 	end
 end
 
+function task:do_kill()
+	--
+end
+
+function task:kill()
+	self:do_kill()
+	self.end_time = time()
+	self:setstatus'killed'
+	local s = self:stdouterr()
+	if s ~= '' then
+		dbg('mm', 'taskout', '%d,%s\n%s', self.id, self.name, s)
+	end
+end
+
 function task:logerror(event, ...)
 	add(self.errors, _(...))
 	logerror('mm', event, ...)
@@ -1134,7 +1146,7 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		{name = 'name'      , },
 		{name = 'affects'   , hint = 'Entities that this task affects'},
 		{name = 'status'    , },
-		{name = 'start_time', },
+		{name = 'start_time', type = 'timestamp'},
 		{name = 'duration'  , type = 'number', decimals = 2,  w = 20,
 			hint = 'Duration till last change in input, output or status'},
 		{name = 'command'   , hidden = true},
@@ -1171,15 +1183,19 @@ rowset.tasks = virtual_rowset(function(self, ...)
 		end
 	end
 
-	function self:load_row(vals)
-		local task = mm.tasks_by_id[vals['id:old']]
+	function self:load_row(row)
+		local task = mm.tasks_by_id[row['id:old']]
 		return task and task_row(task)
 	end
 
-	function self:update_row(vals)
-		local task = mm.tasks_by_id[vals['id:old']]
+	function self:update_row(row)
+		local task = mm.tasks_by_id[row['id:old']]
 		if not task then return end
-		task.pinned = vals.pinned
+		task.pinned = row.pinned
+	end
+
+	function self:delete_row(row)
+		task:kill()
 	end
 
 end)
@@ -1460,7 +1476,7 @@ cmd_ssh_keys('git_key_update github|azure MACHINE',
 --command: machine-prepare ---------------------------------------------------
 
 local function git_hosting_vars()
-	local vars = {}
+	local vars = {GIT_HOSTS = cat(keys(mm.git_hosting, true), ' ')}
 	for host,t in pairs(mm.git_hosting) do
 		for k,v in pairs(t) do
 			vars[(host..'_'..k):upper()] = v
@@ -1478,12 +1494,7 @@ function mm.machine_prepare(machine)
 
 		git_install_git_up
 		git_config_user mm@allegory.ro "Many Machines"
-
-		ssh_hostkey_update  $GITHUB_HOST "$github_fingerprint"
-		ssh_host_key_update $GITHUB_HOST mm_github "$GITHUB_KEY" unstable_ip
-
-		ssh_hostkey_update  $AZURE_HOST "$AZURE_FINGERPRINT"
-		ssh_host_key_update $AZURE_HOST mm_azure "$AZURE_KEY" unstable_ip
+		ssh_git_keys_update
 
 		percona_pxc_install
 		mysql_config "log_bin_trust_function_creators = 1"
@@ -1512,13 +1523,14 @@ local function deploy_vars(deploy)
 	deploy = checkarg(str_arg(deploy), 'deploy required')
 
 	local vars = {}
-	for k,v in pairs(first_row([[
+	for k,v in pairs(assertf(first_row([[
 		select
 			d.deploy,
 			d.machine,
 			d.repo,
 			d.app,
 			coalesce(d.wanted_version, '') version,
+			coalesce(d.wanted_sdk_version, '') sdk_version,
 			coalesce(d.env, 'dev') env,
 			d.deploy mysql_db,
 			d.deploy mysql_user,
@@ -1528,7 +1540,7 @@ local function deploy_vars(deploy)
 			deploy d
 		where
 			deploy = ?
-	]], deploy)) do
+	]], deploy), 'invalid deploy "%s"', deploy)) do
 		vars[k:upper()] = v
 	end
 
@@ -1548,91 +1560,23 @@ end
 
 function mm.deploy(deploy)
 	local vars = deploy_vars(deploy)
+	vars.DEPLOY_VARS = cat(keys(vars, true), ' ')
 	update(vars, git_hosting_vars())
 	mm.ssh_sh('deploy', vars.MACHINE, [[
-
-		#use die ssh user mysql
-
-		if [ ! -d "/home/$DEPLOY" ]; then
-
-			must user_create $DEPLOY
-			must user_lock_pass $DEPLOY
-
-			HOME=/home/$DEPLOY USER=$DEPLOY ssh_host_key_update \
-				$GITHUB_HOST mm_github "$GITHUB_KEY" unstable_ip
-
-			HOME=/home/$DEPLOY USER=$DEPLOY ssh_host_key_update \
-				$AZURE_HOST mm_azure "$AZURE_KEY" unstable_ip
-
-			must mysql_create_db $DEPLOY
-			must mysql_create_user localhost $DEPLOY "$MYSQL_PASS"
-			must mysql_grant_user  localhost $DEPLOY $DEPLOY
-
-			must run_as $DEPLOY << EOF
-
-cd /home/$DEPLOY || exit 1
-opt=; [ "$VERSION" ] && opt="-b $VERSION"
-git clone -q $REPO $APP
-
-EOF
-
-		else
-
-			must run_as $DEPLOY << EOF
-
-cd /home/$DEPLOY/$APP || { echo "Could not cd to $APP dir" >&2; exit 1; }
-
-if [ -d .mgit ]; then # repo converted itself to mgit
-	mgit clone -q "$APP=$VERSION"
-else
-	git fetch -q || exit
-	if [ "$VERSION" ]; then
-		git -q -c advice.detachedHead=false checkout "$VERSION"
-	else
-		git checkout -q -B master origin/master
-	fi
-fi
-
-EOF
-		fi
-
-		must sudo -u $DEPLOY \
-			DEBUG="$DEBUG" \
-			VERBOSE="$VERBOSE" \
-			]]..mm.pp_vars(vars, '%s=%s \\\n\t\t\t')..[[-s -- << EOF
-
-echo /home/$DEPLOY/$APP
-cd /home/$DEPLOY/$APP || exit 1
-./$APP-deploy
-
-EOF
-
+		#use deploy
+		deploy
 	]], vars)
-
 	update_row('deploy', {vars.DEPLOY, deployed_version = vars.VERSION})
 end
 
 action.deploy = mm.deploy
-cmd_deployments('deploy DEPLOY', 'Run a deployment', action.deploy)
+cmd_deployments('deploy DEPLOY', 'Deploy an app', action.deploy)
 
 function mm.deploy_remove(deploy)
 	local vars = deploy_vars(deploy)
 	mm.ssh_sh('deploy_remove', vars.MACHINE, [[
-
-		#use mysql user
-
-		[ -d /home/$DEPLOY/$APP ] && (
-			must cd /home/$DEPLOY/$APP
-			run ./$APP stop
-		)
-
-		mysql_drop_db $DEPLOY
-		mysql_drop_user localhost $DEPLOY
-
-		user_remove $DEPLOY
-
-		say "All done."
-
+		#use deploy
+		deploy_remove
 	]], {
 		DEPLOY = vars.DEPLOY,
 		APP = vars.APP,
@@ -1641,33 +1585,39 @@ end
 action.deploy_remove = mm.deploy_remove
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment', action.deploy_remove)
 
-local function deploy_cmd(task_name, cmd)
-	return function(deploy)
-		local vars = deploy_vars(deploy)
-		mm.ssh_sh(task_name, vars.MACHINE, [[
-			cd /home/$DEPLOY/$APP || exit 1
-			sudo -u "$DEPLOY" \
-				DEBUG="$DEBUG" \
-				VERBOSE="$VERBOSE" \
-				]]..mm.pp_vars(vars, '%s=%s \\\n\t\t\t')..[[-s ./$APP $cmd
-			]], {
-				DEPLOY = vars.DEPLOY,
-				APP = vars.APP,
-				cmd = cmd,
-			})
+function mm.deploy_run(deploy, ...)
+	local vars = deploy_vars(deploy)
+	local cmd_args = proc.quote_args_unix(...)
+	local task_name = cmd_args
+	mm.ssh_sh(task_name, vars.MACHINE, [[
+		#use deploy
+		app $cmd_args
+		]], {
+			DEPLOY = vars.DEPLOY,
+			APP = vars.APP,
+			cmd_args = cmd_args,
+		})
+end
+local function app_cmd(cmd)
+	return function(deploy, ...)
+		mm.deploy_run(deploy, cmd, ...)
 	end
 end
-mm.deploy_start   = deploy_cmd('deploy_start'  , 'start')
-mm.deploy_stop    = deploy_cmd('deploy_stop'   , 'stop')
-mm.deploy_restart = deploy_cmd('deploy_restart', 'restart')
+mm.deploy_start   = app_cmd'start'
+mm.deploy_stop    = app_cmd'stop'
+mm.deploy_restart = app_cmd'restart'
+mm.deploy_status  = app_cmd'status'
 
-cmd_deployments('deploy-start   DEPLOY', 'Start a deployed app'  , mm.deploy_start)
-cmd_deployments('deploy-stop    DEPLOY', 'Stop a deployed app'   , mm.deploy_stop)
+cmd_deployments('deploy-run     DEPLOY ...', 'Run a deployed app', mm.deploy_run)
+cmd_deployments('deploy-start   DEPLOY', 'Start a deployed app', mm.deploy_start)
+cmd_deployments('deploy-stop    DEPLOY', 'Stop a deployed app', mm.deploy_stop)
 cmd_deployments('deploy-restart DEPLOY', 'Restart a deployed app', mm.deploy_restart)
+cmd_deployments('deploy-status  DEPLOY', 'Check status for a deployed app', mm.deploy_status)
 
 action.deploy_start   = mm.deploy_start
 action.deploy_stop    = mm.deploy_stop
 action.deploy_restart = mm.deploy_restart
+action.deploy_status  = mm.deploy_status
 
 --remote logging -------------------------------------------------------------
 
@@ -1857,9 +1807,11 @@ end)
 
 --TIP: make a putty session called `mm` where you set the window size,
 --uncheck "warn on close" and whatever else you need to make putty comfortable.
-cmd_ssh(Windows, 'putty MACHINE', 'SSH into machine with putty', function(machine)
-	local ip = mm.ip(machine)
-	local cmd = indir(mm.bindir, 'putty')..' -load mm -i '..mm.ppkfile(machine)..' root@'..ip
+cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function(md)
+	local dm = first_row('select machine from deploy where deploy = ?', md)
+	local ip = mm.ip(dm or md)
+	local cmd = indir(mm.bindir, 'kitty')..' -load mm -t -i '..mm.ppkfile(dm or md)..' root@'..ip
+	if dm then cmd = cmd .. ' -cmd "sudo -iu '..md..'"' end
 	proc.exec(cmd):forget()
 end)
 
@@ -1954,15 +1906,15 @@ cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	end
 end)
 
-function mm:init(cmd, ...)
-	if cmd == 'run' then
-		webb.thread(function()
-			mm.log_servers_auto_start()
-		end)
-		runevery(1, function()
-			rowset_changed'deploys'
-		end)
-	end
+local run_server = mm.run_server
+function mm:run_server()
+	webb.thread(function()
+		mm.log_servers_auto_start()
+	end)
+	runevery(1, function()
+		rowset_changed'deploys'
+	end)
+	run_server(self)
 end
 
 return mm:run(...)
