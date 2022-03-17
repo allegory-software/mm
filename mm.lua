@@ -340,7 +340,6 @@ textarea.x-editbox-input[console] {
 }
 
 #mm_deploys_form.maxcols1 {
-	grid-template-rows: 0fr 0fr 0fr 0fr 0fr 1fr 0fr 0fr;
 	grid-template-areas:
 		"deploy      status               status                 machine"
 		"app         app                  env                    env    "
@@ -737,6 +736,8 @@ rowset.deploys = sql_rowset{
 			app,
 			wanted_version,
 			deployed_version,
+			wanted_sdk_version,
+			deployed_sdk_version,
 			env,
 			repo,
 			secret,
@@ -762,7 +763,7 @@ rowset.deploys = sql_rowset{
 			end,
 		},
 	},
-	ro_cols = 'secret mysql_pass',
+	ro_cols = 'secret mysql_pass deployed_version deployed_sdk_version',
 	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
 		row.secret = b64(random_string(46)) --results in a 64 byte string
