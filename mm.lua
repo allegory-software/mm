@@ -125,12 +125,16 @@ local function mm_schema()
 
 	tables.task = {
 		task          , url, pk,
+		--running
 		action        , name, not_null,
 		args          , url, --as Lua serialized array
 		--schedule
 		start_at      , timeofday, --null means start right away.
 		run_every     , uint, --in seconds; null means dearm after run.
 		armed         , bool0,
+		--editing
+		generated_by  , name,
+		editable      , bool1,
 		--log
 		last_run      , datetime,
 		last_duration , double, --in seconds
@@ -498,6 +502,11 @@ html[[
 			</x-split>
 			<x-split label="Scheduled Tasks" fixed_side=second fixed_size=600>
 				<x-grid id=mm_scheduled_tasks_grid rowset_name=scheduled_tasks></x-grid>
+				<x-grid vertical
+					id=mm_scheduled_task_grid
+					rowset_name=scheduled_task
+					param_nav_id=mm_scheduled_tasks_grid params=task
+				></x-grid>
 			</x-split>
 		</x-tabs>
 	</x-vsplit>
@@ -1099,13 +1108,14 @@ function mm.task(opt)
 	if self.task then
 		mm.tasks_by_strid[self.task] = self
 	end
-	if self.run_every then --persistent
-		self.persistent = true
+	if self.persistent then
 		insert_or_update_row('task', {
 			task = assert(self.task),
 			action = assert(self.action),
 			args = pp.format(assert(self.args), false),
 			run_every = self.run_every,
+			generated_by = self.generated_by,
+			editable = self.editable or false,
 		})
 	end
 	return self
@@ -1243,9 +1253,38 @@ end)
 
 mm.argdef = {
 	log_server = {
-		{name = 'deploy', fk = 'deploy'},
+		{name = 'machine', lookup_cols = 'machine', lookup_rowset_name = 'lookup_machine'},
+	},
+	rtunnel = {
+		{name = 'machine', lookup_cols = 'machine', lookup_rowset_name = 'lookup_machine'},
+		{name = 'ports'},
 	},
 }
+
+rowset.scheduled_task = virtual_rowset(function(self)
+	self.manual_init_fields = true
+	function self:load_rows(rs, params)
+		local tasks = params['param:filter']
+		checkarg(tasks and #tasks == 1)
+		local task = tasks[1]
+		local task = first_row('select task, action, args from task where task = ?', task)
+		local row = check500(loadstring('return '..task.args))()
+		self.fields = mm.argdef[task.action]
+		if not self.fields then
+			self.fields = {}
+			for i,v in ipairs(row) do
+				self.fields[i] = {name = 'arg'..i}
+			end
+		end
+		rs.rows = {row}
+		self:init_fields()
+	end
+	function self:update_row(row)
+		local task = row['task:old']
+		local task = first_row('select args from task where task = ?', task)
+
+	end
+end)
 
 rowset.scheduled_tasks = sql_rowset{
 	select = [[
@@ -1256,6 +1295,8 @@ rowset.scheduled_tasks = sql_rowset{
 			start_at,
 			run_every,
 			armed,
+			generated_by,
+			editable,
 			last_run,
 			last_duration,
 			last_status
@@ -1264,13 +1305,16 @@ rowset.scheduled_tasks = sql_rowset{
 	]],
 	pk = 'task',
 	ro_cols = 'task action args',
+	hide_cols = 'action args',
 	insert_row = function(self, row)
 		self:insert_into('task', row, 'task action args start_at run_every armed')
 	end,
 	update_row = function(self, row)
+		checkarg(row['editable:old'])
 		self:update_into('task', row, 'task action args start_at run_every armed')
 	end,
 	delete_row = function(self, row)
+		checkarg(row['editable:old'])
 		self:delete_from('task', row)
 	end,
 }
@@ -1723,14 +1767,20 @@ function mm.log_server(machine)
 	local lport = mm.logport(machine)
 	thread(function()
 		mm.rtunnel(machine, lport..':'..mm.log_port, {
+			persistent = true,
 			run_every = 0,
+			generated_by = 'log_server',
+			editable = false,
 		})
 	end)
 	local task, err = mm.task({
 		task = 'log_server '..machine,
 		action = 'log_server', args = {machine},
 		machine = machine,
+		persistent = true,
 		run_every = 0,
+		generated_by = 'log_server',
+		editable = false,
 	})
 	if not task then return nil, err end
 	thread(function()
@@ -1924,11 +1974,11 @@ function mm.rtunnel(machine, ports, opt)
 	return mm.tunnel(machine, ports, opt, true)
 end
 
-cmd_ssh_tunnels('tunnel MACHINE LPORT1[:RPORT1],...', 'Create SSH tunnel(s) to machine', function(machine, ports)
+cmd_ssh_tunnels('tunnel MACHINE RPORT1[:LPORT1],...', 'Create SSH tunnel(s) to machine', function(machine, ports)
 	return mm.tunnel(machine, ports, {interactive = true})
 end)
 
-cmd_ssh_tunnels('rtunnel MACHINE LPORT1[:RPORT1],...', 'Create reverse SSH tunnel(s) to machine', function(machine, ports)
+cmd_ssh_tunnels('rtunnel MACHINE RPORT1[:LPORT1],...', 'Create reverse SSH tunnel(s) to machine', function(machine, ports)
 	return mm.rtunnel(machine, ports, {interactive = true})
 end)
 
