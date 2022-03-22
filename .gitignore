@@ -4,3 +4,4 @@
 /*.conf
 *.pid
 *.log
+test.lua
