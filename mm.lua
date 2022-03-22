@@ -205,18 +205,20 @@ config('https_addr', false)
 
 --logging.filter[''] = true
 
-config('secret'   , '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
-config('smtp_host', 'mail.bpnpart.com')
-config('smtp_user', 'admin@bpnpart.com')
-config('host'     , 'bpnpart.com')
-config('noreply_email', 'admin@bpnpart.com')
-config('dev_email', 'cosmin.apreutesei@gmail.com')
-
+config('multilang', false)
 config('allow_create_user', false)
 config('auto_create_user', false)
+
 config('page_title_suffix', 'Many Machines')
 config('sign_in_logo', '/sign-in-logo.png')
 config('favicon_href', '/favicon1.ico')
+config('dev_email', 'cosmin.apreutesei@gmail.com')
+
+config('secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
+config('smtp_host', 'mail.bpnpart.com')
+config('smtp_user', 'admin@bpnpart.com')
+config('host', 'bpnpart.com')
+config('noreply_email', 'admin@bpnpart.com')
 
 local cmd_ssh_keys    = cmdsection'SSH KEY MANAGEMENT'
 local cmd_ssh         = cmdsection'SSH TERMINALS'
