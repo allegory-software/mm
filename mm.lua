@@ -165,16 +165,20 @@ local function mm_schema()
 
 end
 
-local mm = require('$xapp')('mm', ...)
+local xapp = require'$xapp'
+
+config('https_addr', false)
+config('multilang', false)
+config('allow_create_user', false)
+config('auto_create_user', false)
+
+local mm = xapp('mm', ...)
 
 local b64 = require'base64'.encode
 local mustache = require'mustache'
 local queue = require'queue'
 
 --config ---------------------------------------------------------------------
-
---load_opensans()
-mm.schema:import(mm_schema)
 
 mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 mm.sshdir   = mm.bindir
@@ -201,13 +205,7 @@ for name, t in pairs(mm.git_hosting) do
 	t.fingerprint = t.host .. ' ' .. t.fingerprint:trim()
 end
 
-config('https_addr', false)
-
 --logging.filter[''] = true
-
-config('multilang', false)
-config('allow_create_user', false)
-config('auto_create_user', false)
 
 config('page_title_suffix', 'Many Machines')
 config('sign_in_logo', '/sign-in-logo.png')
@@ -227,6 +225,9 @@ local cmd_ssh_mounts  = cmdsection'SSH-FS MOUNTS'
 local cmd_mysql       = cmdsection'MYSQL'
 local cmd_machines    = cmdsection'MACHINES'
 local cmd_deployments = cmdsection'DEPLOYMENTS'
+
+--load_opensans()
+mm.schema:import(mm_schema)
 
 --database -------------------------------------------------------------------
 
