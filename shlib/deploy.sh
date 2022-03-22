@@ -15,7 +15,7 @@ deploy_setup() {
 	mysql_grant_user  localhost $DEPLOY $DEPLOY
 
 	say
-	say "All done."
+	say "First-time setup done."
 }
 
 deploy_remove() {
@@ -37,19 +37,19 @@ app() {
 deploy() {
 	say "Deploying APP=$APP ENV=$ENV VERSION=$VERSION SDK_VERSION=$SDK_VERSION..."
 
-	app running && must app stop
+	[ -d /home/$DEPLOY/$APP ] && app running && must app stop
 
 	deploy_setup
 
-	git_clone_for $DEPLOY $REPO $APP "$VERSION"
+	git_clone_for $DEPLOY $REPO /home/$DEPLOY/$APP "$VERSION"
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk \
-		$APP/sdk "$SDK_VERSION"
+		/home/$DEPLOY/$APP/sdk "$SDK_VERSION"
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk-bin-debian10 \
-		$APP/sdk/bin/linux "$SDK_VERSION"
+		/home/$DEPLOY/$APP/sdk/bin/linux "$SDK_VERSION"
 
 	VARS="$DEPLOY_VARS" FUNCS="say die debug run must" run_as $DEPLOY app_setup_script
 
@@ -90,10 +90,10 @@ https_addr = false
 }
 
 deploy_status() {
-	[ -d /home/$DEPLOY                    ] || die "no /home/$DEPLOY dir"
-	[ -d /home/$DEPLOY/$APP               ] || die "no /home/$DEPLOY/$APP dir"
-	[ -d /home/$DEPLOY/$APP/sdk           ] || die "no sdk dir"
-	[ -d /home/$DEPLOY/$APP/sdk/bin/linux ] || die "no sdk/bin/linux dir"
-	[ -f /home/$DEPLOY/$APP/${APP}.conf   ] || die "no ${APP}.conf"
+	[ -d /home/$DEPLOY                    ] || say "no /home/$DEPLOY dir"
+	[ -d /home/$DEPLOY/$APP               ] || say "no /home/$DEPLOY/$APP dir"
+	[ -d /home/$DEPLOY/$APP/sdk           ] || say "no sdk dir"
+	[ -d /home/$DEPLOY/$APP/sdk/bin/linux ] || say "no sdk/bin/linux dir"
+	[ -f /home/$DEPLOY/$APP/${APP}.conf   ] || say "no ${APP}.conf"
 	app status
 }

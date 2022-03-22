@@ -205,9 +205,6 @@ config('https_addr', false)
 
 --logging.filter[''] = true
 
-config('db_host'  , '10.0.0.5')
-config('db_port'  , 3307)
-config('db_pass'  , 'root')
 config('secret'   , '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('smtp_host', 'mail.bpnpart.com')
 config('smtp_user', 'admin@bpnpart.com')
@@ -1355,7 +1352,6 @@ rowset.scheduled_task = virtual_rowset(function(self)
 	function self:update_row(row)
 		local task = row['task:old']
 		local task = first_row('select args from task where task = ?', task)
-
 	end
 end)
 
@@ -1710,7 +1706,7 @@ end)
 
 function mm.git_key_update(hosting_name, machine)
 	local hosting = assert(mm.git_hosting[hosting_name])
-	mm.ssh_sh(machine, [[
+	mm.ssh_sh(machine, [=[
 		#use ssh
 		ssh_hostkey_update  $host "$fingerprint"
 		ssh_host_key_update $host mm_$name "$key" unstable_ip
@@ -1722,7 +1718,7 @@ function mm.git_key_update(hosting_name, machine)
 					$host mm_$name "$key" unstable_ip
 		done
 		exit 0
-	]], hosting, {task = 'ssh_key_update '..machine})
+	]=], hosting, {task = 'ssh_key_update '..machine})
 end
 function action.git_key_update(hosting_name, machine)
 	allow(admin())
@@ -1849,7 +1845,7 @@ end)
 
 function mm.deploy_remove(deploy)
 	local vars = deploy_vars(deploy)
-	mm.ssh_sh('deploy_remove', vars.MACHINE, [[
+	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		deploy_remove
 	]], {

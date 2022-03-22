@@ -54,9 +54,9 @@ ssh_pubkey() { # keyname
 
 ssh_git_keys_update() {
 	for NAME in $GIT_HOSTS; do
-		local HOST=${NAME}_HOST
-		local FINGERPRINT=${NAME}_FINGERPRINT
-		local KEY=${NAME}_KEY
+		local HOST=${NAME^^}_HOST
+		local FINGERPRINT=${NAME^^}_FINGERPRINT
+		local KEY=${NAME^^}_KEY
 		ssh_hostkey_update  ${!HOST} "${!FINGERPRINT}"
 		ssh_host_key_update ${!HOST} mm_github "${!KEY}" unstable_ip
 	done
