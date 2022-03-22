@@ -344,7 +344,7 @@ end)
 --run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
 function mm.ssh_key_fix_perms(machine)
 	if not win then return end
-	local s = mm.keyfile(machine)
+	local s = mm.keyfile(machine, nil, true)
 	readpipe('icacls %s /c /t /Inheritance:d', s)
 	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
 	readpipe('takeown /F %s', s)
@@ -2196,7 +2196,7 @@ local run_server = mm.run_server
 function mm:run_server()
 
 	runevery(1, function()
-		--rowset_changed'deploys'
+		rowset_changed'deploys'
 	end)
 
 	runafter(0, run_tasks)
