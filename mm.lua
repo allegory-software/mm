@@ -314,7 +314,9 @@ function mm.ppkfile(machine, suffix, from_db)
 end
 
 function mm.pubkey(machine, suffix)
-	return readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
+	--NOTE: Windows ssh-keygen puts the key name at the end, but the Linux one doesn't.
+	local s = readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
+	return s:match('^[^%s]+%s+[^%s]+')..' mm'
 end
 
 --TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
