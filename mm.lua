@@ -942,18 +942,18 @@ function mm.exec(cmd, opt)
 		task:setstatus'running'
 
 		if p.stdin then
-			thread(function()
+			resume(thread(function()
 				dbg('mm', 'execin', '%s', opt.stdin)
 				local ok, err = p.stdin:write(opt.stdin)
 				if not ok then
 					task:logerror('stdinwr', '%s', err)
 				end
 				p.stdin:close() --signal eof
-			end)
+			end, 'exec-stdin %s', p))
 		end
 
 		if p.stdout then
-			thread(function()
+			resume(thread(function()
 				local buf, sz = u8a(4096), 4096
 				while true do
 					local len, err = p.stdout:read(buf, sz)
@@ -967,11 +967,11 @@ function mm.exec(cmd, opt)
 					task:out(s)
 				end
 				p.stdout:close()
-			end)
+			end, 'exec-stdout %s', p))
 		end
 
 		if p.stderr then
-			thread(function()
+			resume(thread(function()
 				local buf, sz = u8a(4096), 4096
 				while true do
 					local len, err = p.stderr:read(buf, sz)
@@ -985,8 +985,11 @@ function mm.exec(cmd, opt)
 					task:err(s)
 				end
 				p.stderr:close()
-			end)
+			end, 'exec-stderr %s', p))
 		end
+
+		--release all db connections now in case this is a long running task.
+		release_dbs()
 
 		local exit_code, err = p:wait()
 		if not exit_code then
@@ -1006,13 +1009,13 @@ function mm.exec(cmd, opt)
 	if opt and not webb_cx then
 		task:free()
 	else
-		thread(function()
+		resume(thread(function()
 			sleep(10)
 			while task.pinned do
 				sleep(1)
 			end
 			task:free()
-		end)
+		end, 'exec-linger %s', p))
 	end
 
 	check500(#task.errors == 0, cat(task.errors, '\n'))
@@ -1093,7 +1096,7 @@ function mm.ssh_sh(machine, script, script_env, opt)
 	}, script_env)
 	local s = mm.sh_script(script:outdent(), script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
-	note('mm', 'ssh-sh', '%s %s', machine, script_env)
+	note('mm', 'ssh-sh', '%s %s %s', machine, script_env, opt)
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
 
@@ -1166,7 +1169,7 @@ local task = {}
 
 function mm.task(opt)
 	local self = opt.task and opt.keyed ~= false and mm.tasks_by_strid[opt.task]
-	if self then
+	if self and self.status == 'running' then
 		return nil, self
 	end
 	last_task_id = last_task_id + 1
@@ -1201,6 +1204,9 @@ end
 function task:free()
 	mm.tasks[self] = nil
 	mm.tasks_by_id[self.id] = nil
+	if self.task then
+		mm.tasks_by_strid[self.task] = nil
+	end
 	if self.persistent then
 		delete_row('task', {self.task})
 	end
@@ -1401,16 +1407,16 @@ local function run_task(action, args)
 	if not istab(args) then
 		args, err = nil, 'task args not a table'
 	end
-	warnif('mm', 'task', cmd, 'invalid task action %s', action)
+	warnif('mm', 'task', not cmd, 'invalid task action "%s"', action)
 	warnif('mm', 'task', not args, 'invalid task args "%s": %s', args, err)
 	if not (cmd and args) then
 		return
 	end
-	webb.thread(function()
+	resume(webb.thread(function()
 		cx().fake = false
 		cmd(unpack(args))
 		cx().fake = true
-	end)
+	end, 'run-task'))
 end
 
 local function run_tasks()
@@ -1634,7 +1640,7 @@ end)
 function mm.each_machine(f)
 	local threads = sock.threadset()
 	for _, machine in each_row_vals'select machine from machine' do
-		threads:thread(f, machine)
+		resume(threads:thread(f, machine))
 	end
 	assert(threads:wait())
 end
@@ -1924,14 +1930,14 @@ mm.deploy_state_vars = {}
 function mm.log_server(machine)
 	machine = checkarg(str_arg(machine))
 	local lport = mm.logport(machine)
-	thread(function()
+	resume(thread(function()
 		mm.rtunnel(machine, lport..':'..mm.log_port, {
 			persistent = true,
 			run_every = 0,
 			generated_by = 'log_server',
 			editable = false,
 		})
-	end)
+	end, 'log-server-rtunnel %s', machine))
 	local task, err = mm.task({
 		task = 'log_server '..machine,
 		action = 'log_server', args = {machine},
@@ -1942,14 +1948,20 @@ function mm.log_server(machine)
 		editable = false,
 	})
 	if not task then return nil, err end
-	thread(function()
-		local tcp = assert(sock.tcp())
-		assert(tcp:setopt('reuseaddr', true))
-		assert(tcp:listen('127.0.0.1', lport))
+	local tcp = assert(sock.tcp())
+	assert(tcp:setopt('reuseaddr', true))
+	assert(tcp:listen('127.0.0.1', lport))
+	sock.liveadd(tcp, 'logging')
+	resume(thread(function()
 		task:setstatus'running'
 		while not task.stop do
-			local ctcp = assert(tcp:accept())
-			thread(function()
+			local ctcp, err = tcp:accept()
+			local ra = ctcp.remote_addr
+			local rp = ctcp.remote_port
+			local la = ctcp. local_addr
+			local lp = ctcp. local_port
+			sock.liveadd(ctcp, 'logging')
+			resume(thread(function()
 				local lenbuf = u32a(1)
 				local msgbuf = buffer()
 				local plenbuf = cast(u8p, lenbuf)
@@ -1981,10 +1993,10 @@ function mm.log_server(machine)
 					end
 				end
 				ctcp:close()
-			end)
+			end, 'log-server-client %s', ctcp))
 		end
 		task:free()
-	end)
+	end, 'log-server %s %s', tcp, machine))
 end
 
 action.log_server = mm.log_server
@@ -2045,13 +2057,13 @@ rowset.backups = sql_rowset{
  		row.bkp = self:insert_into('bkp', row, 'parent_bkp deploy name')
 		row.start_time = time()
 		query('update bkp set start_time = from_unixtime(?) where bkp = ?', row.start_time, row.bkp)
-		thread(function()
+		resume(thread(function()
 			mm.ssh_mm('backup', machine, [[
 				xbkp_backup "$deploy" "$bkp" "$parent_bkp"
 			]], {deploy = row.deploy, bkp = row.bkp, parent_bkp = parent_bkp})
 			update_row('bkp', {['bkp:old'] = row.bkp, duration = time() - row.start_time}, 'duration')
 			rowset_changed'backups'
-		end)
+		end))
 	end,
 	update_row = function(self, row)
 		self:update_into('bkp', row, 'name')
@@ -2089,10 +2101,10 @@ end)
 cmd_ssh('ssh-all CMD', 'Execute command on all machines', function(command)
 	command = checkarg(str_arg(command), 'command expected')
 	for _, machine in each_row_vals'select machine from machine' do
-		thread(function()
+		resume(thread(function()
 			say('Executing on '..machine..'...')
 			mm.ssh(machine, command and {'bash', '-c', (command:gsub(' ', '\\ '))})
-		end)
+		end))
 	end
 end)
 
@@ -2192,15 +2204,20 @@ cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	end
 end)
 
+function action.live()
+	setmime'txt'
+	logging.printlive(outprint)
+end
+
 local run_server = mm.run_server
 function mm:run_server()
 
-	runevery(1, function()
-		rowset_changed'deploys'
-	end)
+	--runevery(1, function()
+	--	rowset_changed'deploys'
+	--end, 'rowset-changed-deploys-every-second')
 
-	runafter(0, run_tasks)
-	runevery(60, run_tasks)
+	runafter(0, run_tasks, 'run-tasks-first-time')
+	runevery(60, run_tasks, 'run-tasks-every-60s')
 
 	run_server(self)
 end
