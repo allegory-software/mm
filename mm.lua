@@ -2036,7 +2036,7 @@ rowset.backups = sql_rowset{
 
 cmd_ssh('ssh MACHINE|DEPLOY [CMD ...]', 'SSH into machine', function(md, cmd, ...)
 	local ip, m = mm.ip(md)
-	mm.sshi(md, cmd and {'bash', '-c', "'"..proc.quote_args_unix(cmd, ...).."'"})
+	mm.sshi(md, cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"})
 end)
 
 --TIP: make a putty session called `mm` where you set the window size,
