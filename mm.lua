@@ -1098,7 +1098,8 @@ function mm.ssh(md, args, opt)
 end
 
 function mm.sshi(machine, args, opt)
-	return mm.ssh(machine, args, update({capture_stdout = false, allocate_tty = true}, opt))
+	return mm.ssh(machine, args,
+		update({capture_stdout = false, allocate_tty = true}, opt))
 end
 
 --remote sh scripts with stdin injection -------------------------------------
@@ -2033,9 +2034,9 @@ rowset.backups = sql_rowset{
 
 --remote access tools --------------------------------------------------------
 
-cmd_ssh('ssh MACHINE|DEPLOY [CMD]', 'SSH into machine', function(md, cmd)
+cmd_ssh('ssh MACHINE|DEPLOY [CMD ...]', 'SSH into machine', function(md, cmd, ...)
 	local ip, m = mm.ip(md)
-	mm.sshi(md, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)})
+	mm.sshi(md, cmd and {'bash', '-c', "'"..proc.quote_args_unix(cmd, ...).."'"})
 end)
 
 --TIP: make a putty session called `mm` where you set the window size,
