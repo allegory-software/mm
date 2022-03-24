@@ -693,20 +693,11 @@ on('mm_machines_grid.init', function(e) {
 		})
 
 		items.push({
-			text: 'Update github key',
+			text: 'Update git keys',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'git-key-update', 'github', machine], check_notify)
-			},
-		})
-
-		items.push({
-			text: 'Update azure devops key',
-			action: function() {
-				let machine = e.focused_row_cell_val('machine')
-				if (machine)
-					get(['', 'git-key-update', 'azure', machine], check_notify)
+					get(['', 'git-keys-update', machine], check_notify)
 			},
 		})
 
@@ -1231,12 +1222,12 @@ function task:free()
 	if self.persistent then
 		delete_row('task', {self.task})
 	end
-	rowset_changed'tasks'
+	rowset_changed'running_tasks'
 end
 
 function task:changed()
 	self.duration = (self.end_time or time()) - self.start_time
-	rowset_changed'tasks'
+	rowset_changed'running_tasks'
 end
 
 function task:setstatus(s, exit_code)
@@ -1837,15 +1828,18 @@ function mm.deploy_run(deploy, ...)
 			cmd_args = cmd_args,
 		}, {task = 'deploy_run '..deploy..' '..cmd_args})
 end
-local function app_cmd(cmd)
+local function app_cmd(cmd, notify)
 	return function(deploy, ...)
 		mm.deploy_run(deploy, cmd, ...)
+		if notify then
+			out_json({deploy = deploy, notify = notify})
+		end
 	end
 end
-mm.deploy_start   = app_cmd'start'
-mm.deploy_stop    = app_cmd'stop'
-mm.deploy_restart = app_cmd'restart'
-mm.deploy_status  = app_cmd'status'
+mm.deploy_start   = app_cmd('start'  , 'App started')
+mm.deploy_stop    = app_cmd('stop'   , 'App stopped')
+mm.deploy_restart = app_cmd('restart', 'App restarted')
+mm.deploy_status  = app_cmd('status')
 
 action.deploy_start   = mm.deploy_start
 action.deploy_stop    = mm.deploy_stop
@@ -2188,9 +2182,9 @@ end
 local run_server = mm.run_server
 function mm:run_server()
 
-	--runevery(1, function()
-	--	rowset_changed'deploys'
-	--end, 'rowset-changed-deploys-every-second')
+	runevery(1, function()
+		--rowset_changed'deploys'
+	end, 'rowset-changed-deploys-every-second')
 
 	runafter(0, run_tasks, 'run-tasks-first-time')
 	runevery(60, run_tasks, 'run-tasks-every-60s')
