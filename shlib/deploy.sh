@@ -1,8 +1,8 @@
 #use die ssh user mysql git apt
 
-set -u # break on undefined vars.
-
 machine_prepare() {
+	checkvars MYSQL_ROOT_PASS
+
 	apt_get_install sudo htop mc git gnupg2 lsb-release
 
 	git_install_git_up
@@ -18,10 +18,12 @@ machine_prepare() {
 	echo 'net.ipv4.ip_unprivileged_port_start=0' > /etc/sysctl.d/50-unprivileged-ports.conf
 	sysctl --system
 
-	say "All done."
+	say "Prepare done."
 }
 
 deploy_setup() {
+	checkvars DEPLOY MYSQL_PASS GIT_HOSTS
+
 	[ -d /home/$DEPLOY ] && return
 
 	user_create $DEPLOY
@@ -38,15 +40,17 @@ deploy_setup() {
 }
 
 deploy_remove() {
+	checkvars DEPLOY
 	deploy_app_stop
 	mysql_drop_db $DEPLOY
 	mysql_drop_user localhost $DEPLOY
 	user_remove $DEPLOY
 	say
-	say "All done."
+	say "Deploy removed."
 }
 
 app() {
+	checkvars DEPLOY APP
 	(
 	must cd /home/$DEPLOY/$APP
 	VARS="DEBUG VERBOSE" run_as $DEPLOY ./$APP "$@"
@@ -54,6 +58,7 @@ app() {
 }
 
 deploy() {
+	checkvars DEPLOY REPO APP ENV DEPLOY_VARS
 	say "Deploying APP=$APP ENV=$ENV VERSION=$VERSION SDK_VERSION=$SDK_VERSION..."
 
 	[ -d /home/$DEPLOY/$APP ] && app running && must app stop
@@ -70,7 +75,9 @@ deploy() {
 		git@github.com:allegory-software/allegory-sdk-bin-debian10 \
 		/home/$DEPLOY/$APP/sdk/bin/linux "$SDK_VERSION"
 
-	VARS="$DEPLOY_VARS" FUNCS="say die debug run must" run_as $DEPLOY app_setup_script
+	VARS="DEBUG VERBOSE $DEPLOY_VARS" \
+	FUNCS="say die debug run must" \
+		run_as $DEPLOY app_setup_script
 
 	say "Installing the app..."
 	must app install forealz
@@ -78,7 +85,7 @@ deploy() {
 	must app start
 
 	say
-	say "All done."
+	say "Deploy done."
 }
 
 app_setup_script() {
@@ -109,6 +116,7 @@ https_addr = false
 }
 
 deploy_status() {
+	checkvars DEPLOY APP
 	[ -d /home/$DEPLOY                    ] || say "no /home/$DEPLOY dir"
 	[ -d /home/$DEPLOY/$APP               ] || say "no /home/$DEPLOY/$APP dir"
 	[ -d /home/$DEPLOY/$APP/sdk           ] || say "no sdk dir"

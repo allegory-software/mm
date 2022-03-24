@@ -238,7 +238,7 @@ cmd('install [forealz]', 'Install the app', function(doit)
 	if not dry then
 		create_user()
 	end
-	say'All done.'
+	say'Install done.'
 end)
 
 --web api client -------------------------------------------------------------
@@ -382,6 +382,48 @@ end
 cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(machine)
 	print(api('mysql-root-pass', machine))
 end)
+
+local function deploy_vars(deploy)
+
+	deploy = checkarg(str_arg(deploy), 'deploy required')
+
+	local vars = {}
+	for k,v in pairs(assertf(first_row([[
+		select
+			d.deploy,
+			d.machine,
+			d.repo,
+			d.app,
+			coalesce(d.wanted_version, '') version,
+			coalesce(d.wanted_sdk_version, '') sdk_version,
+			coalesce(d.env, 'dev') env,
+			d.deploy mysql_db,
+			d.deploy mysql_user,
+			d.mysql_pass,
+			d.secret
+		from
+			deploy d
+		where
+			deploy = ?
+	]], deploy), 'invalid deploy "%s"', deploy)) do
+		vars[k:upper()] = v
+	end
+
+	for _, name, val in each_row_vals([[
+		select
+			name, val
+		from
+			deploy_vars
+		where
+			deploy = ?
+	]], deploy) do
+		vars[name] = val
+	end
+
+	vars.DEPLOY_VARS = cat(keys(vars, true), ' ')
+
+	return vars, d
+end
 
 --admin web UI ---------------------------------------------------------------
 
@@ -1768,49 +1810,8 @@ end)
 
 --deploy commands ------------------------------------------------------------
 
-local function deploy_vars(deploy)
-
-	deploy = checkarg(str_arg(deploy), 'deploy required')
-
-	local vars = {}
-	for k,v in pairs(assertf(first_row([[
-		select
-			d.deploy,
-			d.machine,
-			d.repo,
-			d.app,
-			coalesce(d.wanted_version, '') version,
-			coalesce(d.wanted_sdk_version, '') sdk_version,
-			coalesce(d.env, 'dev') env,
-			d.deploy mysql_db,
-			d.deploy mysql_user,
-			d.mysql_pass,
-			d.secret
-		from
-			deploy d
-		where
-			deploy = ?
-	]], deploy), 'invalid deploy "%s"', deploy)) do
-		vars[k:upper()] = v
-	end
-
-	for _, name, val in each_row_vals([[
-		select
-			name, val
-		from
-			deploy_vars
-		where
-			deploy = ?
-	]], deploy) do
-		vars[name] = val
-	end
-
-	return vars, d
-end
-
 function mm.deploy(deploy)
 	local vars = deploy_vars(deploy)
-	vars.DEPLOY_VARS = cat(keys(vars, true), ' ')
 	update(vars, git_hosting_vars())
 	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
@@ -2062,11 +2063,37 @@ cmd_ssh(Windows, 'plink MACHINE|DEPLOY [CMD]', 'SSH into machine with plink', fu
 end)
 
 --TIP: make a putty session called `mm` where you set the window size,
---uncheck "warn on close" and whatever else you need to make putty comfortable.
+--uncheck "warn on close" and whatever else you need to make worrking
+--with putty comfortable for you.
 cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function(md)
 	local ip, m = mm.ip(md)
-	local cmd = indir(mm.bindir, 'kitty')..' -load mm -t -i '..mm.ppkfile(m)..' root@'..ip
-	if m ~= md then cmd = cmd .. ' -cmd "sudo -iu '..md..'"' end
+	local deploy = m ~= md and md or nil
+	local cmdfile = tmppath'puttycmd.txt'
+	local cmd = indir(mm.bindir, 'putty')..' -load mm -t -i '..mm.ppkfile(m)
+		..' root@'..ip..' -m '..cmdfile
+	local script = [[
+	#use deploy
+	]]
+	local script_env = update({
+		DEBUG   = env'DEBUG' or '',
+		VERBOSE = env'VERBOSE' or '',
+	}, git_hosting_vars(), deploy and deploy_vars(deploy))
+	local s = mm.sh_script(script:outdent(), script_env)
+	local ts = (deploy and '/home/'..deploy or '/root')..'/.mm.sh'
+	local s = catargs('\n',
+		'cat << \'EOFFF\' > '..ts,
+		'rm -f '..ts,
+		s,
+		deploy and 'must cd /home/$DEPLOY/$APP',
+		deploy and 'VARS="DEBUG VERBOSE $DEPLOY_VARS" run_as $DEPLOY bash',
+		--deploy and 'sudo -iu '..deploy..' bash',
+		'EOFFF',
+		'exec bash --init-file '..ts
+	)
+	save(cmdfile, s)
+	runafter(.5, function()
+		rm(cmdfile)
+	end)
 	proc.exec(cmd):forget()
 end)
 

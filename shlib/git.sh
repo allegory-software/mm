@@ -23,6 +23,7 @@ git_clone_for() { # user repo dir version
 	local REPO="$2"
 	local DIR="$3"
 	local VERSION="$4"
+	checkvars USER REPO DIR
 	[ "$VERSION" ] || VERSION=master
 	say "Pulling $DIR $VERSION..."
 	(

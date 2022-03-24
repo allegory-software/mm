@@ -54,6 +54,7 @@ ssh_pubkey() { # keyname
 
 ssh_git_keys_update_for_user() { # user
 	local USER="$1"
+	check_vars USER GIT_HOSTS
 	for NAME in $GIT_HOSTS; do
 
 		local HOST=${NAME^^}_HOST
@@ -70,6 +71,8 @@ ssh_git_keys_update_for_user() { # user
 }
 
 ssh_git_keys_update() {
+	check_vars GIT_HOSTS
+
 	for NAME in $GIT_HOSTS; do
 
 		local HOST=${NAME^^}_HOST
