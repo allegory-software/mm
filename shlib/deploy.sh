@@ -2,7 +2,6 @@
 
 machine_prepare() {
 	checkvars MYSQL_ROOT_PASS
-	checkroot
 
 	apt_get_install sudo htop mc git gnupg2 lsb-release
 
@@ -24,7 +23,6 @@ machine_prepare() {
 
 deploy_setup() {
 	checkvars DEPLOY MYSQL_PASS GIT_HOSTS
-	checkroot
 
 	[ -d /home/$DEPLOY ] && return
 
@@ -42,7 +40,6 @@ deploy_setup() {
 
 deploy_remove() {
 	checkvars DEPLOY
-	checkroot
 
 	deploy_app_stop
 	mysql_drop_db $DEPLOY
@@ -62,7 +59,6 @@ app() {
 
 deploy() {
 	checkvars DEPLOY REPO APP ENV DEPLOY_VARS
-	checkroot
 	say "Deploying APP=$APP ENV=$ENV VERSION=$VERSION SDK_VERSION=$SDK_VERSION..."
 
 	[ -d /home/$DEPLOY/$APP ] && app running && must app stop
