@@ -34,16 +34,13 @@ LIMITATIONS
 	- the machines need to run Linux (Debian 10) and have a public IP.
 	- all deployments connect to the same MySQL server instance.
 	- each deployment is given a single MySQL db.
-	- code has to be on github or azure devops (in a public or private repo).
+	- git hosts are hardcoded (github & azure-devops currently supported).
 	- single ssh key for git access.
-	- apps have to be able to self-install and self-upgrade/downgrade.
 
 	TODO: make mm portable by using file rowsets instead of mysql.
 	TODO: make mm even more portable by saving the var dir to git-hosted encrypted zip files.
 
-	TODO: one-command-multiple-hosts: both web and cmdline.
-	TODO: use plink linux binary to gen the ppk on linux.
-	TODO: convert cmdline to posting mm tasks (via http?) if mm server is running.
+	TODO: one-command-multiple-machines/deployments: both web and cmdline.
 	TODO: bind libssh2 or see what is needed to implement ssh2 protocol in Lua.
 
 ]]
@@ -1084,38 +1081,20 @@ cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment
 		print(api('ip', machine)[1])
 	end)
 
---NOTE: the only reason for wanting to use plink on Windows is because ssh's
---`ControlMaster` option (less laggy tasks) doesn't work on Windows but putty
---has an option to share an already-open ssh connection for a new session
---and we could use that maybe (needs some refactoring though).
 function mm.ssh(md, args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
 	opt.machine = machine
-	if Windows and (opt.use_plink or mm.use_plink) then
-		--TODO: plink is missing a timeout option (look for a putty fork which has it?).
-		return mm.exec(extend({
-			indir(mm.bindir, 'plink'),
-			'-ssh',
-			'-load', 'mm',
-			opt.allocate_tty and '-t' or '-T',
-			'-hostkey', mm.ssh_hostkey(machine),
-			'-i', mm.ppkfile(machine),
-			'-batch',
-			'root@'..ip,
-		}, args), opt)
-	else
-		return mm.exec(extend({
-			sshcmd'ssh',
-			opt.allocate_tty and '-t' or '-T',
-			'-o', 'BatchMode=yes',
-			'-o', 'ConnectTimeout=5',
-			'-o', 'PreferredAuthentications=publickey',
-			'-o', 'UserKnownHostsFile='..mm.known_hosts_file(),
-			'-i', mm.keyfile(machine),
-			'root@'..ip,
-		}, args), opt)
-	end
+	return mm.exec(extend({
+		sshcmd'ssh',
+		opt.allocate_tty and '-t' or '-T',
+		'-o', 'BatchMode=yes',
+		'-o', 'ConnectTimeout=5',
+		'-o', 'PreferredAuthentications=publickey',
+		'-o', 'UserKnownHostsFile='..mm.known_hosts_file(),
+		'-i', mm.keyfile(machine),
+		'root@'..ip,
+	}, args), opt)
 end
 
 function mm.sshi(machine, args, opt)
@@ -2055,11 +2034,8 @@ rowset.backups = sql_rowset{
 --remote access tools --------------------------------------------------------
 
 cmd_ssh('ssh MACHINE|DEPLOY [CMD]', 'SSH into machine', function(md, cmd)
+	local ip, m = mm.ip(md)
 	mm.sshi(md, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)})
-end)
-
-cmd_ssh(Windows, 'plink MACHINE|DEPLOY [CMD]', 'SSH into machine with plink', function(md, cmd)
-	mm.sshi(md, cmd and {'bash', '-c', proc.quote_arg_unix(cmd)}, {use_plink = true})
 end)
 
 --TIP: make a putty session called `mm` where you set the window size,
