@@ -1,6 +1,25 @@
-#use die ssh user mysql git
+#use die ssh user mysql git apt
 
 set -u # break on undefined vars.
+
+machine_prepare() {
+	apt_get_install sudo htop mc git gnupg2 lsb-release
+
+	git_install_git_up
+	git_config_user "mm@allegory.ro" "Many Machines"
+	ssh_git_keys_update
+
+	percona_pxc_install
+	mysql_config "log_bin_trust_function_creators = 1"
+	must service mysql start
+	mysql_update_root_pass "$MYSQL_ROOT_PASS"
+
+	# allow binding to ports < 1024.
+	echo 'net.ipv4.ip_unprivileged_port_start=0' > /etc/sysctl.d/50-unprivileged-ports.conf
+	sysctl --system
+
+	say "All done."
+}
 
 deploy_setup() {
 	[ -d /home/$DEPLOY ] && return
@@ -8,7 +27,7 @@ deploy_setup() {
 	user_create $DEPLOY
 	user_lock_pass $DEPLOY
 
-	HOME=/home/$DEPLOY USER=$DEPLOY ssh_git_keys_update
+	ssh_git_keys_update_for_user $DEPLOY
 
 	mysql_create_db $DEPLOY
 	mysql_create_user localhost $DEPLOY "$MYSQL_PASS"

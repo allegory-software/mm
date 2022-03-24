@@ -26,14 +26,14 @@ git_clone_for() { # user repo dir version
 	[ "$VERSION" ] || VERSION=master
 	say "Pulling $DIR $VERSION..."
 	(
-	if [ ! -d $DIR ]; then
-		must git clone -q --depth=1 -b $VERSION --single-branch $REPO $DIR
-	else
-		must cd $DIR
-		must git fetch -q
-		must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"
-	fi
-	) || exit $?
+	must mkdir -p $DIR
+	must cd $DIR
+	[ -d .git ] || must git init -q
+	must git remote remove origin
+	must git remote add origin $REPO
+	must git -c advice.objectNameWarning=false fetch --depth=1 -q origin "$VERSION:refs/remotes/origin/$VERSION"
+	must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"
+	) || exit
 	must chown -R $USER:$USER $DIR
 }
 

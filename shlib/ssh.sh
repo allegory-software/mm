@@ -3,7 +3,7 @@
 ssh_hostkey_update() { # host fingerprint
 	say "Updating SSH host fingerprint for host '$1' (/etc/ssh)..."
 	local kh=/etc/ssh/ssh_known_hosts
-	run ssh-keygen -R "$1" -f $kh
+	run ssh-keygen -R "$1" -f $kh # remove host line if found
 	must printf "%s\n" "$2" >> $kh
 	must chmod 644 $kh
 }
@@ -52,12 +52,46 @@ ssh_pubkey() { # keyname
 	cat $HOME/.ssh/authorized_keys | grep " $1\$"
 }
 
-ssh_git_keys_update() {
+ssh_git_keys_update_for_user() { # user
+	local USER="$1"
 	for NAME in $GIT_HOSTS; do
+
 		local HOST=${NAME^^}_HOST
 		local FINGERPRINT=${NAME^^}_FINGERPRINT
 		local KEY=${NAME^^}_KEY
-		ssh_hostkey_update  ${!HOST} "${!FINGERPRINT}"
-		ssh_host_key_update ${!HOST} mm_github "${!KEY}" unstable_ip
+
+		HOST="${!HOST}"
+		FINGERPRINT="${!FINGERPRINT}"
+		KEY="${!KEY}"
+
+		HOME=/home/$USER USER=$USER ssh_host_key_update \
+			$HOST mm_$NAME "$KEY" unstable_ip
+	done
+}
+
+ssh_git_keys_update() {
+	for NAME in $GIT_HOSTS; do
+
+		local HOST=${NAME^^}_HOST
+		local FINGERPRINT=${NAME^^}_FINGERPRINT
+		local KEY=${NAME^^}_KEY
+
+		HOST="${!HOST}"
+		FINGERPRINT="${!FINGERPRINT}"
+		KEY="${!KEY}"
+
+		ssh_hostkey_update  $HOST "$FINGERPRINT"
+		ssh_host_key_update $HOST mm_$NAME "$KEY" unstable_ip
+
+		(
+		shopt -s nullglob
+		for USER in *; do
+			[ -d /home/$USER/.ssh ] && \
+				HOME=/home/$USER USER=$USER ssh_host_key_update \
+					$HOST mm_$NAME "$KEY" unstable_ip
+		done
+		exit 0 # for some reason, for sets an exit code...
+		) || exit
+
 	done
 }

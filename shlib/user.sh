@@ -4,6 +4,7 @@ user_create() { # user
 	say "Creating user '$1'..."
 	must useradd -m $1
 	must chsh -s /bin/bash $1
+	must chmod 750 /home/$1
 }
 
 user_lock_pass() { # user

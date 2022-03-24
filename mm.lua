@@ -292,30 +292,29 @@ function action.known_hosts()
 	out(load(mm.known_hosts_file(true)))
 end
 
-function mm.keyfile(machine, suffix, from_db, ext)
+function mm.keyfile(machine, from_db, ext)
 	machine = machine and machine:trim()
-	local file = 'mm'..(machine and '-'..machine or '')
-		..(suffix and '.'..suffix or '')..'.'..(ext or 'key')
+	local file = 'mm'..(machine and '-'..machine or '')..'.'..(ext or 'key')
 	file = indir(mm.vardir, file)
 	if from_server(from_db) then
-		local s = api('keyfile', machine, suffix, ext)
+		local s = api('keyfile', machine, ext)
 		save(file, s)
 	end
 	return file
 end
-function action.keyfile(machine, suffix, ext)
-	local keyfile = mm.keyfile(repl(machine, ''), repl(suffix, ''), true, repl(ext, ''))
+function action.keyfile(machine, ext)
+	local keyfile = mm.keyfile(repl(machine, ''), true, repl(ext, ''))
 	setmime'txt'
 	outfile(keyfile)
 end
 
-function mm.ppkfile(machine, suffix, from_db)
-	return mm.keyfile(machine, suffix, from_db, 'ppk')
+function mm.ppkfile(machine, from_db)
+	return mm.keyfile(machine, from_db, 'ppk')
 end
 
-function mm.pubkey(machine, suffix)
+function mm.pubkey(machine)
 	--NOTE: Windows ssh-keygen puts the key name at the end, but the Linux one doesn't.
-	local s = readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine, suffix)..'"'):trim()
+	local s = readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine)..'"'):trim()
 	return s:match('^[^%s]+%s+[^%s]+')..' mm'
 end
 
@@ -344,7 +343,7 @@ end)
 --run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
 function mm.ssh_key_fix_perms(machine)
 	if not win then return end
-	local s = mm.keyfile(machine, nil, true)
+	local s = mm.keyfile(machine, true)
 	readpipe('icacls %s /c /t /Inheritance:d', s)
 	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
 	readpipe('takeown /F %s', s)
@@ -355,9 +354,9 @@ end
 cmd_ssh_keys('ssh-key-fix-perms [MACHINE]', 'Fix SSH key perms for VBOX',
 	mm.ssh_key_fix_perms)
 
-function mm.ssh_key_gen_ppk(machine, suffix)
-	local key = mm.keyfile(machine, suffix)
-	local ppk = mm.ppkfile(machine, suffix)
+function mm.ssh_key_gen_ppk(machine)
+	local key = mm.keyfile(machine)
+	local ppk = mm.ppkfile(machine)
 	if win then
 		exec(indir(mm.bindir, 'winscp.com')..' /keygen %s /output=%s', key, ppk)
 	else
@@ -1036,7 +1035,7 @@ function mm.ip(md, from_db)
 	return checkfound(ip, 'machine not found'), m
 end
 function action.ip(machine)
-	out_json({mm.ip(machine, true)})
+	out_json{mm.ip(machine, true)}
 end
 cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
 	function(machine)
@@ -1655,13 +1654,13 @@ function mm.ssh_key_update(machine)
 	local pubkey = mm.pubkey()
 	local stored_pubkey = mm.ssh_sh(machine, [=[
 		#use ssh mysql user
-		has_mysql && mysql_update_root_pass "$mysql_root_pass"
-		ssh_update_pubkey mm "$pubkey"
+		has_mysql && mysql_update_root_pass "$MYSQL_ROOT_PASS"
+		ssh_update_pubkey mm "$PUBKEY"
 		user_lock_pass root
 		ssh_pubkey mm
 	]=], {
-		pubkey = pubkey,
-		mysql_root_pass = mm.mysql_root_pass(),
+		PUBKEY = pubkey,
+		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
 	}, {task = 'ssh_key_update '..machine}):stdout():trim()
 
 	if stored_pubkey ~= pubkey then
@@ -1713,43 +1712,7 @@ cmd_ssh_keys('ssh_key_check MACHINE', 'Check a SSH key', function(machine)
 	api('ssh-key-check', machine)
 end)
 
---git key update -------------------------------------------------------------
-
-function mm.git_key_update(hosting_name, machine)
-	local hosting = assert(mm.git_hosting[hosting_name])
-	mm.ssh_sh(machine, [=[
-		#use ssh
-		ssh_hostkey_update  $host "$fingerprint"
-		ssh_host_key_update $host mm_$name "$key" unstable_ip
-		must cd /home
-		shopt -s nullglob
-		for user in *; do
-			[ -d /home/$user/.ssh ] && \
-				HOME=/home/$user USER=$user ssh_host_key_update \
-					$host mm_$name "$key" unstable_ip
-		done
-		exit 0
-	]=], hosting, {task = 'ssh_key_update '..machine})
-end
-function action.git_key_update(hosting_name, machine)
-	allow(admin())
-	if not machine then
-		mm.each_machine(function(machine)
-			mm.git_key_update(hosting_name, machine)
-		end)
-		return true
-	end
-	mm.git_key_update(hosting_name, machine)
-	out_json{machine = machine, notify = hosting_name .. ' key updated for ' .. machine}
-end
-cmd_ssh_keys(
-	'git_key_update github|azure MACHINE',
-	'Updage Git SSH key for a machine',
-	function(hosting_name, machine)
-		api('git-key-update', hosting_name, machine)
-	end)
-
---command: machine-prepare ---------------------------------------------------
+--git keys update -------------------------------------------------------------
 
 local function git_hosting_vars()
 	local vars = {GIT_HOSTS = cat(keys(mm.git_hosting, true), ' ')}
@@ -1761,29 +1724,38 @@ local function git_hosting_vars()
 	return vars
 end
 
-function mm.machine_prepare(machine)
+function mm.git_keys_update(machine)
+	local vars = git_hosting_vars()
 	mm.ssh_sh(machine, [=[
-
-		#use apt git ssh mysql
-
-		apt_get_install sudo htop mc git gnupg2 curl lsb-release
-
-		git_install_git_up
-		git_config_user mm@allegory.ro "Many Machines"
+		#use ssh
 		ssh_git_keys_update
+	]=], vars, {task = 'git_keys_update '..machine})
+end
+function action.git_keys_update(machine)
+	allow(admin())
+	if not machine then
+		mm.each_machine(function(machine)
+			mm.git_keys_update(machine)
+		end)
+		return true
+	end
+	mm.git_keys_update(machine)
+	out_json{machine = machine, notify = 'Git keys updated for '..machine}
+end
+cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
+	function(machine)
+		api('git-keys-update', machine)
+	end)
 
-		percona_pxc_install
-		mysql_config "log_bin_trust_function_creators = 1"
-		must service mysql start
-		mysql_update_root_pass "$MYSQL_ROOT_PASS"
+--command: machine-prepare ---------------------------------------------------
 
-		# allow binding to ports < 1024.
-		echo 'net.ipv4.ip_unprivileged_port_start=0' > /etc/sysctl.d/50-unprivileged-ports.conf
-		sysctl --system
-
-		say "All done."
-
-	]=], git_hosting_vars(), {task = 'machine_prepare '..machine})
+function mm.machine_prepare(machine)
+	local vars = git_hosting_vars()
+	vars.MYSQL_ROOT_PASS = mm.mysql_root_pass(machine)
+	mm.ssh_sh(machine, [=[
+		#use deploy
+		machine_prepare
+	]=], vars, {task = 'machine_prepare '..machine})
 end
 
 function action.machine_prepare(machine)
