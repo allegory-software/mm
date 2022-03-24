@@ -2079,16 +2079,16 @@ cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function
 		VERBOSE = env'VERBOSE' or '',
 	}, git_hosting_vars(), deploy and deploy_vars(deploy))
 	local s = mm.sh_script(script:outdent(), script_env)
-	local ts = (deploy and '/home/'..deploy or '/root')..'/.mm.sh'
 	local s = catargs('\n',
-		'cat << \'EOFFF\' > '..ts,
-		'rm -f '..ts,
+		'export MM_TMP_SH=/root/.mm.$$.sh',
+		'cat << \'EOFFF\' > $MM_TMP_SH',
+		'trap "rm -f -- $MM_TMP_SH" EXIT',
 		s,
 		deploy and 'must cd /home/$DEPLOY/$APP',
-		deploy and 'VARS="DEBUG VERBOSE $DEPLOY_VARS" run_as $DEPLOY bash',
+		deploy and 'VARS="DEBUG VERBOSE" run_as $DEPLOY bash',
 		--deploy and 'sudo -iu '..deploy..' bash',
 		'EOFFF',
-		'exec bash --init-file '..ts
+		'exec bash --init-file $MM_TMP_SH'
 	)
 	save(cmdfile, s)
 	runafter(.5, function()

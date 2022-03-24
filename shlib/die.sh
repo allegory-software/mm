@@ -26,3 +26,7 @@ checkvars() { # name1 ...
 		[ "${!var}" ] || die "var $var required"
 	done
 }
+
+checkroot() {
+	[ "$EUID" -ne 0 -o "$USER" != root -o "$HOME" != "/root" ] && die "user not root"
+}
