@@ -880,7 +880,7 @@ rowset.deploys = sql_rowset{
 				local t = vars and vars.live
 				if not t then return null end
 				local dt = max(0, time() - t)
-				return dt < 3 and 'live' or 'died '..glue.timeago(-dt, 0)
+				return dt < 3 and 'live' or null
 			end,
 		},
 	},
