@@ -174,6 +174,7 @@ local mm = xapp('mm', ...)
 local b64 = require'base64'.encode
 local mustache = require'mustache'
 local queue = require'queue'
+local mess = require'mess'
 
 --config ---------------------------------------------------------------------
 
@@ -1245,9 +1246,13 @@ function task:finish(exit_code)
 	end
 end
 
-function task:do_kill()
-	--
+function task:do_stop() end --stub
+
+function task:stop()
+	self:do_stop()
 end
+
+function task:do_kill() end
 
 function task:kill()
 	self:do_kill()
@@ -1873,6 +1878,7 @@ end
 
 mm.deploy_logs = {}
 mm.deploy_state_vars = {}
+mm.log_server_chan = {}
 
 function mm.log_server(machine)
 	machine = checkarg(str_arg(machine))
@@ -1895,55 +1901,43 @@ function mm.log_server(machine)
 		editable = false,
 	})
 	if not task then return nil, err end
-	local tcp = assert(sock.tcp())
-	assert(tcp:setopt('reuseaddr', true))
-	assert(tcp:listen('127.0.0.1', lport))
-	sock.liveadd(tcp, 'logging')
-	resume(thread(function()
-		task:setstatus'running'
-		while not task.stop do
-			local ctcp, err = tcp:accept()
-			local ra = ctcp.remote_addr
-			local rp = ctcp.remote_port
-			local la = ctcp. local_addr
-			local lp = ctcp. local_port
-			sock.liveadd(ctcp, 'logging')
-			resume(thread(function()
-				local lenbuf = u32a(1)
-				local msgbuf = buffer()
-				local plenbuf = cast(u8p, lenbuf)
-				while not task.stop do
-					local len = ctcp:recvn(plenbuf, 4)
-					if not len then break end
-					local len = lenbuf[0]
-					local buf = msgbuf(len)
-					assert(ctcp:recvn(buf, len))
-					local s = ffi.string(buf, len)
-					local msg = loadstring('return '..s)()
-					msg.machine = machine
-					if msg.event == 'set' then
-						attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
-					else
-						local q = mm.deploy_logs[msg.deploy]
-						if not q then
-							q = queue.new(mm.log_queue_size)
-							q.next_id = 1
-							mm.deploy_logs[msg.deploy] = q
-						end
-						if q:full() then
-							q:pop()
-						end
-						msg.id = q.next_id
-						q.next_id = q.next_id + 1
-						q:push(msg)
-						rowset_changed'deploy_log'
-					end
+
+	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
+		mm.log_server_chan[machine] = chan
+		chan:recvall(function(chan, msg)
+			msg.machine = machine
+			if msg.event == 'set' then
+				attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
+			else
+				local q = mm.deploy_logs[msg.deploy]
+				if not q then
+					q = queue.new(mm.log_queue_size)
+					q.next_id = 1
+					mm.deploy_logs[msg.deploy] = q
 				end
-				ctcp:close()
-			end, 'log-server-client %s', ctcp))
-		end
-		task:free()
-	end, 'log-server %s %s', tcp, machine))
+				if q:full() then
+					q:pop()
+				end
+				msg.id = q.next_id
+				q.next_id = q.next_id + 1
+				q:push(msg)
+				rowset_changed'deploy_log'
+			end
+		end)
+	end, nil, 'logging-'..machine)
+
+	function task:do_stop()
+		logserver:stop()
+		task:finish(0)
+	end
+
+	task:setstatus'running'
+end
+
+function mm.log_server_rpc(machine, cmd, ...)
+	local chan = log_server_chan[machine]
+	if not chan then return end
+	chan:send(pack(cmd, ...))
 end
 
 action.log_server = mm.log_server
@@ -2183,7 +2177,7 @@ local run_server = mm.run_server
 function mm:run_server()
 
 	runevery(1, function()
-		--rowset_changed'deploys'
+		rowset_changed'deploys'
 	end, 'rowset-changed-deploys-every-second')
 
 	runafter(0, run_tasks, 'run-tasks-first-time')

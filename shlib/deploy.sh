@@ -65,15 +65,17 @@ deploy() {
 
 	deploy_setup
 
-	git_clone_for $DEPLOY $REPO /home/$DEPLOY/$APP "$VERSION"
+	git_clone_for $DEPLOY $REPO /home/$DEPLOY/$APP "$VERSION" &
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk \
-		/home/$DEPLOY/$APP/sdk "$SDK_VERSION"
+		/home/$DEPLOY/$APP/sdk "$SDK_VERSION" &
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk-bin-debian10 \
-		/home/$DEPLOY/$APP/sdk/bin/linux "$SDK_VERSION"
+		/home/$DEPLOY/$APP/sdk/bin/linux "$SDK_VERSION" &
+
+	wait
 
 	VARS="DEBUG VERBOSE $DEPLOY_VARS" \
 	FUNCS="say die debug run must" \
