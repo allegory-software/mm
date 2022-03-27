@@ -78,7 +78,7 @@ deploy() {
 	wait
 
 	VARS="DEBUG VERBOSE $DEPLOY_VARS" \
-	FUNCS="say die debug run must" \
+	FUNCS="say die debug run must deploy_gen_conf" \
 		run_as $DEPLOY app_setup_script
 
 	say "Installing the app..."
@@ -89,31 +89,37 @@ deploy() {
 	say "Deploy done."
 }
 
-app_setup_script() {
+deploy_gen_conf() {
+	echo -n "\
+--deploy vars
+${DEPLOY:+deploy = '$DEPLOY'}
+${ENV:+env = '$ENV'}
+${VERSION:+version = '$VERSION'}
+${MYSQL_DB:+db_name = '$MYSQL_DB'}
+${MYSQL_USER:+db_user = '$MYSQL_USER'}
+${MYSQL_PASS:+db_pass = '$MYSQL_PASS'}
+${SECRET:+secret = '$SECRET'}
 
-	local s="\
-deploy     = '$DEPLOY'
-env        = '$ENV'
-version    = '$VERSION'
-db_name    = '$MYSQL_DB'
-db_user    = '$MYSQL_USER'
-db_pass    = '$MYSQL_PASS'
-secret     = '$SECRET'
 --custom vars
-smtp_host  = '$SMTP_HOST'
-smtp_user  = '$SMTP_USER'
-smtp_pass  = '$SMTP_PASS'
-host       = '$HOST'
-noreply_email = '$NOREPLY_EMAIL'
-dev_email  = '$DEV_EMAIL'
-default_country = '$DEFAULT_COUNTRY'
-log_host   = '127.0.0.1'
-log_port   = 5555
-session_cookie_secure_flag = '$SESSION_COOKIE_SECURE_FLAG' ~= 'false'
+${HTTP_PORT:+http_port = '$HTTP_PORT'}
+${HTTP_PORT:+http_port = $HTTP_PORT}
+${SMTP_HOST:+smtp_host = '$SMTP_HOST'}
+${SMTP_HOST:+smtp_user = '$SMTP_USER'}
+${SMTP_HOST:+smtp_pass = '$SMTP_PASS'}
+${HOST:+host = '$HOST'}
+${NOREPLY_EMAIL:+noreply_email = '$NOREPLY_EMAIL'}
+${DEV_EMAIL:+dev_email = '$DEV_EMAIL'}
+${DEFAULT_COUNTRY:+default_country = '$DEFAULT_COUNTRY'}
+${SESSION_COOKIE_SECURE_FLAG:+session_cookie_secure_flag = $SESSION_COOKIE_SECURE_FLAG}
+
+log_host = '127.0.0.1'
+log_port = 5555
 https_addr = false
 "
-	must echo "$s" > /home/$DEPLOY/$APP/${APP}.conf
+}
 
+app_setup_script() {
+	must deploy_gen_conf > /home/$DEPLOY/$APP/${APP}.conf
 }
 
 deploy_status() {

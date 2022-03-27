@@ -562,10 +562,7 @@ rowset.deploys = sql_rowset{
 		status = {
 			compute = function(self, vals)
 				local vars = mm.deploy_state_vars[vals.deploy]
-				local t = vars and vars.live
-				if not t then return null end
-				local dt = max(0, time() - t)
-				return dt < 3 and 'live' or null
+				return vars and vars.live_now and 'live' or null
 			end,
 		},
 	},
@@ -1562,7 +1559,23 @@ end
 
 mm.deploy_logs = {}
 mm.deploy_state_vars = {}
-mm.log_server_chan = {}
+local log_server_chan = {}
+local deploys_changed
+
+local function update_deploy_live_state()
+	local changed
+	local now = time()
+	for deploy, vars in pairs(mm.deploy_state_vars) do
+		local t = vars.live
+		local dt = t and max(0, now - t)
+		local live_now = dt < 3
+		if (vars.live_now or false) ~= live_now then
+			vars.live_now = live_now
+			changed = true
+		end
+	end
+	return changed
+end
 
 function mm.log_server(machine)
 	machine = checkarg(str_arg(machine))
@@ -1587,11 +1600,15 @@ function mm.log_server(machine)
 	if not task then return nil, err end
 
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
-		mm.log_server_chan[machine] = chan
+		log_server_chan[machine] = chan
 		chan:recvall(function(chan, msg)
 			msg.machine = machine
 			if msg.event == 'set' then
-				attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
+				local t = attr(mm.deploy_state_vars, msg.deploy)
+				local v0 = t[msg.k]
+				if v0 ~= msg.v then
+					t[msg.k] = msg.v
+				end
 			else
 				local q = mm.deploy_logs[msg.deploy]
 				if not q then
@@ -1731,7 +1748,7 @@ cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function
 	local s = catargs('\n',
 		'export MM_TMP_SH=/root/.mm.$$.sh',
 		'cat << \'EOFFF\' > $MM_TMP_SH',
-		'trap "rm -f -- $MM_TMP_SH" EXIT',
+		'rm -f $MM_TMP_SH',
 		s,
 		deploy and 'must cd /home/$DEPLOY/$APP',
 		deploy and 'VARS="DEBUG VERBOSE" run_as $DEPLOY bash',
@@ -1861,7 +1878,9 @@ local run_server = mm.run_server
 function mm:run_server()
 
 	runevery(1, function()
-		rowset_changed'deploys'
+		if update_deploy_live_state() then
+			rowset_changed'deploys'
+		end
 	end, 'rowset-changed-deploys-every-second')
 
 	runafter(0, run_tasks, 'run-tasks-first-time')
