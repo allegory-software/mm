@@ -1601,13 +1601,16 @@ function mm.log_server(machine)
 
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
 		log_server_chan[machine] = chan
+		resume(thread(function()
+			mm.log_server_rpc(machine, 'get_livelist')
+			pr'GET LIVE SENT'
+		end))
 		chan:recvall(function(chan, msg)
 			msg.machine = machine
 			if msg.event == 'set' then
-				local t = attr(mm.deploy_state_vars, msg.deploy)
-				local v0 = t[msg.k]
-				if v0 ~= msg.v then
-					t[msg.k] = msg.v
+				attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
+				if msg.k == 'livelist' then
+					rowset_changed'deploy_livelist'
 				end
 			else
 				local q = mm.deploy_logs[msg.deploy]
@@ -1665,6 +1668,32 @@ rowset.deploy_log = virtual_rowset(function(self)
 				if msg_queue then
 					for msg in msg_queue:items() do
 						add(rs.rows, {msg.id, msg.time, msg.deploy, msg.severity, msg.module, msg.event, msg.message, msg.env})
+					end
+				end
+			end
+		end
+	end
+end)
+
+rowset.deploy_livelist = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'deploy'},
+		{name = 'type'},
+		{name = 'id'},
+		{name = 'descr'},
+	}
+	self.pk = ''
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local deploys = params['param:filter']
+		if deploys then
+			for _, deploy in ipairs(deploys) do
+				local vars = mm.deploy_state_vars[deploy]
+				local livelist = vars and vars.livelist
+				if livelist then
+					for _,row in ipairs(livelist) do
+						add(rs.rows, {deploy, row[1], row[2], row[3]})
 					end
 				end
 			end
@@ -1889,4 +1918,5 @@ function mm:run_server()
 	run_server(self)
 end
 
+logging.debug = false
 return mm:run(...)

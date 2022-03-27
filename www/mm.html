@@ -137,6 +137,12 @@ textarea.x-editbox-input[console] {
 							></x-grid>
 							<x-textarea mono nav_id=mm_deploy_log_grid col=message></x-textarea>
 						</x-vsplit>
+						<x-grid label="Live Objects"
+							id=mm_deploy_livelist
+							rowset_name=deploy_livelist
+							param_nav_id=mm_deploys_grid params=deploy
+						>
+						</x-grid>
 						<x-grid
 							label="Backups"
 							id=mm_backups
