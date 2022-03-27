@@ -1603,7 +1603,6 @@ function mm.log_server(machine)
 		log_server_chan[machine] = chan
 		resume(thread(function()
 			mm.log_server_rpc(machine, 'get_livelist')
-			pr'GET LIVE SENT'
 		end))
 		chan:recvall(function(chan, msg)
 			msg.machine = machine
@@ -1628,7 +1627,7 @@ function mm.log_server(machine)
 				rowset_changed'deploy_log'
 			end
 		end)
-	end, nil, 'logging-'..machine)
+	end, nil, 'log-server-'..machine)
 
 	function task:do_stop()
 		logserver:stop()
@@ -1692,8 +1691,14 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 				local vars = mm.deploy_state_vars[deploy]
 				local livelist = vars and vars.livelist
 				if livelist then
-					for _,row in ipairs(livelist) do
-						add(rs.rows, {deploy, row[1], row[2], row[3]})
+					local o_type  = livelist.o_type
+					local o_id    = livelist.o_id
+					local o_descr = livelist.o_descr
+					for i = 1, #livelist, livelist.cols do
+						local type  = livelist[i+o_type]
+						local id    = livelist[i+o_id]
+						local descr = livelist[i+o_descr]
+						add(rs.rows, {deploy, type, id, descr})
 					end
 				end
 			end
