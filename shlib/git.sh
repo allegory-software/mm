@@ -30,7 +30,7 @@ git_clone_for() { # user repo dir version
 	must mkdir -p $DIR
 	must cd $DIR
 	[ -d .git ] || must git init -q
-	must git remote remove origin
+	run  git remote remove origin
 	must git remote add origin $REPO
 	must git -c advice.objectNameWarning=false fetch --depth=1 -q origin "$VERSION:refs/remotes/origin/$VERSION"
 	must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"
