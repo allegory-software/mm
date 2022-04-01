@@ -1736,12 +1736,12 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 					local utime0 = 0
 					local stime0 = 0
 					local clock0 = 0
-					for i = 0, 59 do
-						local t = pilog[#pilog - 59 + i]
+					for i = -60, 0 do
+						local t = pilog[#pilog + i]
 						if t then
 							local dt = (t.clock - clock0)
-							local up = (t.utime - utime0) / dt
-							local sp = (t.stime - stime0) / dt
+							local up = (t.utime - utime0) / dt * 100
+							local sp = (t.stime - stime0) / dt * 100
 							add(rs.rows, {deploy, i, up, sp, t.rss})
 							utime0 = t.utime
 							stime0 = t.stime

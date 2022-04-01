@@ -150,12 +150,20 @@ textarea.x-editbox-input[console] {
 								param_nav_id=mm_deploys_grid params=deploy
 							>
 							</x-nav>
-							<x-chart
-								nav_id=mm_deploy_procinfo_log
-								shape=line sum_cols="cpu_user cpu_sys" group_cols=clock/1
-								min_sum=0 max_sum=1
-							>
-							</x-chart>
+							<div flex>
+								<x-chart
+									nav_id=mm_deploy_procinfo_log
+									shape=line sum_cols="cpu_user cpu_sys" group_cols=clock/1
+									min_sum=0 max_sum=100
+								>
+								</x-chart>
+								<x-chart
+									nav_id=mm_deploy_procinfo_log
+									shape=line sum_cols="ram" group_cols=clock/1
+									min_sum=0 max_sum=104857600
+								>
+								</x-chart>
+							</div>
 						</x-ct>
 						<x-grid
 							label="Backups"
