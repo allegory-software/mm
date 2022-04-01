@@ -143,6 +143,20 @@ textarea.x-editbox-input[console] {
 							param_nav_id=mm_deploys_grid params=deploy
 						>
 						</x-grid>
+						<x-ct label="CPU/RAM">
+							<x-nav
+								id=mm_deploy_procinfo_log
+								rowset_name=deploy_procinfo_log
+								param_nav_id=mm_deploys_grid params=deploy
+							>
+							</x-nav>
+							<x-chart
+								nav_id=mm_deploy_procinfo_log
+								shape=line sum_cols="cpu_user cpu_sys" group_cols=clock/1
+								min_sum=0 max_sum=1
+							>
+							</x-chart>
+						</x-ct>
 						<x-grid
 							label="Backups"
 							id=mm_backups

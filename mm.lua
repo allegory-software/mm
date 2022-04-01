@@ -729,6 +729,7 @@ function mm.exec(cmd, opt)
 		end, 'exec-linger %s', p))
 	end
 
+	pr(task:stderr())
 	check500(#task.errors == 0, cat(task.errors, '\n'))
 	check500(task.exit_code == 0, 'Task finished with exit code %d', task.exit_code)
 
@@ -1559,6 +1560,7 @@ end
 
 mm.deploy_logs = {}
 mm.deploy_state_vars = {}
+mm.deploy_procinfo_log = {}
 local log_server_chan = {}
 local deploys_changed
 
@@ -1602,7 +1604,12 @@ function mm.log_server(machine)
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
 		log_server_chan[machine] = chan
 		resume(thread(function()
-			mm.log_server_rpc(machine, 'get_livelist')
+			while 1 do
+				mm.log_server_rpc(machine, 'get_livelist')
+				mm.log_server_rpc(machine, 'get_procinfo')
+				mm.log_server_rpc(machine, 'get_osinfo')
+				sleep(1)
+			end
 		end))
 		chan:recvall(function(chan, msg)
 			msg.machine = machine
@@ -1610,6 +1617,9 @@ function mm.log_server(machine)
 				attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
 				if msg.k == 'livelist' then
 					rowset_changed'deploy_livelist'
+				elseif msg.k == 'procinfo' then
+					rowset_changed'deploy_procinfo_log'
+					add(attr(mm.deploy_procinfo_log, msg.deploy), msg.v)
 				end
 			else
 				local q = mm.deploy_logs[msg.deploy]
@@ -1699,6 +1709,46 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 						local id    = livelist[i+o_id]
 						local descr = livelist[i+o_descr]
 						add(rs.rows, {deploy, type, id, descr})
+					end
+				end
+			end
+		end
+	end
+end)
+
+rowset.deploy_procinfo_log = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'deploy'},
+		{name = 'clock'},
+		{name = 'cpu_user' , type = 'number'   , text = 'CPU user'},
+		{name = 'cpu_sys'  , type = 'number'   , text = 'CPU sys'},
+		{name = 'ram'      , type = 'filesize' , text = 'RAM'},
+	}
+	self.pk = ''
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local deploys = params['param:filter']
+		if deploys then
+			for _, deploy in ipairs(deploys) do
+				local pilog = mm.deploy_procinfo_log[deploy]
+				if pilog then
+					local utime0 = 0
+					local stime0 = 0
+					local clock0 = 0
+					for i = 0, 59 do
+						local t = pilog[#pilog - 59 + i]
+						if t then
+							local dt = (t.clock - clock0)
+							local up = (t.utime - utime0) / dt
+							local sp = (t.stime - stime0) / dt
+							add(rs.rows, {deploy, i, up, sp, t.rss})
+							utime0 = t.utime
+							stime0 = t.stime
+							clock0 = t.clock
+						else
+							add(rs.rows, {deploy, i, 0, 0, 0})
+						end
 					end
 				end
 			end
