@@ -125,3 +125,7 @@ function deploy_stop    () { deploy_action(this, 'deploy-stop') }
 function deploy_restart () { deploy_action(this, 'deploy-restart') }
 function deploy_deploy  () { deploy_action(this, 'deploy') }
 function deploy_remove  () { deploy_action(this, 'deploy-remove') }
+
+function deploy_backup() {
+	this.load(['', 'xbkp-backup', this.val('deploy')], check_notify)
+}

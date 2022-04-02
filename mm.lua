@@ -286,6 +286,7 @@ function mm.known_hosts_file(from_db)
 	return file
 end
 function action.known_hosts()
+	allow(admin())
 	setmime'txt'
 	out(load(mm.known_hosts_file(true)))
 end
@@ -301,6 +302,7 @@ function mm.keyfile(machine, from_db, ext)
 	return file
 end
 function action.keyfile(machine, ext)
+	allow(admin())
 	local keyfile = mm.keyfile(repl(machine, ''), true, repl(ext, ''))
 	setmime'txt'
 	outfile(keyfile)
@@ -748,6 +750,7 @@ function mm.ip(md, from_db)
 	return checkfound(ip, 'machine not found'), m
 end
 function action.ip(machine)
+	allow(admin())
 	out_json{mm.ip(machine, true)}
 end
 cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
@@ -1161,6 +1164,7 @@ local function timeago(s)
 end
 
 function action.machines()
+	allow(admin())
 	outpqr(query({
 		compact=1,
 		field_attrs = {
@@ -1188,6 +1192,7 @@ cmd_machines('m|machines', 'Show the list of machines',
 	end)
 
 function action.deploys()
+	allow(admin())
 	outpqr(query({
 		compact=1,
 		field_attrs = {},
@@ -1256,6 +1261,7 @@ function mm.machine_info(machine)
 end
 
 function action.machine_info(machine)
+	allow(admin())
 	local t = mm.machine_info(machine)
 	for i,k in ipairs(t) do
 		outprint(_('%20s %s', k, t[k]))
@@ -1459,6 +1465,7 @@ function mm.machine_prepare(machine)
 end
 
 function action.machine_prepare(machine)
+	allow(admin())
 	mm.machine_prepare(machine)
 	out_json{machine = machine, notify = 'Machine prepared: '..machine}
 end
@@ -1478,6 +1485,7 @@ function mm.deploy(deploy)
 	update_row('deploy', {vars.DEPLOY, deployed_version = vars.VERSION})
 end
 function action.deploy(deploy)
+	allow(admin())
 	mm.deploy(deploy)
 	out_json{deploy = deploy, notify = 'Deployed: '..deploy}
 end
@@ -1496,6 +1504,7 @@ function mm.deploy_remove(deploy)
 	}, {task = 'deploy_remove '..deploy})
 end
 function action.deploy_remove(deploy)
+	allow(admin())
 	mm.deploy_remove(deploy)
 	out_json{deploy = deploy, notify = 'Deploy removed: '..deploy}
 end
@@ -1528,10 +1537,16 @@ mm.deploy_stop    = app_cmd('stop'   , 'App stopped')
 mm.deploy_restart = app_cmd('restart', 'App restarted')
 mm.deploy_status  = app_cmd('status')
 
-action.deploy_start   = mm.deploy_start
-action.deploy_stop    = mm.deploy_stop
-action.deploy_restart = mm.deploy_restart
-action.deploy_status  = mm.deploy_status
+local function admin_action(f, ...)
+	return function(...)
+		allow(admin())
+		return f(...)
+	end
+end
+action.deploy_start   = admin_action(mm.deploy_start)
+action.deploy_stop    = admin_action(mm.deploy_stop)
+action.deploy_restart = admin_action(mm.deploy_restart)
+action.deploy_status  = admin_action(mm.deploy_status)
 
 --TODO:
 --cmd_deployments('deploy-run     DEPLOY ...', 'Run a deployed app', mm.deploy_run)
@@ -1653,7 +1668,7 @@ function mm.log_server_rpc(machine, cmd, ...)
 	chan:send(pack(cmd, ...))
 end
 
-action.log_server = mm.log_server
+action.log_server = admin_action(mm.log_server)
 
 rowset.deploy_log = virtual_rowset(function(self)
 	self.allow = 'admin'
@@ -1765,45 +1780,82 @@ rowset.backups = sql_rowset{
 			b.bkp        ,
 			b.parent_bkp ,
 			b.deploy     ,
-			b.start_time ,
-			b.duration   ,
+			unix_timestamp(b.start_time) start_time,
+			b.name       ,
 			b.size       ,
-			b.checksum   ,
-			b.name
+			b.duration   ,
+			b.checksum
 		from bkp b
 	]],
 	where_all = 'b.deploy in (:param:filter)',
 	pk = 'bkp',
 	field_attrs = {
-		start_time = {mysql_to_lua = timeago},
+		start_time = {type = 'timestamp'},
+		size       = {type = 'filesize'},
+		duration   = {type = 'duration'},
 	},
 	parent_col = 'parent_bkp',
-	insert_row = function(self, row)
-		local machine = checkarg(first_row('select machine from deploy where deploy = ?', row.deploy))
- 		row.bkp = self:insert_into('bkp', row, 'parent_bkp deploy name')
-		row.start_time = time()
-		query('update bkp set start_time = from_unixtime(?) where bkp = ?', row.start_time, row.bkp)
-		resume(thread(function()
-			mm.ssh_mm('backup', machine, [[
-				xbkp_backup "$deploy" "$bkp" "$parent_bkp"
-			]], {deploy = row.deploy, bkp = row.bkp, parent_bkp = parent_bkp})
-			update_row('bkp', {['bkp:old'] = row.bkp, duration = time() - row.start_time}, 'duration')
-			rowset_changed'backups'
-		end))
-	end,
 	update_row = function(self, row)
 		self:update_into('bkp', row, 'name')
 	end,
 	delete_row = function(self, row)
 		local bkp = row['bkp:old']
-		local deploy = checkarg(first_row('select deploy from bkp where bkp = ?', bkp))
- 		local machine = checkarg(first_row('select machine from deploy where deploy = ?', deploy))
-		mm.ssh_mm('backup_remove '..bkp, machine, [[
+		local deploy = checkarg((first_row('select deploy from bkp where bkp = ?', bkp)))
+ 		local machine = checkarg((first_row('select machine from deploy where deploy = ?', deploy)))
+		mm.ssh_sh(machine, [[
+			#use mysql
 			must xbkp_remove "$deploy" "$bkp"
-		]], {deploy = deploy, bkp = bkp})
+		]], {deploy = deploy, bkp = bkp}, {
+			task = 'backup_remove '..bkp,
+		})
 		self:delete_from('bkp', row)
 	end,
 }
+
+function mm.xbkp_backup(deploy, parent_bkp, name)
+	local row = {}
+	local machine = checkarg(first_row('select machine from deploy where deploy = ?', deploy), 'Invalid deploy')
+	local start_time = time()
+
+	local bkp = insert_row('bkp', {
+		parent_bkp = parent_bkp,
+		deploy = deploy,
+		name = name,
+		start_time = start_time,
+	}, 'parent_bkp deploy name start_time')
+
+	rowset_changed'backups'
+
+	local task, err = mm.ssh_sh(machine, [[
+		#use mysql
+		xbkp_backup "$deploy" "$bkp" "$parent_bkp"
+	]], {
+		deploy = deploy,
+		bkp = bkp,
+		parent_bkp = parent_bkp,
+	}, {
+		task = 'xbkp_backup '..deploy..(parent_bkp and ' '..parent_bkp or ''),
+	})
+	if not task then return nil, err end
+
+	local s = task:stdout()
+	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
+	update_row('bkp', {bkp,
+		duration = time() - start_time,
+		size = tonumber(size),
+		checksum = checksum,
+	})
+
+	rowset_changed'backups'
+end
+action.xbkp_backup = function(deploy, ...)
+	allow(admin())
+	mm.xbkp_backup(deploy, ...)
+	out_json{deploy = deploy, notify = 'Backup done for '..deploy}
+end
+cmd_mysql('xbkp-backup DEPLOY [PARENT_BKP] [NAME]', 'Perform xtrabackup', function(...)
+	api('xbkp-backup', ...)
+end)
 
 --remote access tools --------------------------------------------------------
 

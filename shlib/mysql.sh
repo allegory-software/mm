@@ -1,4 +1,4 @@
-#use die
+#use die fs
 
 # percona install ------------------------------------------------------------
 
@@ -28,10 +28,11 @@ xbkp() {
 }
 
 xbkp_backup() { # deploy bkp parent_bkp
-	local sv="$(schema_version)"; [ "$sv" ] || sv=0
-	local d="/root/mm-bkp/$1/$sv-$2"
+	local d="/root/mm-bkp/$1/$2"
 	must mkdir -p "$d"
 	must xbkp "$d" --backup --databases="$1" --compress --compress-threads=2
+	du -b "$d" | cut -f1                      # backup size
+	sha1sum "$d"/* | sha1sum | cut -d' ' -f1  # checksum
 }
 
 xbkp_restore() { # deploy bkp
@@ -69,12 +70,6 @@ mysql_table_exists() { # db table
 mysql_column_exists() { # db table column
 	[ "$(query "select 1 from information_schema.columns
 		where table_schema = '$1' and table_name = '$2' and column_name = '$3'")" ]
-}
-
-schema_version() { # deploy
-	mysql_table_exists "$1" config \
-		&& mysql_column_exists "$1" config schema_version \
-		&& query "select schema_version from \`$1\`.config"
 }
 
 mysql_create_user() { # host user pass

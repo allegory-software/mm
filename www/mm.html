@@ -43,8 +43,13 @@ textarea.x-editbox-input[console] {
 		"secret      secret               secret                 secret "
 		"mysql_pass  mysql_pass           mysql_pass             mysql_pass"
 		"ctime       ctime                mtime                  mtime  "
+	;
+}
+
+#mm_deploy_buttons_form.maxcols1 {
+	grid-template-areas:
 		"restart     restart              start                  stop   "
-		"dep         dep                  remdep                 remdep "
+		"dep         dep                  dep                    dep"
 	;
 }
 
@@ -82,52 +87,53 @@ textarea.x-editbox-input[console] {
 					<x-grid label=Deployments id=mm_deploys_grid rowset_name=deploys></x-grid>
 				</x-tabs>
 				<x-split fixed_size=400>
-					<x-tabs>
-						<x-form label="Deploy" id=mm_deploys_form nav_id=mm_deploys_grid grid>
-							<x-input col=deploy           ></x-input>
-							<x-input col=status           ></x-input>
-							<x-input col=machine          ></x-input>
-							<x-input col=app              ></x-input>
-							<x-input col=wanted_version       ></x-input>
-							<x-input col=deployed_version     ></x-input>
-							<x-input col=wanted_sdk_version   ></x-input>
-							<x-input col=deployed_sdk_version ></x-input>
-							<x-input col=env              ></x-input>
-							<x-input col=repo             ></x-input>
-							<x-input col=secret           widget.copy></x-input>
-							<x-input col=mysql_pass       widget.copy></x-input>
-							<x-input col=ctime            ></x-input>
-							<x-input col=mtime            ></x-input>
-
+					<x-vsplit fixed_side=second fixed_size=57 resizeable=false>
+						<x-tabs>
+							<x-form label="Deploy" id=mm_deploys_form nav_id=mm_deploys_grid grid>
+								<x-input col=deploy           ></x-input>
+								<x-input col=status           ></x-input>
+								<x-input col=machine          ></x-input>
+								<x-input col=app              ></x-input>
+								<x-input col=wanted_version       ></x-input>
+								<x-input col=deployed_version     ></x-input>
+								<x-input col=wanted_sdk_version   ></x-input>
+								<x-input col=deployed_sdk_version ></x-input>
+								<x-input col=env              ></x-input>
+								<x-input col=repo             ></x-input>
+								<x-input col=secret           widget.copy></x-input>
+								<x-input col=mysql_pass       widget.copy></x-input>
+								<x-input col=ctime            ></x-input>
+								<x-input col=mtime            ></x-input>
+							</x-form>
+							<x-grid
+								label="Custom Vars"
+								param_nav_id=mm_deploys_grid params=deploy
+								rowset_name=deploy_vars
+							></x-grid>
+						</x-tabs>
+						<x-form id=mm_deploy_buttons_form grid>
 							<x-button icon="fa fa-arrow-rotate-left" area=restart
 								action_name=deploy_restart
-								text="Restart"></x-button>
+								text="Restart"
+							></x-button>
 
 							<x-button icon="fa fa-play" area=start
 								action_name=deploy_start
 								text="Start"
-								style="align-self: bootom"></x-button>
+								style="align-self: bootom"
+							></x-button>
 
 							<x-button icon="fa fa-power-off" area=stop danger
 								action_name=deploy_stop
-								text="Stop"></x-button>
+								text="Stop"
+							></x-button>
 
 							<x-button icon="fa fa-pizza-slice" area=dep
 								action_name=deploy_deploy
-								text="Deploy"></x-button>
-
-							<x-button icon="fa fa-trash" area=remdep danger
-								action_name=deploy_remove
-								text="Remove App"
-								confirm="Are you sure you want to remove the app?"></x-button>
-
+								text="Deploy"
+							></x-button>
 						</x-form>
-						<x-grid
-							label="Custom Vars"
-							param_nav_id=mm_deploys_grid params=deploy
-							rowset_name=deploy_vars
-						></x-grid>
-					</x-tabs>
+					</x-vsplit>
 					<x-tabs>
 						<x-vsplit fixed_side=second label="Live Log">
 							<x-grid
@@ -165,12 +171,32 @@ textarea.x-editbox-input[console] {
 								</x-chart>
 							</div>
 						</x-ct>
-						<x-grid
-							label="Backups"
-							id=mm_backups
-							rowset_name=backups
-							param_nav_id=mm_deploys_grid params=deploy
-						></x-grid>
+						<x-vsplit label="Backups" fixed_side=second fixed_size=29 resizeable=false>
+							<x-grid
+								id=mm_backups
+								rowset_name=backups
+								param_nav_id=mm_deploys_grid params=deploy
+							></x-grid>
+							<x-form>
+								<x-button icon="fa fa-compact-disc"
+									action_name=deploy_backup
+									nav_id=mm_backups
+									text="Backup"
+								></x-button>
+							</x-form>
+						</x-vsplit>
+						<x-form style="max-width: 400px; padding: 0 1em" label="Ops">
+							<h1>Danger Zone</h1>
+							<p>
+								Remove the deployment completely including all its files and database.
+								Backups
+							</p>
+							<x-button icon="fa fa-trash" area=remdep danger
+								action_name=deploy_remove
+								text="Remove App"
+								confirm="Are you sure you want to remove the app?"
+							></x-button>
+						</x-form>
 					</x-tabs>
 				</x-split>
 			</x-split>
