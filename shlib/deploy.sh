@@ -65,11 +65,11 @@ deploy() {
 
 	deploy_setup
 
-	git_clone_for $DEPLOY $REPO /home/$DEPLOY/$APP "$VERSION" &
+	git_clone_for $DEPLOY $REPO /home/$DEPLOY/$APP "$VERSION" app &
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk \
-		/home/$DEPLOY/$APP/sdk "$SDK_VERSION" &
+		/home/$DEPLOY/$APP/sdk "$SDK_VERSION" sdk &
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk-bin-debian10 \

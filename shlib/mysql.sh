@@ -22,29 +22,46 @@ mysql_config() {
 # percona xtrabackup ---------------------------------------------------------
 
 xbkp() {
-	local d="$1"; shift
-	must xtrabackup --target-dir="$d" \
+	local DIR="$1"; shift
+	must xtrabackup --target-dir="$DIR" \
 		--user=root --password="$(cat /root/mysql_root_pass)" $@
 }
 
-xbkp_backup() { # deploy bkp parent_bkp
-	local d="/root/mm-bkp/$1/$2"
+xbkp_backup() { # deploy bkp [parent_bkp]
+	local DEPLOY="$1"
+	local BKP="$2"
+	local PARENT_BKP="$3"
+	checkvars DEPLOY BKP
+	local d="/root/mm-bkp/$DEPLOY/$BKP"
 	must mkdir -p "$d"
-	must xbkp "$d" --backup --databases="$1" --compress --compress-threads=2
+	xbkp "$d" --backup --databases="$DEPLOY" --compress --compress-threads=2
 	du -b "$d" | cut -f1                      # backup size
 	sha1sum "$d"/* | sha1sum | cut -d' ' -f1  # checksum
 }
 
 xbkp_restore() { # deploy bkp
-	local d="/root/mm-bkp/$1/$2"
+	local DEPLOY="$1"
+	local BKP="$2"
+	checkvars DEPLOY BKP
+	local d="/root/mm-bkp/$DEPLOY/$BKO"
 	xbkp "$d" --decompress --parallel --decompress-threads=2
 	xbkp "$d" --prepare --export
 	xbkp "$d" --move-back
 }
 
+xbkp_copy() { # deploy bkp host
+	local DEPLOY="$1"
+	local BKP="$2"
+	local HOST="$3"
+	checkvars DEPLOY BKP HOST
+	rsync_to "$HOST" "/root/mm-bkp/$DEPLOY/$BKP"
+}
+
 xbkp_remove() { # deploy bkp
-	[ "$1" ] || die "deploy missing"
-	rm_subdir "/root/mm-bkp/$1" "$2"
+	local DEPLOY="$1"
+	local BKP="$2"
+	checkvars DEPLOY BKP
+	rm_subdir "/root/mm-bkp/$DEPLOY" "$BKP"
 }
 
 # mysql queries --------------------------------------------------------------

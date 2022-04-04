@@ -54,7 +54,7 @@ ssh_pubkey() { # keyname
 
 ssh_git_keys_update_for_user() { # user
 	local USER="$1"
-	check_vars USER GIT_HOSTS
+	checkvars USER GIT_HOSTS
 	for NAME in $GIT_HOSTS; do
 
 		local HOST=${NAME^^}_HOST
@@ -71,7 +71,7 @@ ssh_git_keys_update_for_user() { # user
 }
 
 ssh_git_keys_update() {
-	check_vars GIT_HOSTS
+	checkvars GIT_HOSTS
 
 	for NAME in $GIT_HOSTS; do
 
@@ -97,4 +97,25 @@ ssh_git_keys_update() {
 		) || exit
 
 	done
+}
+
+rsync_to() { # host dir|file
+	local HOST="$1"
+	local DIR="$2"
+	checkvars HOST DIR KEY HOSTKEY
+	say "Copying $DIR to $HOST..."
+	local p=/root/.scp_clone_dir.p.$$
+	local h=/root/.scp_clone_dir.h.$$
+	trap 'rm -f $p $h' EXIT
+	printf "%s" "$KEY" > $p
+	printf "%s" "$HOSTKEY" > $h
+	KEY=
+	HOSTKEY=
+	must chmod 400 $p $h
+	local O
+	[ "$VERBOSE" ] && O="-v"
+	[ "$DEBUG"   ] && O="-vvvv"
+	must rsync $O -e "ssh -o UserKnownHostsFile=$h -i $p" -aR "$DIR" "root@$HOST:/"
+	rm -f $p $h
+	say "Files copied."
 }

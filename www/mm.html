@@ -37,8 +37,9 @@ textarea.x-editbox-input[console] {
 	grid-template-areas:
 		"deploy      status               status                 machine"
 		"app         app                  env                    env    "
-		"wanted_version    wanted_version   wanted_sdk_version    wanted_sdk_version"
-		"deployed_version  deployed_version deployed_sdk_version  deployed_sdk_version"
+		"wanted_app_version    wanted_app_version   wanted_sdk_version    wanted_sdk_version"
+		"deployed_app_version  deployed_app_version deployed_sdk_version  deployed_sdk_version"
+		"deployed_app_commit   deployed_app_commit  deployed_sdk_commit   deployed_sdk_commit"
 		"repo        repo                 repo                   repo   "
 		"secret      secret               secret                 secret "
 		"mysql_pass  mysql_pass           mysql_pass             mysql_pass"
@@ -94,10 +95,12 @@ textarea.x-editbox-input[console] {
 								<x-input col=status           ></x-input>
 								<x-input col=machine          ></x-input>
 								<x-input col=app              ></x-input>
-								<x-input col=wanted_version       ></x-input>
-								<x-input col=deployed_version     ></x-input>
-								<x-input col=wanted_sdk_version   ></x-input>
-								<x-input col=deployed_sdk_version ></x-input>
+								<x-input col=wanted_app_version    ></x-input>
+								<x-input col=deployed_app_version  ></x-input>
+								<x-input col=wanted_sdk_version    ></x-input>
+								<x-input col=deployed_sdk_version  ></x-input>
+								<x-input col=deployed_app_commit   ></x-input>
+								<x-input col=deployed_sdk_commit   ></x-input>
 								<x-input col=env              ></x-input>
 								<x-input col=repo             ></x-input>
 								<x-input col=secret           widget.copy></x-input>
@@ -149,7 +152,7 @@ textarea.x-editbox-input[console] {
 							param_nav_id=mm_deploys_grid params=deploy
 						>
 						</x-grid>
-						<x-ct label="CPU/RAM">
+						<x-ct label="CPU & RAM">
 							<x-nav
 								id=mm_deploy_procinfo_log
 								rowset_name=deploy_procinfo_log
@@ -159,37 +162,48 @@ textarea.x-editbox-input[console] {
 							<div flex>
 								<x-chart
 									nav_id=mm_deploy_procinfo_log
-									shape=line sum_cols="cpu_user cpu_sys" group_cols=clock/1
+									shape=area sum_cols="cpu_sys cpu" group_cols=clock/1
 									min_sum=0 max_sum=100
 								>
 								</x-chart>
 								<x-chart
 									nav_id=mm_deploy_procinfo_log
-									shape=line sum_cols="ram" group_cols=clock/1
+									shape=area sum_cols="ram" group_cols=clock/1
 									min_sum=0 max_sum=104857600
 								>
 								</x-chart>
 							</div>
 						</x-ct>
-						<x-vsplit label="Backups" fixed_side=second fixed_size=29 resizeable=false>
+						<x-vsplit label="Backups" fixed_side=second>
 							<x-grid
 								id=mm_backups
 								rowset_name=backups
 								param_nav_id=mm_deploys_grid params=deploy
 							></x-grid>
-							<x-form>
-								<x-button icon="fa fa-compact-disc"
-									action_name=deploy_backup
-									nav_id=mm_backups
-									text="Backup"
-								></x-button>
-							</x-form>
+							<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
+								<x-tabs>
+									<x-grid label="Backup Replicas"
+										id=mm_backup_replicas
+										rowset_name=backup_replicas
+										param_nav_id=mm_backups params=bkp
+									></x-grid>
+								</x-tabs>
+								<x-form>
+									<x-button icon="fa fa-compact-disc"
+										action_name=deploy_backup
+										nav_id=mm_backups
+										text="Backup"
+									></x-button>
+								</x-form>
+							</x-vsplit>
 						</x-vsplit>
 						<x-form style="max-width: 400px; padding: 0 1em" label="Ops">
 							<h1>Danger Zone</h1>
 							<p>
-								Remove the deployment completely including all its files and database.
-								Backups
+								Remove the deploy from the machine completely.
+								The deploy remains in the database so the app can be
+								redeployed again on the same machine or on a different one,
+								and the app data can be then restored from a backup.
 							</p>
 							<x-button icon="fa fa-trash" area=remdep danger
 								action_name=deploy_remove

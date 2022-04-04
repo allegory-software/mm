@@ -18,11 +18,12 @@ git_config_user() { # email name
 	must git config --global user.name "$2"
 }
 
-git_clone_for() { # user repo dir version
+git_clone_for() { # user repo dir version label
 	local USER="$1"
 	local REPO="$2"
 	local DIR="$3"
 	local VERSION="$4"
+	local LABEL="$5"
 	checkvars USER REPO DIR
 	[ "$VERSION" ] || VERSION=master
 	say "Pulling $DIR $VERSION..."
@@ -34,6 +35,7 @@ git_clone_for() { # user repo dir version
 	must git remote add origin $REPO
 	must git -c advice.objectNameWarning=false fetch --depth=1 -q origin "$VERSION:refs/remotes/origin/$VERSION"
 	must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"
+	[ "$LABEL" ] && echo "${LABEL}_commit=$(git rev-parse --short HEAD)"
 	) || exit
 	must chown -R $USER:$USER $DIR
 }

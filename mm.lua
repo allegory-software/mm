@@ -1,4 +1,4 @@
---go@ x:\sdk\bin\windows\luajit mm.lua -v run
+--go@ x:\sdk\bin\windows\luajit mm.lua -vv run
 --go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v
 --[[
 
@@ -64,7 +64,7 @@ local function mm_schema()
 		fingerprint , b64key,
 		ssh_key_ok  , bool,
 		admin_page  , url,
-		last_seen   , datetime_s,
+		last_seen   , timeago,
 		os_ver      , name,
 		mysql_ver   , name,
 		cpu         , name,
@@ -82,10 +82,12 @@ local function mm_schema()
 		machine          , strid, not_null, fk,
 		repo             , url, not_null,
 		app              , strid, not_null,
-		wanted_version       , strid,
+		wanted_app_version   , strid,
 		wanted_sdk_version   , strid,
-		deployed_version     , strid,
+		deployed_app_version , strid,
 		deployed_sdk_version , strid,
+		deployed_app_commit  , strid,
+		deployed_sdk_commit  , strid,
 		env              , strid, not_null,
 		secret           , b64key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
@@ -112,16 +114,28 @@ local function mm_schema()
 	tables.bkp = {
 		bkp         , idpk,
 		parent_bkp  , id, child_fk(bkp),
-		deploy      , strid, not_null, child_fk,
-		start_time  , datetime_s,
-		duration    , uint,
-		size        , uint52,
+		deploy      , strid, not_null, fk,
+		app_version , strid,
+		sdk_version , strid,
+		app_commit  , strid,
+		sdk_commit  , strid,
+		start_time  , timeago,
+		duration    , duration,
+		size        , filesize,
 		checksum    , hash,
 		name        , name,
 	}
 
+	tables.bkp_repl = {
+		bkp_repl    , idpk,
+		bkp         , id, not_null, fk,
+		machine     , strid, not_null, fk,
+		start_time  , timeago,
+		duration    , uint,
+	}
+
 	tables.task = {
-		task          , url, pk,
+		task          , url, {type = 'text'}, pk,
 		--running
 		action        , name, not_null,
 		args          , url, --as Lua serialized array
@@ -133,32 +147,10 @@ local function mm_schema()
 		generated_by  , name,
 		editable      , bool1,
 		--log
-		last_run      , datetime,
+		last_run      , timeago,
 		last_duration , double, --in seconds
 		last_status   , strid,
 	}
-
-	--[=[
-
-	query[[
-	$table repl (
-		repl        $pk,
-		deploy      $str,
-		master      $strid not_null, $fk(repl, master, machine),
-		path        $url not_null
-	);
-	]]
-
-	query[[
-	$table repl_copy (
-		repl        $id not_null, $child_fk(repl_copy, repl),
-		machine     $strid not_null, $child_fk(repl, machine),
-		last_sync   timestamp,
-		primary key (repl, machine),
-	);
-	]]
-
-	]=]
 
 end
 
@@ -223,6 +215,7 @@ local cmd_ssh_mounts  = cmdsection'SSH-FS MOUNTS'
 local cmd_mysql       = cmdsection'MYSQL'
 local cmd_machines    = cmdsection'MACHINES'
 local cmd_deployments = cmdsection'DEPLOYMENTS'
+local cmd_backups     = cmdsection'BACKUPS'
 
 --load_opensans()
 mm.schema:import(mm_schema)
@@ -239,10 +232,18 @@ cmd('install [forealz]', 'Install the app', function(doit)
 	say'Install done.'
 end)
 
---web api client -------------------------------------------------------------
+--web api server & client ----------------------------------------------------
+
+mm.api = {} --{action->fn}
+function action.api(action, ...)
+	local action = checkfound(mm.api[action:gsub('-', '_')])
+	checkarg(istab(post()))
+	allow(admin())
+	return action(unpack_json(extend(pack_json(...), post())))
+end
 
 local function api(action, ...)
-	local uri = url{segments = {'', action, ...}}
+	local uri = url{segments = {'', 'api', action}}
 	local ret, res = assert(getpage{
 		host = config'mm_host',
 		uri = uri,
@@ -251,6 +252,9 @@ local function api(action, ...)
 				session = config'session_cookie',
 			},
 		},
+		method = 'POST',
+		upload = pack_json(...),
+		--debug = {protocol = true},
 	})
 	local ct = res.headers['content-type']
 	if ct and ct.media_type == mime_types.json then
@@ -285,8 +289,7 @@ function mm.known_hosts_file(from_db)
 	end
 	return file
 end
-function action.known_hosts()
-	allow(admin())
+function mm.api.known_hosts()
 	setmime'txt'
 	out(load(mm.known_hosts_file(true)))
 end
@@ -301,8 +304,7 @@ function mm.keyfile(machine, from_db, ext)
 	end
 	return file
 end
-function action.keyfile(machine, ext)
-	allow(admin())
+function mm.api.keyfile(machine, ext)
 	local keyfile = mm.keyfile(repl(machine, ''), true, repl(ext, ''))
 	setmime'txt'
 	outfile(keyfile)
@@ -318,26 +320,43 @@ function mm.pubkey(machine)
 	return s:match('^[^%s]+%s+[^%s]+')..' mm'
 end
 
---TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
 function mm.ssh_hostkey(machine)
+	machine = checkarg(str_arg(machine))
+	local key = first_row([[
+		select fingerprint from machine where machine = ?
+	]], machine)
+	return checkfound(key):trim()
+end
+function mm.api.ssh_hostkey(machine)
+	setmime'txt'
+	out(mm.ssh_hostkey(machine))
+end
+cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(machine)
+	print((api('ssh-hostkey', machine)))
+end)
+
+--TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
+function mm.ssh_hostkey_sha(machine)
 	machine = checkarg(str_arg(machine))
 	local key = first_row([[
 		select fingerprint from machine where machine = ?
 	]], machine)
 	local key = checkfound(key):trim()
 	local cmd = {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}
-	local opt = {stdin = key, task = 'ssh_hostkey '..machine,
+	local opt = {
+		stdin = key,
+		task = 'ssh_hostkey_sha '..machine, keyed = false,
 		capture_stderr = false,
-		action = 'ssh_hostkey', args = {'machine'}, keyed = false}
-	return mm.exec(cmd, opt):stdout():trim():match'%s([^%s]+)'
+		action = 'ssh_hostkey_sha', args = {'machine'},
+	}
+	return (mm.exec(cmd, opt):stdout():trim():match'%s([^%s]+)')
 end
-function action.ssh_hostkey(machine)
-	allow(admin())
+function mm.api.ssh_hostkey_sha(machine)
 	setmime'txt'
-	out(mm.ssh_hostkey(machine))
+	out(mm.ssh_hostkey_sha(machine))
 end
-cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(machine)
-	print(api('ssh-hostkey', machine))
+cmd_ssh_keys('ssh-hostkey-sha MACHINE', 'Show a SSH host key SHA', function(machine)
+	print((api('ssh-hostkey-sha', machine)))
 end)
 
 --run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
@@ -374,13 +393,12 @@ function mm.mysql_root_pass(machine) --last line of the private key
 	assert(#s == 32)
 	return s
 end
-function action.mysql_root_pass(machine)
-	allow(admin())
+function mm.api.mysql_root_pass(machine)
 	setmime'txt'
 	out(mm.mysql_root_pass(machine))
 end
 cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(machine)
-	print(api('mysql-root-pass', machine))
+	print((api('mysql-root-pass', machine)))
 end)
 
 local function deploy_vars(deploy)
@@ -394,7 +412,7 @@ local function deploy_vars(deploy)
 			d.machine,
 			d.repo,
 			d.app,
-			coalesce(d.wanted_version, '') version,
+			coalesce(d.wanted_app_version, '') app_version,
 			coalesce(d.wanted_sdk_version, '') sdk_version,
 			coalesce(d.env, 'dev') env,
 			d.deploy mysql_db,
@@ -443,9 +461,6 @@ rowset.providers = sql_rowset{
 			provider
 	]],
 	pk = 'provider',
-	field_attrs = {
-		website = {type = 'url'},
-	},
 	insert_row = function(self, row)
 		self:insert_into('provider', row, 'provider website note pos')
 	end,
@@ -488,7 +503,7 @@ rowset.machines = sql_rowset{
 	field_attrs = {
 		public_ip   = {text = 'Public IP Address'},
 		local_ip    = {text = 'Local IP Address', hidden = true},
-		admin_page  = {type = 'url', text = 'VPS admin page of this machine'},
+		admin_page  = {text = 'VPS admin page of this machine'},
 		ssh_key_ok  = {readonly = true, text = 'SSH key is up-to-date'},
 		last_seen   = {readonly = true},
 		cpu         = {readonly = true, text = 'CPU'},
@@ -542,10 +557,8 @@ rowset.deploys = sql_rowset{
 			'' as status,
 			machine,
 			app,
-			wanted_version,
-			deployed_version,
-			wanted_sdk_version,
-			deployed_sdk_version,
+			wanted_app_version, deployed_app_version, deployed_app_commit,
+			wanted_sdk_version, deployed_sdk_version, deployed_sdk_commit,
 			env,
 			repo,
 			secret,
@@ -568,15 +581,21 @@ rowset.deploys = sql_rowset{
 			end,
 		},
 	},
-	ro_cols = 'secret mysql_pass deployed_version deployed_sdk_version',
+	ro_cols = [[
+		secret mysql_pass
+		deployed_app_version
+		deployed_sdk_version
+		deployed_app_commit
+		deployed_sdk_commit
+	]],
 	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
 		row.secret = b64(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
- 		self:insert_into('deploy', row, 'deploy machine repo app wanted_version env secret mysql_pass pos')
+ 		self:insert_into('deploy', row, 'deploy machine repo app wanted_app_version env secret mysql_pass pos')
 	end,
 	update_row = function(self, row)
-		self:update_into('deploy', row, 'deploy machine repo app wanted_version env pos')
+		self:update_into('deploy', row, 'deploy machine repo app wanted_app_version env pos')
 	end,
 	delete_row = function(self, row)
 		self:delete_from('deploy', row)
@@ -630,8 +649,7 @@ function mm.exec(cmd, opt)
 
 	opt = opt or empty
 
-	local task, err = mm.task(update({cmd = cmd}, opt))
-	if not task then return nil, err end
+	local task = mm.task(update({cmd = cmd}, opt))
 
 	local webb_cx = cx() and not cx().fake
 	local capture_stdout = opt.capture_stdout ~= false or webb_cx
@@ -661,7 +679,7 @@ function mm.exec(cmd, opt)
 				if not ok then
 					task:logerror('stdinwr', '%s', err)
 				end
-				p.stdin:close() --signal eof
+				assert(p.stdin:close()) --signal eof
 			end, 'exec-stdin %s', p))
 		end
 
@@ -731,7 +749,6 @@ function mm.exec(cmd, opt)
 		end, 'exec-linger %s', p))
 	end
 
-	pr(task:stderr())
 	check500(#task.errors == 0, cat(task.errors, '\n'))
 	check500(task.exit_code == 0, 'Task finished with exit code %d', task.exit_code)
 
@@ -749,8 +766,7 @@ function mm.ip(md, from_db)
 	local ip = first_row('select public_ip from machine where machine = ?', m)
 	return checkfound(ip, 'machine not found'), m
 end
-function action.ip(machine)
-	allow(admin())
+function mm.api.ip(machine)
 	out_json{mm.ip(machine, true)}
 end
 cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
@@ -865,11 +881,14 @@ local task_events_thread
 
 local task = {}
 
+function mm.running_task(task)
+	local task = mm.tasks_by_strid[task]
+	return task and (task.status == 'new' or task.status == 'running') and task or nil
+end
+
 function mm.task(opt)
-	local self = opt.task and opt.keyed ~= false and mm.tasks_by_strid[opt.task]
-	if self and self.status == 'running' then
-		return nil, self
-	end
+	check500(not mm.running_task(opt.keyed ~= false and opt.task),
+		'task already running: %s', opt.task)
 	last_task_id = last_task_id + 1
 	local self = object(task, opt, {
 		id = last_task_id,
@@ -1146,9 +1165,11 @@ local function run_tasks()
 		if dt <= (run_every or 0) / 2 then --up-to half-interval late
 			local target_time = now - dt
 			if (last_run or -1/0) < target_time then --not already run
-				local armed = run_every and true or false
-				update_row('task', {task, last_run = now, armed = armed})
-				run_task(action, args)
+				if not mm.running_task(task) then
+					local armed = run_every and true or false
+					update_row('task', {task, last_run = now, armed = armed})
+					run_task(action, args)
+				end
 			end
 		end
 	end
@@ -1156,20 +1177,9 @@ end
 
 --listings -------------------------------------------------------------------
 
-local mysql = require'mysql'
-local function timeago(s)
-	--NOTE: this only works if both the MySQL server and the app server have
-	--the same timezone. The correct way is to get the date in UTC.
-	return glue.timeago(false, mysql.datetime_to_timestamp(s))
-end
-
-function action.machines()
-	allow(admin())
+function mm.api.machines()
 	outpqr(query({
 		compact=1,
-		field_attrs = {
-			last_seen = {mysql_to_lua = timeago},
-		},
 	}, [[
 		select
 			machine,
@@ -1188,22 +1198,22 @@ function action.machines()
 end
 cmd_machines('m|machines', 'Show the list of machines',
 	function()
-		out(api'machines')
+		out((api'machines'))
 	end)
 
-function action.deploys()
+function mm.api.deploys()
 	allow(admin())
 	outpqr(query({
 		compact=1,
-		field_attrs = {},
 	}, [[
 		select
 			deploy,
 			machine,
 			repo,
 			app,
-			wanted_version,
-			deployed_version,
+			wanted_app_version,
+			deployed_app_version,
+			deployed_app_commit,
 			env,
 			ctime
 		from deploy
@@ -1212,10 +1222,36 @@ function action.deploys()
 end
 cmd_deployments('d|deploys', 'Show the list of deployments',
 	function()
-		out(api'deploys')
+		out((api'deploys'))
 	end)
 
---command: machine-info-update -----------------------------------------------
+function mm.api.backups(deploy)
+	outpqr(query({
+		compact=1,
+	}, [[
+		select
+			b.bkp,
+			b.deploy,
+			b.start_time,
+			b.name,
+			b.size,
+			b.duration,
+			r.bkp_repl,
+			r.machine,
+			r.start_time,
+			r.duration
+		from bkp b
+		left join bkp_repl r on r.bkp = b.bkp
+		where deploy = ?
+		order by bkp
+	]], deploy))
+end
+cmd_backups('b|backups DEPLOY', 'Show the list of backups',
+	function(...)
+		out((api('backups', ...)))
+	end)
+
+--command: machine-info ------------------------------------------------------
 
 function mm.machine_info(machine)
 	local stdout = mm.ssh_sh(machine, [=[
@@ -1260,8 +1296,7 @@ function mm.machine_info(machine)
 	return t
 end
 
-function action.machine_info(machine)
-	allow(admin())
+function mm.api.machine_info(machine)
 	local t = mm.machine_info(machine)
 	for i,k in ipairs(t) do
 		outprint(_('%20s %s', k, t[k]))
@@ -1269,7 +1304,7 @@ function action.machine_info(machine)
 end
 cmd_machines('machine-info MACHINE', 'Show machine info',
 	function(machine)
-		out(api('machine-info', machine))
+		out((api('machine-info', machine)))
 	end)
 
 --command: ssh-hostkey-update ------------------------------------------------
@@ -1288,17 +1323,18 @@ function mm.gen_known_hosts_file()
 end
 
 function mm.ssh_hostkey_update(machine)
-	local cmd = {sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', (mm.ip(machine, true))}
-	local opt = {task = 'ssh_hostkey_update '..machine,
-		action = 'ssh_hostkey_update', args = {'machine'}}
-	local task, err = mm.exec(cmd, opt)
-	if not task then return nil, err end
+	local ip, machine = mm.ip(machine, true)
+	local cmd = {sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', ip}
+	local opt = {
+		task = 'ssh_hostkey_update '..machine,
+		action = 'ssh_hostkey_update', args = {'machine'},
+	}
+	local task = mm.exec(cmd, opt)
 	local fp = task:stdout()
 	assert(update_row('machine', {machine, fingerprint = fp}).affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
-function action.ssh_hostkey_update(machine)
-	allow(admin())
+function mm.api.ssh_hostkey_update(machine)
 	mm.ssh_hostkey_update(machine)
 	out_json{machine = machine, notify = 'Host fingerprint updated for '..machine}
 end
@@ -1319,8 +1355,7 @@ function mm.ssh_key_gen()
 	query'update machine set ssh_key_ok = 0'
 	rowset_changed'machines'
 end
-function action.ssh_key_gen()
-	allow(admin())
+function mm.api.ssh_key_gen()
 	mm.ssh_key_gen()
 	out_json{notify = 'SSH key generated'}
 end
@@ -1331,13 +1366,12 @@ end)
 --command: pubkey ------------------------------------------------------------
 
 --for manual updating via `curl mm.allegory.ro/pubkey/MACHINE >> authroized_keys`.
-function action.ssh_pubkey(machine)
-	allow(admin())
+function mm.api.ssh_pubkey(machine)
 	setmime'txt'
 	out(mm.pubkey(machine))
 end
 cmd_ssh_keys('ssh-pubkey [MACHINE]', 'Show a SSH public key', function(machine)
-	print(api('ssh-pubkey', machine))
+	print((api('ssh-pubkey', machine)))
 end)
 
 --command: ssh-key-update ----------------------------------------------------
@@ -1382,8 +1416,7 @@ function mm.ssh_key_update(machine)
 
 	return true
 end
-function action.ssh_key_update(machine)
-	allow(admin())
+function mm.api.ssh_key_update(machine)
 	check500(mm.ssh_key_update(machine))
 	out_json{machine = machine,
 		notify = machine
@@ -1402,8 +1435,7 @@ function mm.ssh_key_check(machine)
 	]], nil, {task = 'ssh_key_check '..machine}):stdout():trim()
 	return host_pubkey == mm.pubkey()
 end
-function action.ssh_key_check(machine)
-	allow(admin())
+function mm.api.ssh_key_check(machine)
 	local ok = mm.ssh_key_check(machine)
 	update_row('machine', {ssh_key_ok = ok, ['machine:old'] = machine}, 'ssh_key_ok')
 	rowset_changed'machines'
@@ -1437,8 +1469,7 @@ function mm.git_keys_update(machine)
 		ssh_git_keys_update
 	]=], vars, {task = 'git_keys_update '..machine})
 end
-function action.git_keys_update(machine)
-	allow(admin())
+function mm.api.git_keys_update(machine)
 	if not machine then
 		mm.each_machine(function(machine)
 			mm.git_keys_update(machine)
@@ -1464,8 +1495,7 @@ function mm.machine_prepare(machine)
 	]=], vars, {task = 'machine_prepare '..machine})
 end
 
-function action.machine_prepare(machine)
-	allow(admin())
+function mm.api.machine_prepare(machine)
 	mm.machine_prepare(machine)
 	out_json{machine = machine, notify = 'Machine prepared: '..machine}
 end
@@ -1478,14 +1508,22 @@ end)
 function mm.deploy(deploy)
 	local vars = deploy_vars(deploy)
 	update(vars, git_hosting_vars())
-	mm.ssh_sh(vars.MACHINE, [[
+	local task, err = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		deploy
 	]], vars, {task = 'deploy '..deploy})
-	update_row('deploy', {vars.DEPLOY, deployed_version = vars.VERSION})
+	if not task then return nil, err end
+	local s = task:stdout()
+	local app_commit = s:match'app_commit=([^%s]+)'
+	local sdk_commit = s:match'sdk_commit=([^%s]+)'
+	update_row('deploy', {
+		vars.DEPLOY,
+		deployed_app_version = vars.VERSION,
+		deployed_app_commit = app_commit,
+		deployed_sdk_commit = sdk_commit
+	})
 end
-function action.deploy(deploy)
-	allow(admin())
+function mm.api.deploy(deploy)
 	mm.deploy(deploy)
 	out_json{deploy = deploy, notify = 'Deployed: '..deploy}
 end
@@ -1494,6 +1532,7 @@ cmd_deployments('deploy DEPLOY', 'Deploy an app', function(deploy)
 end)
 
 function mm.deploy_remove(deploy)
+
 	local vars = deploy_vars(deploy)
 	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
@@ -1502,9 +1541,16 @@ function mm.deploy_remove(deploy)
 		DEPLOY = vars.DEPLOY,
 		APP = vars.APP,
 	}, {task = 'deploy_remove '..deploy})
+
+	update_row('deploy', {
+		vars.DEPLOY,
+		deployed_app_version = null,
+		deployed_sdk_version = null,
+		deployed_app_commit = null,
+		deployed_sdk_commit = null,
+	})
 end
-function action.deploy_remove(deploy)
-	allow(admin())
+function mm.api.deploy_remove(deploy)
 	mm.deploy_remove(deploy)
 	out_json{deploy = deploy, notify = 'Deploy removed: '..deploy}
 end
@@ -1537,16 +1583,10 @@ mm.deploy_stop    = app_cmd('stop'   , 'App stopped')
 mm.deploy_restart = app_cmd('restart', 'App restarted')
 mm.deploy_status  = app_cmd('status')
 
-local function admin_action(f, ...)
-	return function(...)
-		allow(admin())
-		return f(...)
-	end
-end
-action.deploy_start   = admin_action(mm.deploy_start)
-action.deploy_stop    = admin_action(mm.deploy_stop)
-action.deploy_restart = admin_action(mm.deploy_restart)
-action.deploy_status  = admin_action(mm.deploy_status)
+mm.api.deploy_start   = mm.deploy_start
+mm.api.deploy_stop    = mm.deploy_stop
+mm.api.deploy_restart = mm.deploy_restart
+mm.api.deploy_status  = mm.deploy_status
 
 --TODO:
 --cmd_deployments('deploy-run     DEPLOY ...', 'Run a deployed app', mm.deploy_run)
@@ -1597,15 +1637,8 @@ end
 function mm.log_server(machine)
 	machine = checkarg(str_arg(machine))
 	local lport = mm.logport(machine)
-	resume(thread(function()
-		mm.rtunnel(machine, lport..':'..mm.log_port, {
-			persistent = true,
-			run_every = 0,
-			generated_by = 'log_server',
-			editable = false,
-		})
-	end, 'log-server-rtunnel %s', machine))
-	local task, err = mm.task({
+
+	local task = mm.task({
 		task = 'log_server '..machine,
 		action = 'log_server', args = {machine},
 		machine = machine,
@@ -1614,7 +1647,14 @@ function mm.log_server(machine)
 		generated_by = 'log_server',
 		editable = false,
 	})
-	if not task then return nil, err end
+
+	resume(thread(function()
+		mm.rtunnel(machine, lport..':'..mm.log_port, {
+			run_every = 0,
+			generated_by = 'log_server',
+			editable = false,
+		})
+	end, 'log-server-rtunnel %s', machine))
 
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
 		log_server_chan[machine] = chan
@@ -1662,13 +1702,13 @@ function mm.log_server(machine)
 	task:setstatus'running'
 end
 
+mm.api.log_server = mm.log_server
+
 function mm.log_server_rpc(machine, cmd, ...)
 	local chan = log_server_chan[machine]
 	if not chan then return end
 	chan:send(pack(cmd, ...))
 end
-
-action.log_server = admin_action(mm.log_server)
 
 rowset.deploy_log = virtual_rowset(function(self)
 	self.allow = 'admin'
@@ -1736,8 +1776,8 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.fields = {
 		{name = 'deploy'},
 		{name = 'clock'},
-		{name = 'cpu_user' , type = 'number'   , text = 'CPU user'},
-		{name = 'cpu_sys'  , type = 'number'   , text = 'CPU sys'},
+		{name = 'cpu'      , type = 'number'   , text = 'CPU'},
+		{name = 'cpu_sys'  , type = 'number'   , text = 'CPU (kernel)'},
 		{name = 'ram'      , type = 'filesize' , text = 'RAM'},
 	}
 	self.pk = ''
@@ -1757,7 +1797,7 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 							local dt = (t.clock - clock0)
 							local up = (t.utime - utime0) / dt * 100
 							local sp = (t.stime - stime0) / dt * 100
-							add(rs.rows, {deploy, i, up, sp, t.rss})
+							add(rs.rows, {deploy, i, up + sp, up, t.rss})
 							utime0 = t.utime
 							stime0 = t.stime
 							clock0 = t.clock
@@ -1780,7 +1820,7 @@ rowset.backups = sql_rowset{
 			b.bkp        ,
 			b.parent_bkp ,
 			b.deploy     ,
-			unix_timestamp(b.start_time) start_time,
+			b.start_time ,
 			b.name       ,
 			b.size       ,
 			b.duration   ,
@@ -1789,44 +1829,68 @@ rowset.backups = sql_rowset{
 	]],
 	where_all = 'b.deploy in (:param:filter)',
 	pk = 'bkp',
-	field_attrs = {
-		start_time = {type = 'timestamp'},
-		size       = {type = 'filesize'},
-		duration   = {type = 'duration'},
-	},
 	parent_col = 'parent_bkp',
 	update_row = function(self, row)
 		self:update_into('bkp', row, 'name')
 	end,
 	delete_row = function(self, row)
-		local bkp = row['bkp:old']
-		local deploy = checkarg((first_row('select deploy from bkp where bkp = ?', bkp)))
- 		local machine = checkarg((first_row('select machine from deploy where deploy = ?', deploy)))
-		mm.ssh_sh(machine, [[
-			#use mysql
-			must xbkp_remove "$deploy" "$bkp"
-		]], {deploy = deploy, bkp = bkp}, {
-			task = 'backup_remove '..bkp,
-		})
 		self:delete_from('bkp', row)
 	end,
 }
 
-function mm.xbkp_backup(deploy, parent_bkp, name)
-	local row = {}
-	local machine = checkarg(first_row('select machine from deploy where deploy = ?', deploy), 'Invalid deploy')
+rowset.backup_replicas = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			bkp_repl,
+			bkp,
+			machine,
+			start_time,
+			duration
+		from
+			bkp_repl
+	]],
+	pk = 'bkp_repl',
+	where_all = 'bkp in (:param:filter)',
+	pk = 'bkp_repl',
+	delete_row = function(self, row)
+		mm.backup_remove(row.bkp_repl)
+	end,
+}
+
+function mm.backup(deploy, parent_bkp, name)
+
+	deploy = checkarg(str_arg(deploy))
+	parent_bkp = parent_bkp and checkarg(id_arg(parent_bkp))
+
+	local d = first_row([[
+		select
+			machine,
+			deployed_app_version , deployed_sdk_version,
+			deployed_app_commit  , deployed_sdk_commit
+		from deploy where deploy = ?
+	]], deploy)
+	checkfound(d)
+
+	local task_name = 'backup '..deploy..(parent_bkp and ' '..parent_bkp or '')
+	check500(not mm.running_task(task_name), 'task already running')
+
 	local start_time = time()
 
 	local bkp = insert_row('bkp', {
 		parent_bkp = parent_bkp,
 		deploy = deploy,
+		app_version = d.app_version,
+		sdk_version = d.sdk_version,
+		app_commit  = d.app_commit,
+		sdk_commit  = d.sdk_commit,
 		name = name,
 		start_time = start_time,
 	}, 'parent_bkp deploy name start_time')
 
 	rowset_changed'backups'
 
-	local task, err = mm.ssh_sh(machine, [[
+	local task = mm.ssh_sh(d.machine, [[
 		#use mysql
 		xbkp_backup "$deploy" "$bkp" "$parent_bkp"
 	]], {
@@ -1834,27 +1898,117 @@ function mm.xbkp_backup(deploy, parent_bkp, name)
 		bkp = bkp,
 		parent_bkp = parent_bkp,
 	}, {
-		task = 'xbkp_backup '..deploy..(parent_bkp and ' '..parent_bkp or ''),
+		task = task_name,
 	})
-	if not task then return nil, err end
 
 	local s = task:stdout()
 	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
-	update_row('bkp', {bkp,
-		duration = time() - start_time,
+	update_row('bkp', {
+		bkp,
+		duration = task.duration,
 		size = tonumber(size),
 		checksum = checksum,
 	})
 
 	rowset_changed'backups'
+
+	insert_row('bkp_repl', {
+		bkp = bkp,
+		machine = d.machine,
+		start_time = start_time,
+		duration = 0,
+	})
+
+	rowset_changed'backup_replicas'
 end
-action.xbkp_backup = function(deploy, ...)
-	allow(admin())
-	mm.xbkp_backup(deploy, ...)
+function mm.api.backup(deploy, ...)
+	mm.backup(deploy, ...)
 	out_json{deploy = deploy, notify = 'Backup done for '..deploy}
 end
-cmd_mysql('xbkp-backup DEPLOY [PARENT_BKP] [NAME]', 'Perform xtrabackup', function(...)
-	api('xbkp-backup', ...)
+cmd_backups('backup DEPLOY [PARENT_BKP] [NAME]', 'Backup a database', function(...)
+	api('backup', ...)
+end)
+
+local function rsync_vars(machine)
+	return {
+		HOST = mm.ip(machine, true),
+		KEY = load(mm.keyfile(machine)),
+		HOSTKEY = mm.ssh_hostkey(machine),
+	}
+end
+
+local function bkp_repl_info(bkp_repl)
+	bkp_repl = checkarg(id_arg(bkp_repl))
+	return first_row([[
+		select r.bkp, r.machine, b.deploy
+		from bkp_repl r
+		inner join bkp b on r.bkp = b.bkp
+		where bkp_repl = ?
+	]], bkp_repl)
+end
+
+function mm.backup_copy(src_bkp_repl, machine)
+
+	machine = checkarg(str_arg(machine))
+	local r = bkp_repl_info(src_bkp_repl)
+
+	local bkp_repl = insert_row('bkp_repl', {
+		bkp = r.bkp,
+		machine = machine,
+		start_time = time(),
+	})
+
+	checkarg(machine ~= r.machine, 'Choose a different machine to copy the backup to.')
+
+	local task = mm.ssh_sh(r.machine, [[
+		#use mysql ssh
+		xbkp_copy "$DEPLOY" "$BKP" "$HOST"
+	]], update({
+		DEPLOY = r.deploy,
+		BKP = r.bkp,
+	}, rsync_vars(machine)), {
+		task = 'backup_copy '..src_bkp_repl..' '..machine,
+	})
+
+	update_row('bkp_repl', {
+		bkp_repl,
+		duration = task.duration,
+	})
+
+	rowset_changed'backup_replicas'
+end
+function mm.api.backup_copy(...)
+	mm.backup_copy(...)
+	out_json{notify = 'Backup copied'}
+end
+cmd_backups('backup-copy BKP_REPL HOST', 'Replicate a backup', function(...)
+	api('backup-copy', ...)
+end)
+
+function mm.backup_remove(bkp_repl)
+
+	local r = bkp_repl_info(bkp_repl)
+
+	local task = mm.ssh_sh(r.machine, [[
+		#use mysql
+		xbkp_remove "$DEPLOY" "$BKP"
+	]], {
+		DEPLOY = r.deploy,
+		BKP = r.bkp,
+	}, {
+		task = 'backup_remove '..bkp_repl,
+	})
+
+	remove_row('bkp_repl', {bkp_repl})
+
+	rowset_changed'backup_replicas'
+end
+function mm.api.backup_remove(...)
+	mm.backup_remove(...)
+	out_json{notify = 'Backup removed'}
+end
+cmd_backups('backup-remove BKP_REPL', 'Remove backup copy', function(...)
+	api('backup-remove', ...)
 end)
 
 --remote access tools --------------------------------------------------------
@@ -2005,7 +2159,27 @@ cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	end
 end)
 
+function mm.rsync(dir, machine1, machine2)
+	mm.ssh_sh(machine1, [[
+		#use ssh
+		rsync_to "$HOST" "$DIR"
+		]],
+		update({DIR = dir}, rsync_vars(machine2)))
+end
+
+function mm.api.rsync(...)
+	mm.rsync(...)
+	out_json{notify = 'Files copied'}
+end
+
+cmd_ssh_mounts('rsync DIR MACHINE1 MACHINE2', 'Copy files between machines', function(...)
+	api('rsync', ...)
+end)
+
+------------------------------------------------------------------------------
+
 function action.live()
+	allow(admin())
 	setmime'txt'
 	logging.printlive(outprint)
 end
@@ -2013,17 +2187,18 @@ end
 local run_server = mm.run_server
 function mm:run_server()
 
+	if false then
 	runevery(1, function()
 		if update_deploy_live_state() then
 			rowset_changed'deploys'
 		end
 	end, 'rowset-changed-deploys-every-second')
+	end
 
-	runafter(0, run_tasks, 'run-tasks-first-time')
-	runevery(60, run_tasks, 'run-tasks-every-60s')
+	--runafter(0, run_tasks, 'run-tasks-first-time')
+	--runevery(60, run_tasks, 'run-tasks-every-60s')
 
 	run_server(self)
 end
 
-logging.debug = false
 return mm:run(...)

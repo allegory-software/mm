@@ -5,7 +5,7 @@ rowset_field_attrs['machines.refresh'] = {
 	w: 40,
 	button_options: {icon: 'fas fa fa-sync', bare: true, text: '', load_spin: true},
 	action: function(machine) {
-		this.load(['', 'machine-info-update', machine])
+		this.post('/api/machine-info', [machine])
 	},
 }
 
@@ -17,11 +17,6 @@ on('mm_task_out_textarea.init', function(e) {
 			te.scroll(0, te.scrollHeight)
 	})
 })
-
-function check_notify(t) {
-	if (t.notify)
-		notify(t.notify, t.notify_kind || 'info')
-}
 
 // machines grid context menu items.
 on('mm_machines_grid.init', function(e) {
@@ -48,7 +43,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'ssh-hostkey-update', machine], check_notify)
+					post('/api/ssh-hostkey-update', [machine])
 			},
 		})
 
@@ -56,7 +51,8 @@ on('mm_machines_grid.init', function(e) {
 			text: 'Update key',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
-				if (machine)get(['', 'ssh-key-update', machine], check_notify)
+				if (machine)
+					post('/api/ssh-key-update', [machine])
 			},
 		})
 
@@ -64,7 +60,8 @@ on('mm_machines_grid.init', function(e) {
 			text: 'Check key',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
-				if (machine)get(['', 'ssh-key-check', machine], check_notify)
+				if (machine)
+					post('/api/ssh-key-check', [machine])
 			},
 		})
 
@@ -73,7 +70,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'machine-prepare', machine], check_notify)
+					post('/api/machine-prepare', [machine])
 			},
 		})
 
@@ -82,7 +79,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'git-keys-update', machine], check_notify)
+					post('/api/git-keys-update', [machine])
 			},
 		})
 
@@ -91,16 +88,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					get(['', 'log-server', machine], check_notify)
-			},
-		})
-
-		items.push({
-			text: 'Test log server',
-			action: function() {
-				let machine = e.focused_row_cell_val('machine')
-				if (machine)
-					get(['', 'testlog', machine], check_notify)
+					post('/api/log-server', [machine])
 			},
 		})
 
@@ -109,16 +97,16 @@ on('mm_machines_grid.init', function(e) {
 })
 
 function ssh_key_gen() {
-	this.load(['', 'ssh-key-gen'], check_notify)
+	this.post('/api/ssh-key-gen')
 }
 
 function ssh_key_updates() {
-	this.load(['', 'ssh-key-update'], check_notify)
+	this.post('/api/ssh-key-update')
 }
 
 function deploy_action(btn, action) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
-	btn.load(['', action, deploy], check_notify)
+	btn.post(['', 'api', action], [deploy])
 }
 function deploy_start   () { deploy_action(this, 'deploy-start') }
 function deploy_stop    () { deploy_action(this, 'deploy-stop') }
@@ -127,5 +115,5 @@ function deploy_deploy  () { deploy_action(this, 'deploy') }
 function deploy_remove  () { deploy_action(this, 'deploy-remove') }
 
 function deploy_backup() {
-	this.load(['', 'xbkp-backup', this.val('deploy')], check_notify)
+	this.post('/api/xbkp-backup', [this.val('deploy')])
 }
