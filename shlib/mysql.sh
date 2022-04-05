@@ -23,8 +23,7 @@ mysql_config() {
 
 xbkp() {
 	local DIR="$1"; shift
-	must xtrabackup --target-dir="$DIR" \
-		--user=root --password="$(cat /root/mysql_root_pass)" $@
+	must xtrabackup --target-dir="$DIR" --user=root $@ # password read from ~/.my.cnf
 }
 
 xbkp_backup() { # deploy bkp [parent_bkp]
@@ -69,8 +68,8 @@ xbkp_remove() { # deploy bkp
 has_mysql() { which mysql >/dev/null; }
 
 query() {
-	if [ -f /root/mysql_root_pass ]; then
-		MYSQL_PWD="$(cat /root/mysql_root_pass)" must mysql -N -B -h 127.0.0.1 -u root -e "$1"
+	if [ -f /root/.my.cnf ]; then
+		must mysql -N -B -h localhost -u root -e "$1"
 	else
 		# on a fresh mysql install we can login from the `root` system user
 		# as mysql user `root` without a password because the default auth
@@ -112,8 +111,11 @@ mysql_update_pass() { # host user pass
 
 mysql_update_root_pass() { # pass
 	mysql_update_pass localhost root "$1"
-	must echo -n "$1" > /root/mysql_root_pass
-	must chmod 600 /root/mysql_root_pass
+	must cat > /root/.my.cnf <<-EOF
+		[client]
+		password=$1
+	EOF
+	must chmod 600 /root/.my.cnf
 }
 
 mysql_create_db() { # db

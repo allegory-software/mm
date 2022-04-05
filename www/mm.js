@@ -5,7 +5,7 @@ rowset_field_attrs['machines.refresh'] = {
 	w: 40,
 	button_options: {icon: 'fas fa fa-sync', bare: true, text: '', load_spin: true},
 	action: function(machine) {
-		this.post('/api/machine-info', [machine])
+		this.post('/api/update-machine-info', [machine])
 	},
 }
 

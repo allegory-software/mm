@@ -67,6 +67,8 @@ local function mm_schema()
 		last_seen   , timeago,
 		os_ver      , name,
 		mysql_ver   , name,
+		mysql_local_port , uint16,
+		log_local_port   , uint16,
 		cpu         , name,
 		cores       , uint16,
 		ram_gb      , double,
@@ -131,7 +133,7 @@ local function mm_schema()
 		bkp         , id, not_null, fk,
 		machine     , strid, not_null, fk,
 		start_time  , timeago,
-		duration    , uint,
+		duration    , duration,
 	}
 
 	tables.task = {
@@ -172,8 +174,6 @@ local mess = require'mess'
 
 mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 mm.sshdir   = mm.bindir
-
-mm.use_plink = false
 
 mm.git_hosting = {
 	github = {
@@ -244,7 +244,7 @@ end
 
 local function api(action, ...)
 	local uri = url{segments = {'', 'api', action}}
-	local ret, res = assert(getpage{
+	local ret, res = getpage{
 		host = config'mm_host',
 		uri = uri,
 		headers = {
@@ -255,14 +255,19 @@ local function api(action, ...)
 		method = 'POST',
 		upload = pack_json(...),
 		--debug = {protocol = true},
-	})
-	local ct = res.headers['content-type']
-	if ct and ct.media_type == mime_types.json then
-		if ret.error then
+	}
+	if ret == nil then
+		die('HTTP error: %s', res)
+	elseif res.status ~= 200 then
+		if istab(ret) and ret.error then
 			die(ret.error)
-		elseif ret.notify then
-			say(ret.notify)
+		else
+			die('HTTP %d%s%s', res.status,
+				res.status_message and ': '..res.status_message or '',
+				ret and '\n\n'..logargs(ret) or '')
 		end
+	elseif istab(ret) and ret.notify then
+		say(ret.notify)
 	end
 	return ret, res
 end
@@ -280,6 +285,55 @@ end
 local function from_server(from_db)
 	return not from_db and mm.conf.mm_host and not mm.server_running
 end
+
+function mm.machine(machine, from_db)
+	if from_server(from_db) then
+		return api('machine-info', machine)
+	end
+	local m = first_row([[
+		select
+			machine,
+			mysql_local_port
+		from machine where machine = ?
+	]], machine)
+	return checkfound(m, 'machine not found')
+end
+function mm.api.machine(machine)
+	out_json(mm.machine(machine, true))
+end
+
+function mm.deploy(deploy, from_db)
+	if from_server(from_db) then
+		return api('deploy-info', deploy)
+	end
+	local d = first_row([[
+		select
+			deploy,
+			mysql_pass
+		from deploy where deploy = ?
+	]], deploy)
+	return checkfound(d, 'deploy not found')
+end
+function mm.api.deploy_info(deploy)
+	out_json(mm.deploy(deploy, true))
+end
+
+function mm.ip(md, from_db)
+	if from_server(from_db) then
+		return unpack((api('ip', md)))
+	end
+	local md = checkarg(str_arg(md), 'machine or deploy required')
+	local m = first_row('select machine from deploy where deploy = ?', md) or md
+	local ip = first_row('select public_ip from machine where machine = ?', m)
+	return checkfound(ip, 'machine not found'), m
+end
+function mm.api.ip(machine)
+	out_json{mm.ip(machine, true)}
+end
+cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
+	function(machine)
+		print(api('ip', machine)[1])
+	end)
 
 function mm.known_hosts_file(from_db)
 	local file = indir(mm.vardir, 'known_hosts')
@@ -335,7 +389,6 @@ cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(machine)
 	print((api('ssh-hostkey', machine)))
 end)
 
---TODO: `plink -hostkey` doesn't work when the server has multiple fingerprints.
 function mm.ssh_hostkey_sha(machine)
 	machine = checkarg(str_arg(machine))
 	local key = first_row([[
@@ -387,7 +440,10 @@ end
 cmd_ssh_keys('ssh-key-gen-ppk MACHINE', 'Generate .ppk file for a SSH key',
 	mm.ssh_key_gen_ppk)
 
-function mm.mysql_root_pass(machine) --last line of the private key
+function mm.mysql_root_pass(machine, from_db) --last line of the private key
+	if from_server(from_db) then
+		return api('mysql-root-pass', machine)
+	end
 	local s = load(mm.keyfile(machine))
 		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
 	assert(#s == 32)
@@ -395,10 +451,18 @@ function mm.mysql_root_pass(machine) --last line of the private key
 end
 function mm.api.mysql_root_pass(machine)
 	setmime'txt'
-	out(mm.mysql_root_pass(machine))
+	out(mm.mysql_root_pass(machine, true))
 end
 cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(machine)
-	print((api('mysql-root-pass', machine)))
+	print(mm.mysql_root_pass(machine))
+end)
+
+function mm.mysql_pass(deploy, from_db)
+	return mm.deploy(deploy, from_db).mysql_pass
+end
+
+cmd_mysql('mysql-pass DEPLOY', 'Show the MySQL password for an app', function(deploy)
+	print(mm.mysql_pass(deploy))
 end)
 
 local function deploy_vars(deploy)
@@ -483,6 +547,8 @@ rowset.machines = sql_rowset{
 			location,
 			public_ip,
 			local_ip,
+			log_local_port,
+			mysql_local_port,
 			admin_page,
 			ssh_key_ok,
 			last_seen,
@@ -516,12 +582,20 @@ rowset.machines = sql_rowset{
 		mysql_ver   = {readonly = true, text = 'MySQL Version'},
 	},
 	insert_row = function(self, row)
-		self:insert_into('machine', row, 'machine provider location public_ip local_ip admin_page pos')
+		self:insert_into('machine', row, [[
+			machine provider location
+			public_ip local_ip log_local_port mysql_local_port
+			admin_page pos
+		]])
 		cp(mm.keyfile(), mm.keyfile(row.machine))
 		cp(mm.ppkfile(), mm.ppkfile(row.machine))
 	end,
 	update_row = function(self, row)
-		self:update_into('machine', row, 'machine provider location public_ip local_ip admin_page pos')
+		self:update_into('machine', row, [[
+			machine provider location
+			public_ip local_ip log_local_port mysql_local_port
+			admin_page pos
+		]])
 		local m1 = row.machine
 		local m0 = row['machine:old']
 		if m1 and m1 ~= m0 then
@@ -757,23 +831,6 @@ end
 
 --ssh ------------------------------------------------------------------------
 
-function mm.ip(md, from_db)
-	if from_server(from_db) then
-		return unpack((api('ip', md)))
-	end
-	local md = checkarg(str_arg(md), 'machine or deploy required')
-	local m = first_row('select machine from deploy where deploy = ?', md) or md
-	local ip = first_row('select public_ip from machine where machine = ?', m)
-	return checkfound(ip, 'machine not found'), m
-end
-function mm.api.ip(machine)
-	out_json{mm.ip(machine, true)}
-end
-cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
-	function(machine)
-		print(api('ip', machine)[1])
-	end)
-
 function mm.ssh(md, args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
@@ -781,6 +838,7 @@ function mm.ssh(md, args, opt)
 	return mm.exec(extend({
 		sshcmd'ssh',
 		opt.allocate_tty and '-t' or '-T',
+		'-q',
 		'-o', 'BatchMode=yes',
 		'-o', 'ConnectTimeout=5',
 		'-o', 'PreferredAuthentications=publickey',
@@ -791,8 +849,11 @@ function mm.ssh(md, args, opt)
 end
 
 function mm.sshi(machine, args, opt)
-	return mm.ssh(machine, args,
-		update({capture_stdout = false, allocate_tty = true}, opt))
+	return mm.ssh(machine, args, update({
+		capture_stderr = false,
+		capture_stdout = false,
+		allocate_tty = true,
+	}, opt))
 end
 
 --remote sh scripts with stdin injection -------------------------------------
@@ -1202,7 +1263,6 @@ cmd_machines('m|machines', 'Show the list of machines',
 	end)
 
 function mm.api.deploys()
-	allow(admin())
 	outpqr(query({
 		compact=1,
 	}, [[
@@ -1225,35 +1285,47 @@ cmd_deployments('d|deploys', 'Show the list of deployments',
 		out((api'deploys'))
 	end)
 
-function mm.api.backups(deploy)
-	outpqr(query({
+function mm.api.backups(dm)
+	deploy = checkarg(str_arg(dm), 'deploy or machine required')
+	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
 			b.bkp,
-			b.deploy,
-			b.start_time,
-			b.name,
-			b.size,
-			b.duration,
 			r.bkp_repl,
+			b.deploy,
 			r.machine,
-			r.start_time,
-			r.duration
+			b.app_version ,
+			b.sdk_version ,
+			b.app_commit  ,
+			b.sdk_commit  ,
+			b.start_time b_time,
+			r.start_time r_time,
+			b.duration b_duration,
+			r.duration r_duration,
+			b.name,
+			b.size
 		from bkp b
 		left join bkp_repl r on r.bkp = b.bkp
-		where deploy = ?
+		where
+			b.deploy = ? or r.machine = ?
 		order by bkp
-	]], deploy))
+	]], dm, dm)
+	outpqr(rows, cols, {
+		size = 'sum',
+		b_time = 'max',
+		b_duration = 'max',
+		r_duration = 'max',
+	})
 end
-cmd_backups('b|backups DEPLOY', 'Show the list of backups',
+cmd_backups('b|backups DEPLOY|MACHINE', 'Show a list of backups',
 	function(...)
 		out((api('backups', ...)))
 	end)
 
 --command: machine-info ------------------------------------------------------
 
-function mm.machine_info(machine)
+function mm.update_machine_info(machine)
 	local stdout = mm.ssh_sh(machine, [=[
 
 		#use mysql
@@ -1269,7 +1341,7 @@ function mm.machine_info(machine)
 		echo "           hdd_gb $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 		echo "      hdd_free_gb $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-	]=], nil, {task = 'machine_info '..machine, keyed = false}):stdout()
+	]=], nil, {task = 'update_machine_info '..machine, keyed = false}):stdout()
 	local t = {machine = machine, last_seen = time()}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^%s*(.-)%s+(.*)')
@@ -1296,8 +1368,8 @@ function mm.machine_info(machine)
 	return t
 end
 
-function mm.api.machine_info(machine)
-	local t = mm.machine_info(machine)
+function mm.api.update_machine_info(machine)
+	local t = mm.update_machine_info(machine)
 	for i,k in ipairs(t) do
 		outprint(_('%20s %s', k, t[k]))
 	end
@@ -1598,20 +1670,7 @@ mm.api.deploy_status  = mm.deploy_status
 --remote logging -------------------------------------------------------------
 
 mm.log_port = 5555
-mm.log_local_port1 = 6000
-mm.log_ports = {} --{port->machine}
 mm.log_queue_size = 10000
-
-function mm.logport(machine)
-	machine = checkarg(str_arg(machine))
-	for port = mm.log_local_port1, 65535 do
-		if not mm.log_ports[port] then
-			mm.log_ports[port] = machine
-			return port
-		end
-	end
-	error'all ports are used'
-end
 
 mm.deploy_logs = {}
 mm.deploy_state_vars = {}
@@ -1636,7 +1695,10 @@ end
 
 function mm.log_server(machine)
 	machine = checkarg(str_arg(machine))
-	local lport = mm.logport(machine)
+	local lport = first_row([[
+		select log_local_port from machine where machine = ?
+	]], machine)
+	checkfound(lport, 'log_local_port not set for machine '..machine)
 
 	local task = mm.task({
 		task = 'log_server '..machine,
@@ -1880,13 +1942,19 @@ function mm.backup(deploy, parent_bkp, name)
 	local bkp = insert_row('bkp', {
 		parent_bkp = parent_bkp,
 		deploy = deploy,
-		app_version = d.app_version,
-		sdk_version = d.sdk_version,
-		app_commit  = d.app_commit,
-		sdk_commit  = d.sdk_commit,
+		app_version = d.deployed_app_version,
+		sdk_version = d.deployed_sdk_version,
+		app_commit  = d.deployed_app_commit,
+		sdk_commit  = d.deployed_sdk_commit,
 		name = name,
 		start_time = start_time,
-	}, 'parent_bkp deploy name start_time')
+	})
+
+	local bkp_repl = insert_row('bkp_repl', {
+		bkp = bkp,
+		machine = d.machine,
+		start_time = start_time,
+	})
 
 	rowset_changed'backups'
 
@@ -1903,6 +1971,7 @@ function mm.backup(deploy, parent_bkp, name)
 
 	local s = task:stdout()
 	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
+
 	update_row('bkp', {
 		bkp,
 		duration = task.duration,
@@ -1910,15 +1979,12 @@ function mm.backup(deploy, parent_bkp, name)
 		checksum = checksum,
 	})
 
-	rowset_changed'backups'
-
-	insert_row('bkp_repl', {
-		bkp = bkp,
-		machine = d.machine,
-		start_time = start_time,
-		duration = 0,
+	update_row('bkp_repl', {
+		bkp_repl,
+		duration = task.duration,
 	})
 
+	rowset_changed'backups'
 	rowset_changed'backup_replicas'
 end
 function mm.api.backup(deploy, ...)
@@ -1939,12 +2005,13 @@ end
 
 local function bkp_repl_info(bkp_repl)
 	bkp_repl = checkarg(id_arg(bkp_repl))
-	return first_row([[
+	local bkp_repl = first_row([[
 		select r.bkp, r.machine, b.deploy
 		from bkp_repl r
 		inner join bkp b on r.bkp = b.bkp
 		where bkp_repl = ?
 	]], bkp_repl)
+	return checkarg(bkp_repl)
 end
 
 function mm.backup_copy(src_bkp_repl, machine)
@@ -1999,7 +2066,11 @@ function mm.backup_remove(bkp_repl)
 		task = 'backup_remove '..bkp_repl,
 	})
 
-	remove_row('bkp_repl', {bkp_repl})
+	delete_row('bkp_repl', {bkp_repl})
+
+	if first_row('select count(1) from bkp_repl where bkp = ?', r.bkp) == 0 then
+		delete_row('bkp', {r.bkp})
+	end
 
 	rowset_changed'backup_replicas'
 end
@@ -2067,7 +2138,7 @@ function mm.tunnel(machine, ports, opt, rev)
 	local args = {'-N'}
 	if logging.debug then add(args, '-v') end
 	ports = checkarg(str_arg(ports), 'ports expected')
-	local lports = {}
+	local rports = {}
 	for ports in ports:gmatch'([^,]+)' do
 		local rport, lport = ports:match'(.-):(.*)'
 		rport = rport or ports
@@ -2075,11 +2146,11 @@ function mm.tunnel(machine, ports, opt, rev)
 		add(args, rev and '-R' or '-L')
 		add(args, '127.0.0.1:'..lport..':127.0.0.1:'..rport)
 		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
-		add(lports, lport)
+		add(rports, rport)
 	end
 	local action = (rev and 'r' or '')..'tunnel'
 	opt = update({
-		task = action..' '..machine..' '..cat(lports, ','),
+		task = action..' '..machine..' '..cat(rports, ','),
 		action = action, args = {machine, ports},
 		run_every = 0,
 	}, opt)
@@ -2093,6 +2164,19 @@ function mm.rtunnel(machine, ports, opt)
 	return mm.tunnel(machine, ports, opt, true)
 end
 
+function mm.mysql_tunnel(machine, opt)
+	machine = checkarg(str_arg(machine), 'machine expected')
+	local lport = mm.machine(machine).mysql_local_port
+	checkfound(lport, 'mysql_local_port not set for machine '..machine)
+	local task_name = 'tunnel '..machine..' 3306'
+	check500(not mm.running_task(task_name), 'task already running')
+	return mm.tunnel(machine, lport..':3306', {
+		run_every = 0,
+		editable = false,
+		task = task_name,
+	})
+end
+
 cmd_ssh_tunnels('tunnel MACHINE RPORT1[:LPORT1],...', 'Create SSH tunnel(s) to machine', function(machine, ports)
 	return mm.tunnel(machine, ports, {interactive = true})
 end)
@@ -2101,16 +2185,12 @@ cmd_ssh_tunnels('rtunnel MACHINE RPORT1[:LPORT1],...', 'Create reverse SSH tunne
 	return mm.rtunnel(machine, ports, {interactive = true})
 end)
 
-local function censor_mysql_pwd(s)
-	return s:gsub('MYSQL_PWD=[^%s]+', 'MYSQL_PWD=censored')
-end
-cmd_mysql('mysql MACHINE [SQL]', 'Execute MySQL command or remote REPL', function(machine, sql)
-	local args = {'MYSQL_PWD='..mm.mysql_root_pass(machine),
-		'mysql', '-u', 'root', '-h', 'localhost'}
+cmd_mysql('mysql DEPLOY|MACHINE [SQL]', 'Execute MySQL command or remote REPL', function(md, sql)
+	local ip, machine = mm.ip(md)
+	local deploy = machine ~= md and md
+	local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
 	if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
-	logging.censor.mysql_pwd = censor_mysql_pwd
 	mm.sshi(machine, args)
-	logging.censor.mysql_pwd = nil
 end)
 
 --TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
@@ -2201,4 +2281,4 @@ function mm:run_server()
 	run_server(self)
 end
 
-return mm:run(...)
+return mm:run()
