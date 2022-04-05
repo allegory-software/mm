@@ -40,9 +40,9 @@ textarea.x-editbox-input[console] {
 		"wanted_app_version    wanted_app_version   wanted_sdk_version    wanted_sdk_version"
 		"deployed_app_version  deployed_app_version deployed_sdk_version  deployed_sdk_version"
 		"deployed_app_commit   deployed_app_commit  deployed_sdk_commit   deployed_sdk_commit"
+		"deployed_at deployed_at          deployed_at            deployed_at "
 		"repo        repo                 repo                   repo   "
-		"secret      secret               secret                 secret "
-		"mysql_pass  mysql_pass           mysql_pass             mysql_pass"
+		"secret      secret               mysql_pass             mysql_pass"
 		"ctime       ctime                mtime                  mtime  "
 	;
 }
@@ -77,7 +77,7 @@ textarea.x-editbox-input[console] {
 			<div action=config>Configuration</div>
 		</x-listbox>
 	</div>
-	<x-vsplit fixed_side=second>
+	<x-vsplit fixed_side=second fixed_size=400>
 		<x-switcher nav_id=mm_actions_listbox>
 			<x-grid action=providers id=mm_providers_grid rowset_name=providers></x-grid>
 			<x-vsplit action=machines>
@@ -101,6 +101,7 @@ textarea.x-editbox-input[console] {
 								<x-input col=deployed_sdk_version  ></x-input>
 								<x-input col=deployed_app_commit   ></x-input>
 								<x-input col=deployed_sdk_commit   ></x-input>
+								<x-input col=deployed_at           ></x-input>
 								<x-input col=env              ></x-input>
 								<x-input col=repo             ></x-input>
 								<x-input col=secret           widget.copy></x-input>

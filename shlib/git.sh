@@ -36,6 +36,7 @@ git_clone_for() { # user repo dir version label
 	must git -c advice.objectNameWarning=false fetch --depth=1 -q origin "$VERSION:refs/remotes/origin/$VERSION"
 	must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"
 	[ "$LABEL" ] && echo "${LABEL}_commit=$(git rev-parse --short HEAD)"
+	exit 0
 	) || exit
 	must chown -R $USER:$USER $DIR
 }

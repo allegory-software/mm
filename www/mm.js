@@ -5,7 +5,7 @@ rowset_field_attrs['machines.refresh'] = {
 	w: 40,
 	button_options: {icon: 'fas fa fa-sync', bare: true, text: '', load_spin: true},
 	action: function(machine) {
-		this.post('/api/update-machine-info', [machine])
+		this.post('/api.txt/update-machine-info', [machine])
 	},
 }
 
@@ -43,7 +43,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					post('/api/ssh-hostkey-update', [machine])
+					post('/api.json/ssh-hostkey-update', [machine])
 			},
 		})
 
@@ -52,7 +52,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					post('/api/ssh-key-update', [machine])
+					post('/api.json/ssh-key-update', [machine])
 			},
 		})
 
@@ -61,7 +61,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					post('/api/ssh-key-check', [machine])
+					post('/api.json/ssh-key-check', [machine])
 			},
 		})
 
@@ -70,7 +70,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					post('/api/machine-prepare', [machine])
+					post('/api.json/machine-prepare', [machine])
 			},
 		})
 
@@ -79,7 +79,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					post('/api/git-keys-update', [machine])
+					post('/api.json/git-keys-update', [machine])
 			},
 		})
 
@@ -88,7 +88,7 @@ on('mm_machines_grid.init', function(e) {
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
-					post('/api/log-server', [machine])
+					post('/api.json/log-server', [machine])
 			},
 		})
 
@@ -97,11 +97,11 @@ on('mm_machines_grid.init', function(e) {
 })
 
 function ssh_key_gen() {
-	this.post('/api/ssh-key-gen')
+	this.post('/api.json/ssh-key-gen')
 }
 
 function ssh_key_updates() {
-	this.post('/api/ssh-key-update')
+	this.post('/api.json/ssh-key-update')
 }
 
 function deploy_action(btn, action) {
@@ -115,5 +115,5 @@ function deploy_deploy  () { deploy_action(this, 'deploy') }
 function deploy_remove  () { deploy_action(this, 'deploy-remove') }
 
 function deploy_backup() {
-	this.post('/api/xbkp-backup', [this.val('deploy')])
+	this.post('/api.json/xbkp-backup', [this.val('deploy')])
 }

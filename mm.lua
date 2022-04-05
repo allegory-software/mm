@@ -90,6 +90,7 @@ local function mm_schema()
 		deployed_sdk_version , strid,
 		deployed_app_commit  , strid,
 		deployed_sdk_commit  , strid,
+		deployed_at          , timeago,
 		env              , strid, not_null,
 		secret           , b64key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
@@ -170,6 +171,8 @@ local mustache = require'mustache'
 local queue = require'queue'
 local mess = require'mess'
 
+--config('http_debug', 'protocol stream')
+
 --config ---------------------------------------------------------------------
 
 mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
@@ -222,7 +225,7 @@ mm.schema:import(mm_schema)
 
 --database -------------------------------------------------------------------
 
-cmd('install [forealz]', 'Install the app', function(doit)
+cmd('install [forealz]', 'Install or migrate mm', function(doit)
 	create_db()
 	local dry = doit ~= 'forealz'
 	db():sync_schema(mm.schema, {dry = dry})
@@ -234,16 +237,24 @@ end)
 
 --web api server & client ----------------------------------------------------
 
-mm.api = {} --{action->fn}
-function action.api(action, ...)
-	local action = checkfound(mm.api[action:gsub('-', '_')])
+mm.json_api = {} --{action->fn}
+mm.text_api = {} --{action->fn}
+action['api.json'] = function(action, ...)
+	local action = checkfound(mm.json_api[action:gsub('-', '_')])
+	checkarg(istab(post()))
+	allow(admin())
+	return action(unpack_json(extend(pack_json(...), post())))
+end
+action['api.txt'] = function(action, ...)
+	local action = checkfound(mm.text_api[action:gsub('-', '_')])
 	checkarg(istab(post()))
 	allow(admin())
 	return action(unpack_json(extend(pack_json(...), post())))
 end
 
-local function api(action, ...)
-	local uri = url{segments = {'', 'api', action}}
+local function _api(ext, out_it, action, ...)
+	local receive_content = out_it and out or 'string'
+	local uri = url{segments = {'', 'api.'..ext, action}}
 	local ret, res = getpage{
 		host = config'mm_host',
 		uri = uri,
@@ -254,7 +265,11 @@ local function api(action, ...)
 		},
 		method = 'POST',
 		upload = pack_json(...),
+		receive_content = receive_content,
+		compress = ext ~= 'txt',
+			--^^let text come in chunked so we can see each line as soom as it comes.
 		--debug = {protocol = true},
+		--debug = {stream = true},
 	}
 	if ret == nil then
 		die('HTTP error: %s', res)
@@ -269,8 +284,11 @@ local function api(action, ...)
 	elseif istab(ret) and ret.notify then
 		say(ret.notify)
 	end
-	return ret, res
+	return ret
 end
+local function json_api(action, ...) return _api('json', false, action, ...) end
+local function text_api(action, ...) return _api('txt', false, action, ...) end
+local function out_text_api(action, ...) _api('txt', true, action, ...) end
 
 --tools ----------------------------------------------------------------------
 
@@ -286,9 +304,9 @@ local function from_server(from_db)
 	return not from_db and mm.conf.mm_host and not mm.server_running
 end
 
-function mm.machine(machine, from_db)
+function mm.machine_info(machine, from_db)
 	if from_server(from_db) then
-		return api('machine-info', machine)
+		return json_api('machine-info', machine)
 	end
 	local m = first_row([[
 		select
@@ -298,13 +316,13 @@ function mm.machine(machine, from_db)
 	]], machine)
 	return checkfound(m, 'machine not found')
 end
-function mm.api.machine(machine)
-	out_json(mm.machine(machine, true))
+function mm.json_api.machine_info(machine)
+	return mm.machine_info(machine, true)
 end
 
-function mm.deploy(deploy, from_db)
+function mm.deploy_info(deploy, from_db)
 	if from_server(from_db) then
-		return api('deploy-info', deploy)
+		return json_api('deploy-info', deploy)
 	end
 	local d = first_row([[
 		select
@@ -314,58 +332,56 @@ function mm.deploy(deploy, from_db)
 	]], deploy)
 	return checkfound(d, 'deploy not found')
 end
-function mm.api.deploy_info(deploy)
-	out_json(mm.deploy(deploy, true))
+function mm.json_api.deploy_info(deploy)
+	return mm.deploy_info(deploy, true)
 end
 
 function mm.ip(md, from_db)
 	if from_server(from_db) then
-		return unpack((api('ip', md)))
+		return unpack(json_api('ip', md))
 	end
 	local md = checkarg(str_arg(md), 'machine or deploy required')
 	local m = first_row('select machine from deploy where deploy = ?', md) or md
 	local ip = first_row('select public_ip from machine where machine = ?', m)
 	return checkfound(ip, 'machine not found'), m
 end
-function mm.api.ip(machine)
-	out_json{mm.ip(machine, true)}
+function mm.json_api.ip(machine)
+	return {mm.ip(machine, true)}
 end
 cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
 	function(machine)
-		print(api('ip', machine)[1])
+		print((mm.ip('ip', machine)))
 	end)
 
 function mm.known_hosts_file(from_db)
 	local file = indir(mm.vardir, 'known_hosts')
 	if from_server(from_db) then
-		local s = api'known-hosts'
+		local s = text_api'known-hosts'
 		save(file, s)
 	end
 	return file
 end
-function mm.api.known_hosts()
-	setmime'txt'
-	out(load(mm.known_hosts_file(true)))
+function mm.text_api.known_hosts()
+	outall(load(mm.known_hosts_file(true)))
 end
 
-function mm.keyfile(machine, from_db, ext)
+function mm.keyfile(machine, ext, from_db)
 	machine = machine and machine:trim()
 	local file = 'mm'..(machine and '-'..machine or '')..'.'..(ext or 'key')
 	file = indir(mm.vardir, file)
 	if from_server(from_db) then
-		local s = api('keyfile', machine, ext)
+		local s = text_api('keyfile', machine, ext)
 		save(file, s)
 	end
 	return file
 end
-function mm.api.keyfile(machine, ext)
-	local keyfile = mm.keyfile(repl(machine, ''), true, repl(ext, ''))
-	setmime'txt'
+function mm.text_api.keyfile(machine, ext)
+	local keyfile = mm.keyfile(machine, ext, true)
 	outfile(keyfile)
 end
 
 function mm.ppkfile(machine, from_db)
-	return mm.keyfile(machine, from_db, 'ppk')
+	return mm.keyfile(machine, 'ppk', from_db)
 end
 
 function mm.pubkey(machine)
@@ -374,22 +390,27 @@ function mm.pubkey(machine)
 	return s:match('^[^%s]+%s+[^%s]+')..' mm'
 end
 
-function mm.ssh_hostkey(machine)
+function mm.ssh_hostkey(machine, from_db)
+	if from_server(from_db) then
+		return text_api('ssh-hostkey', machine)
+	end
 	machine = checkarg(str_arg(machine))
 	local key = first_row([[
 		select fingerprint from machine where machine = ?
 	]], machine)
 	return checkfound(key):trim()
 end
-function mm.api.ssh_hostkey(machine)
-	setmime'txt'
-	out(mm.ssh_hostkey(machine))
+function mm.text_api.ssh_hostkey(machine)
+	outall(mm.ssh_hostkey(machine, true))
 end
 cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(machine)
-	print((api('ssh-hostkey', machine)))
+	print(mm.ssh_hostkey(machine))
 end)
 
-function mm.ssh_hostkey_sha(machine)
+function mm.ssh_hostkey_sha(machine, from_db)
+	if from_server(from_db) then
+		return text_api('ssh-hostkey-sha', machine)
+	end
 	machine = checkarg(str_arg(machine))
 	local key = first_row([[
 		select fingerprint from machine where machine = ?
@@ -398,24 +419,23 @@ function mm.ssh_hostkey_sha(machine)
 	local cmd = {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}
 	local opt = {
 		stdin = key,
+		capture_stdout = true,
 		task = 'ssh_hostkey_sha '..machine, keyed = false,
-		capture_stderr = false,
 		action = 'ssh_hostkey_sha', args = {'machine'},
 	}
 	return (mm.exec(cmd, opt):stdout():trim():match'%s([^%s]+)')
 end
-function mm.api.ssh_hostkey_sha(machine)
-	setmime'txt'
-	out(mm.ssh_hostkey_sha(machine))
+function mm.text_api.ssh_hostkey_sha(machine)
+	outall(mm.ssh_hostkey_sha(machine, true))
 end
 cmd_ssh_keys('ssh-hostkey-sha MACHINE', 'Show a SSH host key SHA', function(machine)
-	print((api('ssh-hostkey-sha', machine)))
+	print(mm.ssh_hostkey_sha(machine))
 end)
 
 --run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
 function mm.ssh_key_fix_perms(machine)
 	if not win then return end
-	local s = mm.keyfile(machine, true)
+	local s = mm.keyfile(machine, nil, true)
 	readpipe('icacls %s /c /t /Inheritance:d', s)
 	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
 	readpipe('takeown /F %s', s)
@@ -442,25 +462,23 @@ cmd_ssh_keys('ssh-key-gen-ppk MACHINE', 'Generate .ppk file for a SSH key',
 
 function mm.mysql_root_pass(machine, from_db) --last line of the private key
 	if from_server(from_db) then
-		return api('mysql-root-pass', machine)
+		return text_api('mysql-root-pass', machine)
 	end
 	local s = load(mm.keyfile(machine))
 		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
 	assert(#s == 32)
 	return s
 end
-function mm.api.mysql_root_pass(machine)
-	setmime'txt'
-	out(mm.mysql_root_pass(machine, true))
+function mm.text_api.mysql_root_pass(machine)
+	outall(mm.mysql_root_pass(machine, true))
 end
 cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(machine)
 	print(mm.mysql_root_pass(machine))
 end)
 
 function mm.mysql_pass(deploy, from_db)
-	return mm.deploy(deploy, from_db).mysql_pass
+	return mm.deploy_info(deploy, from_db).mysql_pass
 end
-
 cmd_mysql('mysql-pass DEPLOY', 'Show the MySQL password for an app', function(deploy)
 	print(mm.mysql_pass(deploy))
 end)
@@ -476,8 +494,8 @@ local function deploy_vars(deploy)
 			d.machine,
 			d.repo,
 			d.app,
-			coalesce(d.wanted_app_version, '') app_version,
-			coalesce(d.wanted_sdk_version, '') sdk_version,
+			d.wanted_app_version app_version,
+			d.wanted_sdk_version sdk_version,
 			coalesce(d.env, 'dev') env,
 			d.deploy mysql_db,
 			d.deploy mysql_user,
@@ -633,6 +651,7 @@ rowset.deploys = sql_rowset{
 			app,
 			wanted_app_version, deployed_app_version, deployed_app_commit,
 			wanted_sdk_version, deployed_sdk_version, deployed_sdk_commit,
+			deployed_at,
 			env,
 			repo,
 			secret,
@@ -661,15 +680,20 @@ rowset.deploys = sql_rowset{
 		deployed_sdk_version
 		deployed_app_commit
 		deployed_sdk_commit
+		deployed_at
 	]],
 	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
 		row.secret = b64(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
- 		self:insert_into('deploy', row, 'deploy machine repo app wanted_app_version env secret mysql_pass pos')
+ 		self:insert_into('deploy', row, [[
+			deploy machine repo app wanted_app_version env secret mysql_pass pos
+		]])
 	end,
 	update_row = function(self, row)
-		self:update_into('deploy', row, 'deploy machine repo app wanted_app_version env pos')
+		self:update_into('deploy', row, [[
+			deploy machine repo app wanted_app_version env pos
+		]])
 	end,
 	delete_row = function(self, row)
 		self:delete_from('deploy', row)
@@ -725,9 +749,9 @@ function mm.exec(cmd, opt)
 
 	local task = mm.task(update({cmd = cmd}, opt))
 
-	local webb_cx = cx() and not cx().fake
-	local capture_stdout = opt.capture_stdout ~= false or webb_cx
-	local capture_stderr = opt.capture_stderr ~= false or webb_cx
+	local webb_cx = cx() and not cx().fake or false
+	local capture_stdout = opt.capture_stdout or webb_cx
+	local capture_stderr = opt.capture_stderr or webb_cx
 
 	local p, err = proc.exec{
 		cmd = cmd,
@@ -748,7 +772,7 @@ function mm.exec(cmd, opt)
 
 		if p.stdin then
 			resume(thread(function()
-				dbg('mm', 'execin', '%s', opt.stdin)
+				--dbg('mm', 'execin', '%s', opt.stdin)
 				local ok, err = p.stdin:write(opt.stdin)
 				if not ok then
 					task:logerror('stdinwr', '%s', err)
@@ -770,6 +794,9 @@ function mm.exec(cmd, opt)
 					end
 					local s = ffi.string(buf, len)
 					task:out(s)
+					if opt.out_stdout then
+						out(s)
+					end
 				end
 				p.stdout:close()
 			end, 'exec-stdout %s', p))
@@ -788,6 +815,9 @@ function mm.exec(cmd, opt)
 					end
 					local s = ffi.string(buf, len)
 					task:err(s)
+					if opt.out_stderr then
+						out(s)
+					end
 				end
 				p.stderr:close()
 			end, 'exec-stderr %s', p))
@@ -848,14 +878,6 @@ function mm.ssh(md, args, opt)
 	}, args), opt)
 end
 
-function mm.sshi(machine, args, opt)
-	return mm.ssh(machine, args, update({
-		capture_stderr = false,
-		capture_stdout = false,
-		allocate_tty = true,
-	}, opt))
-end
-
 --remote sh scripts with stdin injection -------------------------------------
 
 --passing both the script and the script's expected stdin contents through
@@ -871,7 +893,7 @@ function mm.ssh_sh(machine, script, script_env, opt)
 	}, script_env)
 	local s = mm.sh_script(script:outdent(), script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
-	note('mm', 'ssh-sh', '%s %s %s', machine, script_env, opt)
+	note('mm', 'ssh-sh', '%s %s', machine, s:sub(1, 50))
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
 
@@ -1238,8 +1260,12 @@ end
 
 --listings -------------------------------------------------------------------
 
-function mm.api.machines()
-	outpqr(query({
+function mm.out_machines(from_db)
+	if from_server(from_db) then
+		out_text_api'machines'
+		return
+	end
+	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
@@ -1255,15 +1281,24 @@ function mm.api.machines()
 			ctime
 		from machine
 		order by pos, ctime
-	]]))
+	]])
+	outpqr(rows, cols)
 end
+function mm.text_api.machines()
+	mm.out_machines(true)
+end
+
 cmd_machines('m|machines', 'Show the list of machines',
 	function()
-		out((api'machines'))
+		mm.out_machines()
 	end)
 
-function mm.api.deploys()
-	outpqr(query({
+function mm.out_deploys(from_db)
+	if from_server(from_db) then
+		out_text_api'deploys'
+		return
+	end
+	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
@@ -1278,14 +1313,22 @@ function mm.api.deploys()
 			ctime
 		from deploy
 		order by pos, ctime
-	]]))
+	]])
+	outpqr(rows, cols)
+end
+function mm.text_api.out_deploys()
+	mm.out_deploys(true)
 end
 cmd_deployments('d|deploys', 'Show the list of deployments',
 	function()
-		out((api'deploys'))
+		mm.out_deploys()
 	end)
 
-function mm.api.backups(dm)
+function mm.out_backups(dm, from_db)
+	if from_server(from_db) then
+		out_text_api('backups', dm)
+		return
+	end
 	deploy = checkarg(str_arg(dm), 'deploy or machine required')
 	local rows, cols = query({
 		compact=1,
@@ -1318,14 +1361,21 @@ function mm.api.backups(dm)
 		r_duration = 'max',
 	})
 end
+function mm.text_api.backups(dm)
+	mm.out_backups(dm, true)
+end
 cmd_backups('b|backups DEPLOY|MACHINE', 'Show a list of backups',
-	function(...)
-		out((api('backups', ...)))
+	function(dm)
+		mm.out_backups(dm)
 	end)
 
 --command: machine-info ------------------------------------------------------
 
-function mm.update_machine_info(machine)
+function mm.update_machine_info(machine, from_db)
+	if from_server(from_db) then
+		out_text_api('update-machine-info', machine)
+		return
+	end
 	local stdout = mm.ssh_sh(machine, [=[
 
 		#use mysql
@@ -1341,7 +1391,10 @@ function mm.update_machine_info(machine)
 		echo "           hdd_gb $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
 		echo "      hdd_free_gb $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
-	]=], nil, {task = 'update_machine_info '..machine, keyed = false}):stdout()
+	]=], nil, {
+		task = 'update_machine_info '..(machine or ''), keyed = false,
+		capture_stdout = true,
+	}):stdout()
 	local t = {machine = machine, last_seen = time()}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^%s*(.-)%s+(.*)')
@@ -1365,18 +1418,17 @@ function mm.update_machine_info(machine)
 	]], t).affected_rows == 1)
 	rowset_changed'machines'
 
-	return t
-end
-
-function mm.api.update_machine_info(machine)
-	local t = mm.update_machine_info(machine)
 	for i,k in ipairs(t) do
 		outprint(_('%20s %s', k, t[k]))
 	end
 end
+
+function mm.text_api.update_machine_info(machine)
+	mm.update_machine_info(machine, true)
+end
 cmd_machines('machine-info MACHINE', 'Show machine info',
 	function(machine)
-		out((api('machine-info', machine)))
+		mm.update_machine_info(machine)
 	end)
 
 --command: ssh-hostkey-update ------------------------------------------------
@@ -1400,19 +1452,20 @@ function mm.ssh_hostkey_update(machine)
 	local opt = {
 		task = 'ssh_hostkey_update '..machine,
 		action = 'ssh_hostkey_update', args = {'machine'},
+		capture_stdout = true,
 	}
 	local task = mm.exec(cmd, opt)
 	local fp = task:stdout()
 	assert(update_row('machine', {machine, fingerprint = fp}).affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
-function mm.api.ssh_hostkey_update(machine)
+function mm.json_api.ssh_hostkey_update(machine)
 	mm.ssh_hostkey_update(machine)
-	out_json{machine = machine, notify = 'Host fingerprint updated for '..machine}
+	return {machine = machine, notify = 'Host fingerprint updated for '..machine}
 end
 cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
 	function(machine)
-		api('ssh-hostkey-update', machine)
+		json_api('ssh-hostkey-update', machine)
 	end)
 
 --command: ssh-key-gen -------------------------------------------------------
@@ -1427,23 +1480,22 @@ function mm.ssh_key_gen()
 	query'update machine set ssh_key_ok = 0'
 	rowset_changed'machines'
 end
-function mm.api.ssh_key_gen()
+function mm.json_api.ssh_key_gen()
 	mm.ssh_key_gen()
-	out_json{notify = 'SSH key generated'}
+	return {notify = 'SSH key generated'}
 end
 cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', function()
-	api'ssh-key-gen'
+	json_api'ssh-key-gen'
 end)
 
 --command: pubkey ------------------------------------------------------------
 
 --for manual updating via `curl mm.allegory.ro/pubkey/MACHINE >> authroized_keys`.
-function mm.api.ssh_pubkey(machine)
-	setmime'txt'
-	out(mm.pubkey(machine))
+function mm.text_api.ssh_pubkey(machine)
+	outall(mm.pubkey(machine))
 end
 cmd_ssh_keys('ssh-pubkey [MACHINE]', 'Show a SSH public key', function(machine)
-	print((api('ssh-pubkey', machine)))
+	out_text_api('ssh-pubkey', machine)
 end)
 
 --command: ssh-key-update ----------------------------------------------------
@@ -1473,7 +1525,10 @@ function mm.ssh_key_update(machine)
 	]=], {
 		PUBKEY = pubkey,
 		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
-	}, {task = 'ssh_key_update '..machine}):stdout():trim()
+	}, {
+		task = 'ssh_key_update '..machine,
+		capture_stdout = true,
+	}):stdout():trim()
 
 	if stored_pubkey ~= pubkey then
 		return nil, 'Public key NOT updated'
@@ -1488,9 +1543,10 @@ function mm.ssh_key_update(machine)
 
 	return true
 end
-function mm.api.ssh_key_update(machine)
+function mm.json_api.ssh_key_update(machine)
 	check500(mm.ssh_key_update(machine))
-	out_json{machine = machine,
+	return {
+		machine = machine,
 		notify = machine
 			and 'SSH key updated for '..machine
 			or 'SSH key update tasks created',
@@ -1504,14 +1560,17 @@ function mm.ssh_key_check(machine)
 	local host_pubkey = mm.ssh_sh(machine, [[
 		#use ssh
 		ssh_pubkey mm
-	]], nil, {task = 'ssh_key_check '..machine}):stdout():trim()
+	]], nil, {
+		task = 'ssh_key_check '..machine,
+		capture_stdout = true,
+	}):stdout():trim()
 	return host_pubkey == mm.pubkey()
 end
-function mm.api.ssh_key_check(machine)
+function mm.json_api.ssh_key_check(machine)
 	local ok = mm.ssh_key_check(machine)
 	update_row('machine', {ssh_key_ok = ok, ['machine:old'] = machine}, 'ssh_key_ok')
 	rowset_changed'machines'
-	out_json{
+	return {
 		notify = 'SSH key is'..(ok and '' or ' NOT')..' up-to-date for '..machine,
 		notify_kind = ok and 'info' or 'warn',
 		machine = machine,
@@ -1541,7 +1600,7 @@ function mm.git_keys_update(machine)
 		ssh_git_keys_update
 	]=], vars, {task = 'git_keys_update '..machine})
 end
-function mm.api.git_keys_update(machine)
+function mm.json_api.git_keys_update(machine)
 	if not machine then
 		mm.each_machine(function(machine)
 			mm.git_keys_update(machine)
@@ -1549,7 +1608,7 @@ function mm.api.git_keys_update(machine)
 		return true
 	end
 	mm.git_keys_update(machine)
-	out_json{machine = machine, notify = 'Git keys updated for '..machine}
+	return {machine = machine, notify = 'Git keys updated for '..machine}
 end
 cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
 	function(machine)
@@ -1567,9 +1626,9 @@ function mm.machine_prepare(machine)
 	]=], vars, {task = 'machine_prepare '..machine})
 end
 
-function mm.api.machine_prepare(machine)
+function mm.json_api.machine_prepare(machine)
 	mm.machine_prepare(machine)
-	out_json{machine = machine, notify = 'Machine prepared: '..machine}
+	return {machine = machine, notify = 'Machine prepared: '..machine}
 end
 cmd_machines('machine_prepare MACHINE', 'Prepare a new machine', function(machine)
 	api('machine-prepare', machine)
@@ -1577,34 +1636,50 @@ end)
 
 --deploy commands ------------------------------------------------------------
 
-function mm.deploy(deploy)
+function mm.deploy(deploy, to_text, from_db)
+	if from_server(from_db) then
+		if to_text then
+			out_text_api('deploy', deploy)
+			return
+		else
+			return json_api('deploy', deploy)
+		end
+	end
 	local vars = deploy_vars(deploy)
 	update(vars, git_hosting_vars())
-	local task, err = mm.ssh_sh(vars.MACHINE, [[
+	local task = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		deploy
-	]], vars, {task = 'deploy '..deploy})
-	if not task then return nil, err end
+	]], vars, {
+		task = 'deploy '..deploy,
+		capture_stdout = true,
+		out_stdout = to_text,
+		out_stderr = to_text,
+	})
 	local s = task:stdout()
 	local app_commit = s:match'app_commit=([^%s]+)'
 	local sdk_commit = s:match'sdk_commit=([^%s]+)'
 	update_row('deploy', {
 		vars.DEPLOY,
 		deployed_app_version = vars.VERSION,
+		deployed_sdk_version = vars.SDK_VERSION,
 		deployed_app_commit = app_commit,
-		deployed_sdk_commit = sdk_commit
+		deployed_sdk_commit = sdk_commit,
+		deployed_at = time(),
 	})
 end
-function mm.api.deploy(deploy)
-	mm.deploy(deploy)
-	out_json{deploy = deploy, notify = 'Deployed: '..deploy}
+function mm.text_api.deploy(deploy)
+	mm.deploy(deploy, true, true)
+end
+function mm.json_api.deploy(deploy)
+	mm.deploy(deploy, false, true)
+	return {deploy = deploy, notify = 'Deployed: '..deploy}
 end
 cmd_deployments('deploy DEPLOY', 'Deploy an app', function(deploy)
-	api('deploy', deploy)
+	mm.deploy(deploy, true)
 end)
 
 function mm.deploy_remove(deploy)
-
 	local vars = deploy_vars(deploy)
 	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
@@ -1622,50 +1697,40 @@ function mm.deploy_remove(deploy)
 		deployed_sdk_commit = null,
 	})
 end
-function mm.api.deploy_remove(deploy)
+function mm.json_api.deploy_remove(deploy)
 	mm.deploy_remove(deploy)
-	out_json{deploy = deploy, notify = 'Deploy removed: '..deploy}
+	return {deploy = deploy, notify = 'Deploy removed: '..deploy}
 end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment', function(deploy)
 	api('deploy-remove', deploy)
 end)
 
-function mm.deploy_run(deploy, ...)
+function mm.app(from_db, deploy, ...)
+	if from_server(from_db) then
+		outapi('app', deploy, ...)
+		return
+	end
 	local vars = deploy_vars(deploy)
-	local cmd_args = proc.quote_args_unix(...)
-	mm.ssh_sh(vars.MACHINE, [[
+	local args = proc.quote_args_unix(...)
+	local task = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
-		app $cmd_args
+		app $args
 		]], {
 			DEPLOY = vars.DEPLOY,
 			APP = vars.APP,
-			cmd_args = cmd_args,
-		}, {task = 'deploy_run '..deploy..' '..cmd_args})
+			args = args,
+		}, {
+			task = 'app '..deploy..' '..args,
+			out_stdout = true,
+			out_stderr = true,
+		})
 end
-local function app_cmd(cmd, notify)
-	return function(deploy, ...)
-		mm.deploy_run(deploy, cmd, ...)
-		if notify then
-			out_json({deploy = deploy, notify = notify})
-		end
-	end
+function mm.text_api.app(deploy, cmd, ...)
+	mm.app(true, deploy, cmd, ...)
 end
-mm.deploy_start   = app_cmd('start'  , 'App started')
-mm.deploy_stop    = app_cmd('stop'   , 'App stopped')
-mm.deploy_restart = app_cmd('restart', 'App restarted')
-mm.deploy_status  = app_cmd('status')
-
-mm.api.deploy_start   = mm.deploy_start
-mm.api.deploy_stop    = mm.deploy_stop
-mm.api.deploy_restart = mm.deploy_restart
-mm.api.deploy_status  = mm.deploy_status
-
---TODO:
---cmd_deployments('deploy-run     DEPLOY ...', 'Run a deployed app', mm.deploy_run)
---cmd_deployments('deploy-start   DEPLOY', 'Start a deployed app', mm.deploy_start)
---cmd_deployments('deploy-stop    DEPLOY', 'Stop a deployed app', mm.deploy_stop)
---cmd_deployments('deploy-restart DEPLOY', 'Restart a deployed app', mm.deploy_restart)
---cmd_deployments('deploy-status  DEPLOY', 'Check status for a deployed app', mm.deploy_status)
+cmd_deployments('app DEPLOY ...', 'Run a deployed app', function(...)
+	mm.app(false, ...)
+end)
 
 --remote logging -------------------------------------------------------------
 
@@ -1763,8 +1828,10 @@ function mm.log_server(machine)
 
 	task:setstatus'running'
 end
-
-mm.api.log_server = mm.log_server
+function mm.json_api.log_server(machine)
+	mm.log_server(machine)
+	return {notify = 'Log server started'}
+end
 
 function mm.log_server_rpc(machine, cmd, ...)
 	local chan = log_server_chan[machine]
@@ -1967,6 +2034,7 @@ function mm.backup(deploy, parent_bkp, name)
 		parent_bkp = parent_bkp,
 	}, {
 		task = task_name,
+		capture_stdout = true,
 	})
 
 	local s = task:stdout()
@@ -1981,15 +2049,15 @@ function mm.backup(deploy, parent_bkp, name)
 
 	update_row('bkp_repl', {
 		bkp_repl,
-		duration = task.duration,
+		duration = 0,
 	})
 
 	rowset_changed'backups'
 	rowset_changed'backup_replicas'
 end
-function mm.api.backup(deploy, ...)
+function mm.json_api.backup(deploy, ...)
 	mm.backup(deploy, ...)
-	out_json{deploy = deploy, notify = 'Backup done for '..deploy}
+	return {deploy = deploy, notify = 'Backup done for '..deploy}
 end
 cmd_backups('backup DEPLOY [PARENT_BKP] [NAME]', 'Backup a database', function(...)
 	api('backup', ...)
@@ -2044,12 +2112,12 @@ function mm.backup_copy(src_bkp_repl, machine)
 
 	rowset_changed'backup_replicas'
 end
-function mm.api.backup_copy(...)
+function mm.json_api.backup_copy(...)
 	mm.backup_copy(...)
-	out_json{notify = 'Backup copied'}
+	return {notify = 'Backup copied'}
 end
 cmd_backups('backup-copy BKP_REPL HOST', 'Replicate a backup', function(...)
-	api('backup-copy', ...)
+	json_api('backup-copy', ...)
 end)
 
 function mm.backup_remove(bkp_repl)
@@ -2074,19 +2142,21 @@ function mm.backup_remove(bkp_repl)
 
 	rowset_changed'backup_replicas'
 end
-function mm.api.backup_remove(...)
+function mm.json_api.backup_remove(...)
 	mm.backup_remove(...)
-	out_json{notify = 'Backup removed'}
+	return {notify = 'Backup removed'}
 end
 cmd_backups('backup-remove BKP_REPL', 'Remove backup copy', function(...)
-	api('backup-remove', ...)
+	json_api('backup-remove', ...)
 end)
 
 --remote access tools --------------------------------------------------------
 
 cmd_ssh('ssh MACHINE|DEPLOY [CMD ...]', 'SSH into machine', function(md, cmd, ...)
 	local ip, m = mm.ip(md)
-	mm.sshi(md, cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"})
+	mm.ssh(md,
+		cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"},
+		not cmd and {allocate_tty = true} or nil)
 end)
 
 --TIP: make a putty session called `mm` where you set the window size,
@@ -2149,16 +2219,11 @@ function mm.tunnel(machine, ports, opt, rev)
 		add(rports, rport)
 	end
 	local action = (rev and 'r' or '')..'tunnel'
-	opt = update({
+	return mm.ssh(machine, args, update({
 		task = action..' '..machine..' '..cat(rports, ','),
 		action = action, args = {machine, ports},
 		run_every = 0,
-	}, opt)
-	if opt.interactive then
-		opt.capture_stdout = false
-		opt.allocate_tty = true
-	end
-	return mm.ssh(machine, args, opt)
+	}, opt))
 end
 function mm.rtunnel(machine, ports, opt)
 	return mm.tunnel(machine, ports, opt, true)
@@ -2166,7 +2231,7 @@ end
 
 function mm.mysql_tunnel(machine, opt)
 	machine = checkarg(str_arg(machine), 'machine expected')
-	local lport = mm.machine(machine).mysql_local_port
+	local lport = mm.machine_info(machine).mysql_local_port
 	checkfound(lport, 'mysql_local_port not set for machine '..machine)
 	local task_name = 'tunnel '..machine..' 3306'
 	check500(not mm.running_task(task_name), 'task already running')
@@ -2178,11 +2243,11 @@ function mm.mysql_tunnel(machine, opt)
 end
 
 cmd_ssh_tunnels('tunnel MACHINE RPORT1[:LPORT1],...', 'Create SSH tunnel(s) to machine', function(machine, ports)
-	return mm.tunnel(machine, ports, {interactive = true})
+	return mm.tunnel(machine, ports, {allocate_tty = true})
 end)
 
 cmd_ssh_tunnels('rtunnel MACHINE RPORT1[:LPORT1],...', 'Create reverse SSH tunnel(s) to machine', function(machine, ports)
-	return mm.rtunnel(machine, ports, {interactive = true})
+	return mm.rtunnel(machine, ports, {allocate_tty = true})
 end)
 
 cmd_mysql('mysql DEPLOY|MACHINE [SQL]', 'Execute MySQL command or remote REPL', function(md, sql)
@@ -2190,7 +2255,7 @@ cmd_mysql('mysql DEPLOY|MACHINE [SQL]', 'Execute MySQL command or remote REPL', 
 	local deploy = machine ~= md and md
 	local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
 	if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
-	mm.sshi(machine, args)
+	mm.ssh(machine, args, not sql and {allocate_tty = true} or nil)
 end)
 
 --TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
@@ -2217,8 +2282,10 @@ function mm.mount(machine, rem_path, drive, bg)
 		if bg then
 			exec(cmd)
 		else
-			local opt = {task = 'mount '..drive, action = 'mount', args = {rem_path, drive}}
-			mm.exec(cmd, opt)
+			mm.exec(cmd, {
+				task = 'mount '..drive,
+				action = 'mount', args = {rem_path, drive},
+			})
 		end
 	else
 		NYI'mount'
@@ -2247,13 +2314,13 @@ function mm.rsync(dir, machine1, machine2)
 		update({DIR = dir}, rsync_vars(machine2)))
 end
 
-function mm.api.rsync(...)
+function mm.json_api.rsync(...)
 	mm.rsync(...)
-	out_json{notify = 'Files copied'}
+	return {notify = 'Files copied'}
 end
 
 cmd_ssh_mounts('rsync DIR MACHINE1 MACHINE2', 'Copy files between machines', function(...)
-	api('rsync', ...)
+	json_api('rsync', ...)
 end)
 
 ------------------------------------------------------------------------------
