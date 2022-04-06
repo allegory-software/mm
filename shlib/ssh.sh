@@ -58,15 +58,13 @@ ssh_git_keys_update_for_user() { # user
 	for NAME in $GIT_HOSTS; do
 
 		local HOST=${NAME^^}_HOST
-		local FINGERPRINT=${NAME^^}_FINGERPRINT
-		local KEY=${NAME^^}_KEY
+		local SSH_KEY=${NAME^^}_SSH_KEY
 
 		HOST="${!HOST}"
-		FINGERPRINT="${!FINGERPRINT}"
-		KEY="${!KEY}"
+		KEY="${!SSH_KEY}"
 
 		HOME=/home/$USER USER=$USER ssh_host_key_update \
-			$HOST mm_$NAME "$KEY" unstable_ip
+			$HOST mm_$NAME "$SSH_KEY" unstable_ip
 	done
 }
 
@@ -76,22 +74,22 @@ ssh_git_keys_update() {
 	for NAME in $GIT_HOSTS; do
 
 		local HOST=${NAME^^}_HOST
-		local FINGERPRINT=${NAME^^}_FINGERPRINT
-		local KEY=${NAME^^}_KEY
+		local SSH_HOSTKEY=${NAME^^}_SSH_HOSTKEY
+		local SSH_KEY=${NAME^^}_SSH_KEY
 
 		HOST="${!HOST}"
-		FINGERPRINT="${!FINGERPRINT}"
-		KEY="${!KEY}"
+		SSH_HOSTKEY="${!SSH_HOSTKEY}"
+		SSH_KEY="${!SSH_KEY}"
 
-		ssh_hostkey_update  $HOST "$FINGERPRINT"
-		ssh_host_key_update $HOST mm_$NAME "$KEY" unstable_ip
+		ssh_hostkey_update  $HOST "$SSH_HOSTKEY"
+		ssh_host_key_update $HOST mm_$NAME "$SSH_KEY" unstable_ip
 
 		(
 		shopt -s nullglob
 		for USER in *; do
 			[ -d /home/$USER/.ssh ] && \
 				HOME=/home/$USER USER=$USER ssh_host_key_update \
-					$HOST mm_$NAME "$KEY" unstable_ip
+					$HOST mm_$NAME "$SSH_KEY" unstable_ip
 		done
 		exit 0 # for some reason, for sets an exit code...
 		) || exit
@@ -102,15 +100,15 @@ ssh_git_keys_update() {
 rsync_to() { # host dir|file
 	local HOST="$1"
 	local DIR="$2"
-	checkvars HOST DIR KEY HOSTKEY
+	checkvars HOST DIR SSH_KEY SSH_HOSTKEY
 	say "Copying $DIR to $HOST..."
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT
-	printf "%s" "$KEY" > $p
-	printf "%s" "$HOSTKEY" > $h
-	KEY=
-	HOSTKEY=
+	printf "%s" "$SSH_KEY" > $p
+	printf "%s" "$SSH_HOSTKEY" > $h
+	SSH_KEY=
+	SSH_HOSTKEY=
 	must chmod 400 $p $h
 	local O
 	[ "$VERBOSE" ] && O="-v"

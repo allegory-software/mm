@@ -73,12 +73,22 @@ textarea.x-editbox-input[console] {
 		<x-listbox id=mm_actions_listbox>
 			<div action=deploys>Deployments</div>
 			<div action=machines>Machines</div>
-			<div action=providers>Providers</div>
+			<div action=providers>VPS Hosting</div>
+			<div action=git_hosting>Git Hosting</div>
 			<div action=config>Configuration</div>
 		</x-listbox>
 	</div>
 	<x-vsplit fixed_side=second fixed_size=400>
 		<x-switcher nav_id=mm_actions_listbox>
+			<x-split action=git_hosting fixed_size=300>
+				<x-grid id=mm_git_hosting_grid rowset_name=git_hosting></x-grid>
+				<x-form nav_id=mm_git_hosting_grid id=mm_git_hosting_form>
+					<x-split fixed_size=400>
+						<x-input col=ssh_hostkey></x-input>
+						<x-input col=ssh_key></x-input>
+					</x-split>
+				</x-form>
+			</x-split>
 			<x-grid action=providers id=mm_providers_grid rowset_name=providers></x-grid>
 			<x-vsplit action=machines>
 				<x-grid id=mm_machines_grid rowset_name=machines></x-grid>
@@ -216,7 +226,7 @@ textarea.x-editbox-input[console] {
 				</x-split>
 			</x-split>
 			<div action=config class="x-container" style="justify-content: center">
-				<x-bare-nav id=mm_config_nav rowset_name=config></x-bare-nav>
+				<x-nav id=mm_config_nav rowset_name=config></x-nav>
 				<x-form nav_id=mm_config_nav id=mm_config_form grid>
 					<h2 area=h1>SSH</h2>
 					<x-textarea mono rows=12 col=mm_pubkey infomode=under

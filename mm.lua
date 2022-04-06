@@ -40,12 +40,17 @@ LIMITATIONS
 	TODO: make mm portable by using file rowsets instead of mysql.
 	TODO: make mm even more portable by saving the var dir to git-hosted encrypted zip files.
 
-	TODO: one-command-multiple-machines/deployments: both web and cmdline.
-	TODO: bind libssh2 or see what is needed to implement ssh2 protocol in Lua.
-
 ]]
 
 local function mm_schema()
+
+	tables.git_hosting = {
+		name        , strpk,
+		host        , strid, not_null,
+		ssh_hostkey , public_key, not_null,
+		ssh_key     , private_key, not_null,
+		pos         , pos,
+	}
 
 	tables.provider = {
 		provider    , strpk,
@@ -61,7 +66,8 @@ local function mm_schema()
 		location    , strid, not_null,
 		public_ip   , strid,
 		local_ip    , strid,
-		fingerprint , b64key,
+		ssh_hostkey , public_key,
+		ssh_key     , private_key,
 		ssh_key_ok  , bool,
 		admin_page  , url,
 		last_seen   , timeago,
@@ -92,7 +98,7 @@ local function mm_schema()
 		deployed_sdk_commit  , strid,
 		deployed_at          , timeago,
 		env              , strid, not_null,
-		secret           , b64key, not_null, --multi-purpose
+		secret           , secret_key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
 		ctime            , ctime,
 		mtime            , mtime,
@@ -171,34 +177,19 @@ local mustache = require'mustache'
 local queue = require'queue'
 local mess = require'mess'
 
---config('http_debug', 'protocol stream')
+local cmd_ssh_keys    = cmdsection'SSH KEY MANAGEMENT'
+local cmd_ssh         = cmdsection'SSH TERMINALS'
+local cmd_ssh_tunnels = cmdsection'SSH TUNNELS'
+local cmd_ssh_mounts  = cmdsection'SSH-FS MOUNTS'
+local cmd_mysql       = cmdsection'MYSQL'
+local cmd_machines    = cmdsection'MACHINES'
+local cmd_deployments = cmdsection'DEPLOYMENTS'
+local cmd_backups     = cmdsection'BACKUPS'
 
 --config ---------------------------------------------------------------------
 
 mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 mm.sshdir   = mm.bindir
-
-mm.git_hosting = {
-	github = {
-		host = 'github.com',
-		fingerprint = [[
-			ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==
-		]],
-	},
-	azure = {
-		host = 'ssh.dev.azure.com',
-		fingerprint = [[
-			ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Hr1oTWqNqOlzGJOfGJ4NakVyIzf1rXYd4d7wo6jBlkLvCA4odBlL0mDUyZ0/QUfTTqeu+tm22gOsv+VrVTMk6vwRU75gY/y9ut5Mb3bR5BV58dKXyq9A9UeB5Cakehn5Zgm6x1mKoVyf+FFn26iYqXJRgzIZZcZ5V6hrE0Qg39kZm4az48o0AUbf6Sp4SLdvnuMa2sVNwHBboS7EJkm57XQPVU3/QpyNLHbWDdzwtrlS+ez30S3AdYhLKEOxAG8weOnyrtLJAUen9mTkol8oII1edf7mWWbWVf0nBmly21+nZcmCTISQBtdcyPaEno7fFQMDD26/s0lfKob4Kw8H
-		]],
-	},
-}
-for name, t in pairs(mm.git_hosting) do
-	t.name = name
-	t.key = load(indir(mm.vardir, _('mm_%s.key', name))):trim()
-	t.fingerprint = t.host .. ' ' .. t.fingerprint:trim()
-end
-
---logging.filter[''] = true
 
 config('page_title_suffix', 'Many Machines')
 config('sign_in_logo', '/sign-in-logo.png')
@@ -211,19 +202,29 @@ config('smtp_user', 'admin@bpnpart.com')
 config('host', 'bpnpart.com')
 config('noreply_email', 'admin@bpnpart.com')
 
-local cmd_ssh_keys    = cmdsection'SSH KEY MANAGEMENT'
-local cmd_ssh         = cmdsection'SSH TERMINALS'
-local cmd_ssh_tunnels = cmdsection'SSH TUNNELS'
-local cmd_ssh_mounts  = cmdsection'SSH-FS MOUNTS'
-local cmd_mysql       = cmdsection'MYSQL'
-local cmd_machines    = cmdsection'MACHINES'
-local cmd_deployments = cmdsection'DEPLOYMENTS'
-local cmd_backups     = cmdsection'BACKUPS'
+--logging.filter[''] = true
+--config('http_debug', 'protocol stream')
+--config('getpage_debug', 'protocol stream')
 
 --load_opensans()
+
 mm.schema:import(mm_schema)
 
---database -------------------------------------------------------------------
+--tools ----------------------------------------------------------------------
+
+function sshcmd(cmd)
+	return win and indir(mm.sshdir, cmd) or cmd
+end
+
+local function from_server(from_db)
+	return not from_db and mm.conf.mm_host and not mm.server_running
+end
+
+local function NYI(event)
+	logerror('mm', event, 'NYI')
+end
+
+--install --------------------------------------------------------------------
 
 cmd('install [forealz]', 'Install or migrate mm', function(doit)
 	create_db()
@@ -235,22 +236,22 @@ cmd('install [forealz]', 'Install or migrate mm', function(doit)
 	say'Install done.'
 end)
 
---web api server & client ----------------------------------------------------
+--web api / server -----------------------------------------------------------
 
 mm.json_api = {} --{action->fn}
 mm.text_api = {} --{action->fn}
-action['api.json'] = function(action, ...)
-	local action = checkfound(mm.json_api[action:gsub('-', '_')])
-	checkarg(istab(post()))
-	allow(admin())
-	return action(unpack_json(extend(pack_json(...), post())))
+local function api_action(api)
+	return function(action, ...)
+		local f = checkfound(api[action:gsub('-', '_')])
+		checkarg(istab(post()))
+		allow(admin())
+		return f(unpack_json(extend(pack_json(...), post())))
+	end
 end
-action['api.txt'] = function(action, ...)
-	local action = checkfound(mm.text_api[action:gsub('-', '_')])
-	checkarg(istab(post()))
-	allow(admin())
-	return action(unpack_json(extend(pack_json(...), post())))
-end
+action['api.json'] = api_action(mm.json_api)
+action['api.txt' ] = api_action(mm.text_api)
+
+--web api / client -----------------------------------------------------------
 
 local function _api(ext, out_it, action, ...)
 	local receive_content = out_it and out or 'string'
@@ -268,8 +269,6 @@ local function _api(ext, out_it, action, ...)
 		receive_content = receive_content,
 		compress = ext ~= 'txt',
 			--^^let text come in chunked so we can see each line as soom as it comes.
-		--debug = {protocol = true},
-		--debug = {stream = true},
 	}
 	if ret == nil then
 		die('HTTP error: %s', res)
@@ -290,19 +289,7 @@ local function json_api(action, ...) return _api('json', false, action, ...) end
 local function text_api(action, ...) return _api('txt', false, action, ...) end
 local function out_text_api(action, ...) _api('txt', true, action, ...) end
 
---tools ----------------------------------------------------------------------
-
-local function NYI(event)
-	logerror('mm', event, 'NYI')
-end
-
-function sshcmd(cmd)
-	return win and indir(mm.sshdir, cmd) or cmd
-end
-
-local function from_server(from_db)
-	return not from_db and mm.conf.mm_host and not mm.server_running
-end
+--common ---------------------------------------------------------------------
 
 function mm.machine_info(machine, from_db)
 	if from_server(from_db) then
@@ -396,7 +383,7 @@ function mm.ssh_hostkey(machine, from_db)
 	end
 	machine = checkarg(str_arg(machine))
 	local key = first_row([[
-		select fingerprint from machine where machine = ?
+		select ssh_hostkey from machine where machine = ?
 	]], machine)
 	return checkfound(key):trim()
 end
@@ -413,7 +400,7 @@ function mm.ssh_hostkey_sha(machine, from_db)
 	end
 	machine = checkarg(str_arg(machine))
 	local key = first_row([[
-		select fingerprint from machine where machine = ?
+		select ssh_hostkey from machine where machine = ?
 	]], machine)
 	local key = checkfound(key):trim()
 	local cmd = {sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'}
@@ -529,6 +516,31 @@ end
 
 htmlfile'mm.html'
 jsfile'mm.js'
+
+rowset.git_hosting = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			name,
+			host,
+			ssh_hostkey,
+			ssh_key,
+			pos
+		from
+			git_hosting
+	]],
+	pk = 'name',
+	hide_cols = 'ssh_hostkey ssh_key',
+	insert_row = function(self, row)
+		self:insert_into('git_hosting', row, 'name host ssh_hostkey ssh_key pos')
+	end,
+	update_row = function(self, row)
+		self:update_into('git_hosting', row, 'name host ssh_hostkey ssh_key pos')
+	end,
+	delete_row = function(self, row)
+		self:delete_from('git_hosting', row)
+	end,
+}
 
 rowset.providers = sql_rowset{
 	allow = 'admin',
@@ -1436,9 +1448,9 @@ cmd_machines('machine-info MACHINE', 'Show machine info',
 function mm.gen_known_hosts_file()
 	local t = {}
 	for i, ip, s in each_row_vals[[
-		select public_ip, fingerprint
+		select public_ip, ssh_hostkey
 		from machine
-		where fingerprint is not null
+		where ssh_hostkey is not null
 		order by pos, ctime
 	]] do
 		add(t, s)
@@ -1448,20 +1460,20 @@ end
 
 function mm.ssh_hostkey_update(machine)
 	local ip, machine = mm.ip(machine, true)
-	local cmd = {sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', ip}
-	local opt = {
+	local task = mm.exec({
+		sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', ip
+	}, {
 		task = 'ssh_hostkey_update '..machine,
 		action = 'ssh_hostkey_update', args = {'machine'},
 		capture_stdout = true,
-	}
-	local task = mm.exec(cmd, opt)
-	local fp = task:stdout()
-	assert(update_row('machine', {machine, fingerprint = fp}).affected_rows == 1)
+	})
+	local s = task:stdout()
+	assert(update_row('machine', {machine, ssh_hostkey = s}).affected_rows == 1)
 	mm.gen_known_hosts_file()
 end
 function mm.json_api.ssh_hostkey_update(machine)
 	mm.ssh_hostkey_update(machine)
-	return {machine = machine, notify = 'Host fingerprint updated for '..machine}
+	return {machine = machine, notify = 'Host key updated for '..machine}
 end
 cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
 	function(machine)
@@ -1584,12 +1596,18 @@ end)
 --git keys update -------------------------------------------------------------
 
 local function git_hosting_vars()
-	local vars = {GIT_HOSTS = cat(keys(mm.git_hosting, true), ' ')}
-	for host,t in pairs(mm.git_hosting) do
+	local vars = {}
+	local names = {}
+	for _,t in each_row[[
+		select name, host, ssh_hostkey, ssh_key
+		from git_hosting
+	]] do
 		for k,v in pairs(t) do
-			vars[(host..'_'..k):upper()] = v
+			vars[(t.name..'_'..k):upper()] = v
+			names[t.name] = true
 		end
 	end
+	vars.GIT_HOSTS = cat(keys(names, true), ' ')
 	return vars
 end
 
@@ -1987,7 +2005,16 @@ rowset.backup_replicas = sql_rowset{
 	end,
 }
 
-function mm.backup(deploy, parent_bkp, name)
+function mm.backup(to_text, from_db, deploy, parent_bkp, name)
+
+	if from_server(from_db) then
+		if to_text then
+			out_text_api('backup', deploy, parent_bkp, name)
+			return
+		else
+			return json_api('backup', deploy, parent_bkp, name)
+		end
+	end
 
 	deploy = checkarg(str_arg(deploy))
 	parent_bkp = parent_bkp and checkarg(id_arg(parent_bkp))
@@ -2035,6 +2062,8 @@ function mm.backup(deploy, parent_bkp, name)
 	}, {
 		task = task_name,
 		capture_stdout = true,
+		out_stdout = to_text,
+		out_stderr = to_text,
 	})
 
 	local s = task:stdout()
@@ -2055,12 +2084,15 @@ function mm.backup(deploy, parent_bkp, name)
 	rowset_changed'backups'
 	rowset_changed'backup_replicas'
 end
+function mm.text_api.backup(deploy, ...)
+	mm.backup(true, true, deploy, ...)
+end
 function mm.json_api.backup(deploy, ...)
-	mm.backup(deploy, ...)
+	mm.backup(false, true, deploy, ...)
 	return {deploy = deploy, notify = 'Backup done for '..deploy}
 end
 cmd_backups('backup DEPLOY [PARENT_BKP] [NAME]', 'Backup a database', function(...)
-	api('backup', ...)
+	mm.backup(true, false, ...)
 end)
 
 local function rsync_vars(machine)
