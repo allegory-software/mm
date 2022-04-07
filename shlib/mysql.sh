@@ -12,7 +12,12 @@ percona_pxc_install() {
 	must rm $f
 	must percona-release setup -y pxc80
 	apt_get_install percona-xtradb-cluster percona-xtrabackup-80 qpress
+	mysql_config_clear
 	mysql_config "[mysqld]"
+}
+
+mysql_config_clear() {
+	must save "" /etc/mysql/mysql.conf.d/z.cnf
 }
 
 mysql_config() {
