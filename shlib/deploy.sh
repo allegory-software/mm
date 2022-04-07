@@ -15,7 +15,8 @@ machine_prepare() {
 	mysql_update_root_pass "$MYSQL_ROOT_PASS"
 
 	# allow binding to ports < 1024.
-	echo 'net.ipv4.ip_unprivileged_port_start=0' > /etc/sysctl.d/50-unprivileged-ports.conf
+	must save 'net.ipv4.ip_unprivileged_port_start=0' \
+		/etc/sysctl.d/50-unprivileged-ports.conf
 	sysctl --system
 
 	say "Prepare done."

@@ -4,7 +4,8 @@ ssh_hostkey_update() { # host fingerprint
 	say "Updating SSH host fingerprint for host '$1' (/etc/ssh)..."
 	local kh=/etc/ssh/ssh_known_hosts
 	run ssh-keygen -R "$1" -f $kh # remove host line if found
-	must printf "%s\n" "$2" >> $kh
+	local newline=$'\n'
+	must append "$2$newline" $kh
 	must chmod 644 $kh
 }
 
@@ -20,7 +21,8 @@ ssh_host_update() { # host keyname [unstable_ip]
 		printf "\t%s\n" "HostName $1"
 		printf "\t%s\n" "IdentityFile $HOME/.ssh/${2}.id_rsa"
 		[ "$3" ] && printf "\t%s\n" "CheckHostIP no"
-	) > $CONFIG
+		return 0
+	) > $CONFIG || die "SAVE-TO: $CONFIG [$?]"
 	must chown $USER:$USER -R $HOME/.ssh
 }
 
@@ -28,7 +30,7 @@ ssh_key_update() { # keyname key
 	say "Updating SSH key '$1' ($HOME)..."
 	must mkdir -p $HOME/.ssh
 	local idf=$HOME/.ssh/${1}.id_rsa
-	must printf "%s" "$2" > $idf
+	must save "$2" $idf
 	must chmod 600 $idf
 	must chown $USER:$USER -R $HOME/.ssh
 }
@@ -43,7 +45,8 @@ ssh_update_pubkey() { # keyname key
 	local ak=$HOME/.ssh/authorized_keys
 	must mkdir -p $HOME/.ssh
 	[ -f $ak ] && must sed -i "/ $1/d" $ak
-	must printf "%s\n" "$2" >> $ak
+	local newline=$'\n'
+	must append "$2$newline" $ak
 	must chmod 600 $ak
 	must chown $USER:$USER -R $HOME/.ssh
 }
@@ -105,8 +108,8 @@ rsync_to() { # host dir|file
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT
-	printf "%s" "$SSH_KEY" > $p
-	printf "%s" "$SSH_HOSTKEY" > $h
+	must save "$SSH_KEY"     $p
+	must save "$SSH_HOSTKEY" $h
 	SSH_KEY=
 	SSH_HOSTKEY=
 	must chmod 400 $p $h

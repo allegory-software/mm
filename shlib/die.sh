@@ -1,10 +1,12 @@
 
 # die hard, see https://github.com/capr/die
-say()   { echo "$@" >&2; }
-die()   { echo -n "ABORT: " >&2; echo "$@" >&2; exit 1; }
-debug() { [ -z "$DEBUG" ] || echo "$@" >&2; }
-run()   { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
-must()  { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
+say()       { echo "$@" >&2; }
+die()       { echo -n "ABORT: " >&2; echo "$@" >&2; exit 1; }
+debug()     { [ -z "$DEBUG" ] || echo "$@" >&2; }
+run()       { debug -n "EXEC: $@ "; "$@"; local ret=$?; debug "[$ret]"; return $ret; }
+must()      { debug -n "MUST: $@ "; "$@"; local ret=$?; debug "[$ret]"; [ $ret == 0 ] || die "$@ [$ret]"; }
+append()    { printf "%s" "$1" >> "$2"; }
+save()      { printf "%s" "$1" > "$2"; }
 
 # enhanced sudo that can:
 #  1. inherit a list of vars.

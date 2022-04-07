@@ -16,7 +16,7 @@ percona_pxc_install() {
 }
 
 mysql_config() {
-	echo "$1" >> /etc/mysql/mysql.conf.d/z.cnf
+	must append "$1" /etc/mysql/mysql.conf.d/z.cnf
 }
 
 # percona xtrabackup ---------------------------------------------------------
@@ -111,10 +111,10 @@ mysql_update_pass() { # host user pass
 
 mysql_update_root_pass() { # pass
 	mysql_update_pass localhost root "$1"
-	must cat > /root/.my.cnf <<-EOF
-		[client]
-		password=$1
-	EOF
+	must save "\
+[client]
+password=$1
+" /root/.my.cnf
 	must chmod 600 /root/.my.cnf
 }
 

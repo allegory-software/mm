@@ -9,7 +9,7 @@ git add -A .
 git commit -m "$msg"
 git push
 '
-	must echo -n "$s" > $git_up
+	must save "$s" $git_up
 	must chmod +x $git_up
 }
 
