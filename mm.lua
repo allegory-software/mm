@@ -643,6 +643,23 @@ local json_api = setmetatable({}, {__newindex = function(_, name, fn)
 	mm.json_api[name] = fn
 end})
 
+local text_api = setmetatable({}, {__newindex = function(_, name, fn)
+	local ext_name = name:gsub('_', '-')
+	mm[name] = function(...)
+		if from_server() then
+			out_text_api(ext_name, ...)
+			return
+		end
+		fn(...)
+	end
+	mm.text_api[name] = fn
+end})
+
+local hybrid_api = setmetatable({}, {__newindex = function(_, name, fn)
+	text_api[name] = function(...) return fn(true , ...) end; mm[name..'_text'] = mm[name]
+	json_api[name] = function(...) return fn(false, ...) end; mm[name..'_json'] = mm[name]
+end})
+
 local function _call(die_on_error, fn, ...)
 	local ok, ret = errors.pcall(fn, ...)
 	if not ok then
@@ -1071,11 +1088,7 @@ end
 
 --text listings --------------------------------------------------------------
 
-function mm.out_machines()
-	if from_server() then
-		out_text_api'machines'
-		return
-	end
+function text_api.out_machines()
 	local rows, cols = query({
 		compact=1,
 	}, [[
@@ -1095,17 +1108,9 @@ function mm.out_machines()
 	]])
 	outpqr(rows, cols)
 end
-mm.text_api.machines = mm.out_machines
-cmd_machines('m|machines', 'Show the list of machines',
-	function()
-		mm.out_machines()
-	end)
+cmd_machines('m|machines', 'Show the list of machines', mm.out_machines)
 
-function mm.out_deploys()
-	if from_server() then
-		out_text_api'deploys'
-		return
-	end
+function text_api.out_deploys()
 	local rows, cols = query({
 		compact=1,
 	}, [[
@@ -1127,17 +1132,9 @@ function mm.out_deploys()
 	]])
 	outpqr(rows, cols)
 end
-mm.text_api.deploys = mm.out_deploys
-cmd_deployments('d|deploys', 'Show the list of deployments',
-	function()
-		mm.out_deploys()
-	end)
+cmd_deployments('d|deploys', 'Show the list of deployments', mm.out_deploys)
 
-function mm.out_backups(dm)
-	if from_server() then
-		out_text_api('backups', dm)
-		return
-	end
+function text_api.out_backups(dm)
 	deploy = checkarg(dm, 'deploy or machine required')
 	local rows, cols = query({
 		compact=1,
@@ -1170,18 +1167,12 @@ function mm.out_backups(dm)
 		r_duration = 'max',
 	})
 end
-mm.text_api.backups = mm.out_backups
 cmd_backups('b|backups DEPLOY|MACHINE', 'Show a list of backups', mm.out_backups)
 
 --command: machine-info ------------------------------------------------------
 
-function mm.update_machine_info(machine)
-	if from_server() then
-		out_text_api('update-machine-info', machine)
-		return
-	end
+function text_api.update_machine_info(machine)
 	local stdout = mm.ssh_sh(machine, [=[
-
 		#use mysql
 
 		echo "           os_ver $(lsb_release -sd)"
@@ -1226,15 +1217,11 @@ function mm.update_machine_info(machine)
 		outprint(_('%20s %s', k, t[k]))
 	end
 end
-mm.text_api.update_machine_info = mm.update_machine_info
-cmd_machines('machine-info MACHINE', 'Show machine info',
-	function(machine)
-		mm.update_machine_info(machine)
-	end)
+cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.update_machine_info)
 
 --command: ssh-hostkey-update ------------------------------------------------
 
-function mm.gen_known_hosts_file()
+local function gen_known_hosts_file()
 	local t = {}
 	for i, ip, s in each_row_vals[[
 		select public_ip, ssh_hostkey
@@ -1258,7 +1245,7 @@ function json_api.ssh_hostkey_update(machine)
 	check500(task.exit_code == 0, 'ssh-keyscan exit code: %d', task.exit_code)
 	local s = task:stdout()
 	assert(update_row('machine', {machine, ssh_hostkey = s}).affected_rows == 1)
-	mm.gen_known_hosts_file()
+	gen_known_hosts_file()
 	return {notify = 'Host key updated for '..machine}
 end
 cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
@@ -1378,15 +1365,7 @@ cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
 
 --command: prepare machine ---------------------------------------------------
 
-function mm.prepare(machine, to_text)
-	if from_server() then
-		if to_text then
-			out_text_api('prepare', machine)
-			return
-		else
-			return json_api('prepare', machine)
-		end
-	end
+function hybrid_api.prepare(to_text, machine)
 	mm.ip(machine)
 	local vars = git_hosting_vars()
 	vars.MYSQL_ROOT_PASS = mm.mysql_root_pass(machine)
@@ -1400,12 +1379,7 @@ function mm.prepare(machine, to_text)
 	})
 	return {notify = 'Machine prepared: '..machine}
 end
-function mm.text_api.prepare(machine) mm.prepare(machine, true ) end
-function mm.json_api.prepare(machine) mm.prepare(machine, false) end
-cmd_machines('prepare MACHINE', 'Prepare a new machine',
-	function(machine)
-		mm.prepare(machine, true)
-	end)
+cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare_text)
 
 --deploy commands ------------------------------------------------------------
 
@@ -1414,7 +1388,7 @@ local function deploy_vars(deploy)
 	deploy = checkarg(deploy, 'deploy required')
 
 	local vars = {}
-	for k,v in pairs(assertf(first_row([[
+	for k,v in pairs(checkfound(first_row([[
 		select
 			d.deploy,
 			d.machine,
@@ -1451,14 +1425,13 @@ local function deploy_vars(deploy)
 	return vars, d
 end
 
-function mm.deploy(deploy, to_text)
-	if from_server() then
-		if to_text then
-			out_text_api('deploy', deploy)
-			return
-		else
-			return json_api('deploy', deploy)
-		end
+function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
+	if app_ver or sdk_ver then
+		update_row('deploy', {
+			deploy,
+			wanted_app_version = app_ver,
+			wanted_sdk_version = sdk_ver,
+		})
 	end
 	local vars = deploy_vars(deploy)
 	update(vars, git_hosting_vars())
@@ -1482,19 +1455,12 @@ function mm.deploy(deploy, to_text)
 		deployed_sdk_commit = sdk_commit,
 		deployed_at = time(),
 	})
+	return {notify = 'Deployed: '..deploy}
 end
-function mm.text_api.deploy(deploy)
-	mm.deploy(deploy, true, true)
-end
-function mm.json_api.deploy(deploy)
-	mm.deploy(deploy, false, true)
-	return {deploy = deploy, notify = 'Deployed: '..deploy}
-end
-cmd_deployments('deploy DEPLOY', 'Deploy an app', function(deploy)
-	mm.deploy(deploy, true)
-end)
+cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
+	mm.deploy_text)
 
-function mm.deploy_remove(deploy)
+function hybrid_api.deploy_remove(deploy)
 	local vars = deploy_vars(deploy)
 	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
@@ -1511,20 +1477,12 @@ function mm.deploy_remove(deploy)
 		deployed_app_commit = null,
 		deployed_sdk_commit = null,
 	})
+	return {notify = 'Deploy removed: '..deploy}
 end
-function mm.json_api.deploy_remove(deploy)
-	mm.deploy_remove(deploy)
-	return {deploy = deploy, notify = 'Deploy removed: '..deploy}
-end
-cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment', function(deploy)
-	api('deploy-remove', deploy)
-end)
+cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
+	mm.deploy_remove_text)
 
-function mm.app(deploy, ...)
-	if from_server() then
-		outapi('app', deploy, ...)
-		return
-	end
+function text_api.app(deploy, ...)
 	local vars = deploy_vars(deploy)
 	local args = proc.quote_args_unix(...)
 	local task = mm.ssh_sh(vars.MACHINE, [[
@@ -1540,12 +1498,7 @@ function mm.app(deploy, ...)
 			out_stderr = true,
 		})
 end
-function mm.text_api.app(deploy, cmd, ...)
-	mm.app(true, deploy, cmd, ...)
-end
-cmd_deployments('app DEPLOY ...', 'Run a deployed app', function(...)
-	mm.app(false, ...)
-end)
+cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app)
 
 --remote logging -------------------------------------------------------------
 
