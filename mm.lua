@@ -657,8 +657,9 @@ local text_api = setmetatable({}, {__newindex = function(_, name, fn)
 end})
 
 local hybrid_api = setmetatable({}, {__newindex = function(_, name, fn)
-	text_api[name] = function(...) return fn(true , ...) end; mm[name..'_text'] = mm[name]
-	json_api[name] = function(...) return fn(false, ...) end; mm[name..'_json'] = mm[name]
+	text_api[name] = function(...) return fn(true , ...) end
+	mm[name..'_text'] = mm[name]
+	json_api[name] = function(...) return fn(false, ...) end
 end})
 
 local function _call(die_on_error, fn, ...)
@@ -1136,41 +1137,6 @@ function text_api.out_deploys()
 end
 cmd_deployments('d|deploys', 'Show the list of deployments', mm.out_deploys)
 
-function text_api.out_backups(dm)
-	deploy = checkarg(dm, 'deploy or machine required')
-	local rows, cols = query({
-		compact=1,
-	}, [[
-		select
-			b.bkp,
-			r.bkp_repl,
-			b.deploy,
-			r.machine,
-			b.app_version ,
-			b.sdk_version ,
-			b.app_commit  ,
-			b.sdk_commit  ,
-			b.start_time b_time,
-			r.start_time r_time,
-			b.duration b_duration,
-			r.duration r_duration,
-			b.name,
-			b.size
-		from bkp b
-		left join bkp_repl r on r.bkp = b.bkp
-		where
-			b.deploy = ? or r.machine = ?
-		order by bkp
-	]], dm, dm)
-	outpqr(rows, cols, {
-		size = 'sum',
-		b_time = 'max',
-		b_duration = 'max',
-		r_duration = 'max',
-	})
-end
-cmd_backups('b|backups DEPLOY|MACHINE', 'Show a list of backups', mm.out_backups)
-
 --command: machine-info ------------------------------------------------------
 
 function text_api.update_machine_info(machine)
@@ -1526,7 +1492,7 @@ cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app)
 mm.log_port = 5555
 
 mm.deploy_logs = {queue_size = 10000} --{deploy->queue}
-mm.deploy_procinfo_logs = {queue_size = 60} --{deploy->queue}
+mm.deploy_procinfo_logs = {queue_size = 61} --{deploy->queue}
 mm.deploy_state_vars = {} --{deploy->{var->val}}
 local log_server_chan = {} --{machine->mess_channel}
 local deploys_changed
@@ -1697,6 +1663,13 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 				end
 			end
 		end
+		sort(rs.rows, function(r1, r2)
+			local d1, t1, id1 = r1[1], r1[2], r1[3]
+			local d2, t2, id2 = r2[1], r2[2], r2[3]
+			if d1 ~= d2 then return d1 < d2 end
+			if t1 ~= t2 then return t1 < t2 end
+			return tonumber(id1:sub(2)) < tonumber(id2:sub(2))
+		end)
 	end
 end)
 
@@ -1783,32 +1756,57 @@ rowset.backup_replicas = sql_rowset{
 	where_all = 'bkp in (:param:filter)',
 	pk = 'bkp_repl',
 	delete_row = function(self, row)
-		mm.backup_remove(row.bkp_repl)
+		mm.backup_remove(row['bkp_repl:old'])
 	end,
 }
 
-function mm.backup(to_text, deploy, parent_bkp, name)
+function text_api.out_backups(dm)
+	deploy = checkarg(dm, 'deploy or machine required')
+	local rows, cols = query({
+		compact=1,
+	}, [[
+		select
+			b.bkp,
+			r.bkp_repl,
+			b.deploy,
+			r.machine,
+			b.app_version app_ver,
+			b.sdk_version sdk_ver,
+			b.app_commit  ,
+			b.sdk_commit  ,
+			b.start_time  bkp_time,
+			r.start_time  repl_time,
+			b.duration    bkp_took,
+			r.duration    repl_took,
+			b.name,
+			b.size
+		from bkp b
+		left join bkp_repl r on r.bkp = b.bkp
+		where
+			b.deploy = ? or r.machine = ?
+		order by bkp
+	]], dm, dm)
+	outpqr(rows, cols, {
+		size = 'sum',
+		bkp_time = 'max',
+		repl_time = 'max',
+		bkp_took = 'max',
+		repl_took = 'max',
+	})
+end
+cmd_backups('b|backups DEPLOY|MACHINE', 'Show a list of backups', mm.out_backups)
 
-	if from_server() then
-		if to_text then
-			out_text_api('backup', deploy, parent_bkp, name)
-			return
-		else
-			return json_api('backup', deploy, parent_bkp, name)
-		end
-	end
+function hybrid_api.backup(to_text, deploy, name, parent_bkp)
 
-	deploy = checkarg(deploy)
-	parent_bkp = parent_bkp and checkarg(id_arg(parent_bkp))
+	parent_bkp = parent_bkp and checkarg(id_arg(parent_bkp), 'invalid parent_bkp')
 
-	local d = first_row([[
+	local d = checkfound(first_row([[
 		select
 			machine,
 			deployed_app_version , deployed_sdk_version,
 			deployed_app_commit  , deployed_sdk_commit
 		from deploy where deploy = ?
-	]], deploy)
-	checkfound(d)
+	]], checkarg(deploy, 'deploy required')), 'deploy not found')
 
 	local task_name = 'backup '..deploy..(parent_bkp and ' '..parent_bkp or '')
 	check500(not mm.running_task(task_name), 'task already running')
@@ -1833,6 +1831,7 @@ function mm.backup(to_text, deploy, parent_bkp, name)
 	})
 
 	rowset_changed'backups'
+	rowset_changed'backup_replicas'
 
 	local task = mm.ssh_sh(d.machine, [[
 		#use mysql
@@ -1846,6 +1845,15 @@ function mm.backup(to_text, deploy, parent_bkp, name)
 		capture_stdout = true,
 		out_stdouterr = to_text,
 	})
+
+	if task.exit_code ~= 0 then
+		if to_text then
+			out('Backup script exit code: '..task.exit_code)
+			return
+		else
+			check500(false, 'Backup script exit code: %d', task.exit_code)
+		end
+	end
 
 	local s = task:stdout()
 	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
@@ -1864,41 +1872,34 @@ function mm.backup(to_text, deploy, parent_bkp, name)
 
 	rowset_changed'backups'
 	rowset_changed'backup_replicas'
+
+	return {notify = 'Backup done for '..deploy}
 end
-function mm.text_api.backup(deploy, ...)
-	mm.backup(true, true, deploy, ...)
-end
-function mm.json_api.backup(deploy, ...)
-	mm.backup(false, true, deploy, ...)
-	return {deploy = deploy, notify = 'Backup done for '..deploy}
-end
-cmd_backups('backup DEPLOY [PARENT_BKP] [NAME]', 'Backup a database', function(...)
-	mm.backup(true, false, ...)
-end)
+cmd_backups('backup DEPLOY [NAME] [PARENT_BKP]', 'Backup a database', mm.backup_text)
 
 local function rsync_vars(machine)
 	return {
 		HOST = mm.ip(machine, true),
-		KEY = load(mm.keyfile(machine)),
-		HOSTKEY = mm.ssh_hostkey(machine),
+		SSH_KEY = load(mm.keyfile(machine)),
+		SSH_HOSTKEY = mm.ssh_hostkey(machine),
 	}
 end
 
 local function bkp_repl_info(bkp_repl)
-	bkp_repl = checkarg(id_arg(bkp_repl))
-	local bkp_repl = first_row([[
-		select r.bkp, r.machine, b.deploy
+	return checkfound(first_row([[
+		select r.bkp_repl, r.bkp, r.machine, b.deploy, r.duration
 		from bkp_repl r
 		inner join bkp b on r.bkp = b.bkp
 		where bkp_repl = ?
-	]], bkp_repl)
-	return checkarg(bkp_repl)
+	]], checkarg(id_arg(bkp_repl), 'bkp_repl required')), 'bkp_repl not found')
 end
 
-function mm.backup_copy(src_bkp_repl, machine)
+function hybrid_api.backup_copy(to_text, src_bkp_repl, machine)
 
 	machine = checkarg(machine)
 	local r = bkp_repl_info(src_bkp_repl)
+
+	checkarg(r.duration, _('bkp_repl %d is not complete (didn\'t finish)', r.bkp_repl))
 
 	local bkp_repl = insert_row('bkp_repl', {
 		bkp = r.bkp,
@@ -1916,6 +1917,7 @@ function mm.backup_copy(src_bkp_repl, machine)
 		BKP = r.bkp,
 	}, rsync_vars(machine)), {
 		task = 'backup_copy '..src_bkp_repl..' '..machine,
+		out_stdouterr = to_text,
 	})
 
 	update_row('bkp_repl', {
@@ -1924,16 +1926,25 @@ function mm.backup_copy(src_bkp_repl, machine)
 	})
 
 	rowset_changed'backup_replicas'
-end
-function mm.json_api.backup_copy(...)
-	mm.backup_copy(...)
 	return {notify = 'Backup copied'}
 end
-cmd_backups('backup-copy BKP_REPL HOST', 'Replicate a backup', function(...)
-	json_api('backup-copy', ...)
-end)
+cmd_backups('backup-copy BKP_REPL MACHINE', 'Replicate a backup', mm.backup_copy_text)
 
-function mm.backup_remove(bkp_repl)
+function json_api.backup_remove(bkp)
+	local found
+	for _,bkp_repl in each_row_vals([[
+		select bkp_repl from bkp_repl where bkp = ?
+	]], checkarg(bkp, 'bkp required')) do
+		mm.backup_repl_remove(bkp_repl)
+		found = true
+	end
+	check500(found, 'Backup not found')
+	return {notify = 'Backup removed'}
+end
+cmd_backups('backup-remove BKP', 'Remove backup and all its replicas',
+	mm.backup_remove)
+
+function json_api.backup_repl_remove(bkp_repl)
 
 	local r = bkp_repl_info(bkp_repl)
 
@@ -1944,24 +1955,26 @@ function mm.backup_remove(bkp_repl)
 		DEPLOY = r.deploy,
 		BKP = r.bkp,
 	}, {
-		task = 'backup_remove '..bkp_repl,
+		task = 'backup_repl_remove '..bkp_repl,
 	})
+	check500(task.exit_code == 0, 'Backup replica remove script exit code: %d',
+		task.exit_code)
 
 	delete_row('bkp_repl', {bkp_repl})
 
+	local backup_removed
 	if first_row('select count(1) from bkp_repl where bkp = ?', r.bkp) == 0 then
 		delete_row('bkp', {r.bkp})
+		rowset_changed'backups'
+		backup_removed = true
 	end
 
 	rowset_changed'backup_replicas'
+	return {notify = 'Backup replica removed.'
+		..(backup_removed and ' That was the last replica.' or '')}
 end
-function mm.json_api.backup_remove(...)
-	mm.backup_remove(...)
-	return {notify = 'Backup removed'}
-end
-cmd_backups('backup-remove BKP_REPL', 'Remove backup copy', function(...)
-	json_api('backup-remove', ...)
-end)
+cmd_backups('backup-repl-remove BKP_REPL', 'Remove a backup replica',
+	mm.backup_repl_remove)
 
 --remote access tools --------------------------------------------------------
 

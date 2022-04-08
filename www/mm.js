@@ -115,5 +115,5 @@ function deploy_deploy  () { deploy_action(this, 'deploy') }
 function deploy_remove  () { deploy_action(this, 'deploy-remove') }
 
 function deploy_backup() {
-	this.post('/api.json/xbkp-backup', [this.val('deploy')])
+	this.post(['', 'api.json', 'backup', this.val('deploy')])
 }
