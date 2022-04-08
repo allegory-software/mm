@@ -104,13 +104,13 @@ function ssh_key_updates() {
 	this.post('/api.json/ssh-key-update')
 }
 
-function deploy_action(btn, action) {
+function deploy_action(btn, action, ...args) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
-	btn.post(['', 'api', action], [deploy])
+	btn.post(['', 'api.json', action, deploy, ...args])
 }
-function deploy_start   () { deploy_action(this, 'deploy-start') }
-function deploy_stop    () { deploy_action(this, 'deploy-stop') }
-function deploy_restart () { deploy_action(this, 'deploy-restart') }
+function deploy_start   () { deploy_action(this, 'app', 'start') }
+function deploy_stop    () { deploy_action(this, 'app', 'stop') }
+function deploy_restart () { deploy_action(this, 'app', 'restart') }
 function deploy_deploy  () { deploy_action(this, 'deploy') }
 function deploy_remove  () { deploy_action(this, 'deploy-remove') }
 

@@ -12,13 +12,13 @@
 FEATURES
 	- Lua API, HTTP API, web UI & cmdline UI for every operation.
 	- Windows-native sysadmin tools (sshfs, putty, etc.).
-	- agentless: all relevant ssh scripts are uploaded with each command.
+	- agentless: all relevant bash scripts are uploaded with each command.
 	- keeps all data in a relational database (machines, deployments, etc.).
-	- all processes tracked by a task system with output capturing and autokill.
-	- maintains secure access to all services via bulk updates of:
-		- ssh keys for root access.
+	- all processes are tracked by task system with output capturing and autokill.
+	- maintains secure access to all services via bulk updating of:
+		- ssh root keys.
 		- MySQL root password.
-		- ssh keys for access to git hosting services.
+		- ssh git hosting (github, etc.) keys.
 	- quick-launch of ssh, putty and mysql shells.
 	- quick remote commands: ssh, mysql, rsync, deployed app commands.
 	- remote fs mounts via sshfs (Windows & Linux).
@@ -113,6 +113,7 @@ local function mm_schema()
 		deployed_app_commit  , strid,
 		deployed_sdk_commit  , strid,
 		deployed_at          , timeago,
+		started_at           , timeago,
 		env              , strid, not_null,
 		secret           , secret_key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
@@ -554,11 +555,12 @@ local function api_action(api)
 	return function(action, ...)
 		local f = checkfound(api[action:gsub('-', '_')])
 		checkarg(method'post', 'try POST')
-		checkarg(post() == nil or istab(post()))
+		local post = repl(post(), '')
+		checkarg(post == nil or istab(post))
 		allow(admin())
 		--args are passed as `getarg1, getarg2, ..., postarg1, postarg2, ...`
 		--in any combination, including only get args or only post args.
-		local args = extend(pack_json(...), post())
+		local args = extend(pack_json(...), post)
 		return f(unpack_json(args))
 	end
 end
@@ -613,8 +615,7 @@ local function _api(ext, out_it, action, ...)
 	ret = repl(ret, '') --json action that returned nil.
 
 	if res.status ~= 200 then --check*(), http_error(), error(), or bug.
-		local err = istab(ret) and ret.error or ret
-			or res.status_message or tostring('HTTP '..res.status)
+		local err = istab(ret) and ret.error or ret or res.status_message
 		checkfound (res.status ~= 404, '%s', err)
 		checkarg   (res.status ~= 400, '%s', err)
 		allow      (res.status ~= 403, '%s', err)
@@ -876,8 +877,8 @@ function mm.exec(cmd, opt)
 
 	local task = mm.task(update({cmd = cmd}, opt))
 
-	local capture_stdout = opt.capture_stdout or mm.server_running or opt.out_stdout
-	local capture_stderr = opt.capture_stderr or mm.server_running or opt.out_stderr
+	local capture_stdout = opt.capture_stdout or mm.server_running or opt.out_stdouterr
+	local capture_stderr = opt.capture_stderr or mm.server_running or opt.out_stdouterr
 
 	local p, err = proc.exec{
 		cmd = cmd,
@@ -920,7 +921,7 @@ function mm.exec(cmd, opt)
 					end
 					local s = ffi.string(buf, len)
 					task:out(s)
-					if opt.out_stdout then
+					if opt.out_stdouterr then
 						out(s)
 					end
 				end
@@ -941,7 +942,7 @@ function mm.exec(cmd, opt)
 					end
 					local s = ffi.string(buf, len)
 					task:err(s)
-					if opt.out_stderr then
+					if opt.out_stdouterr then
 						out(s)
 					end
 				end
@@ -1120,6 +1121,7 @@ function text_api.out_deploys()
 			app,
 			env,
 			deployed_at,
+			started_at,
 			wanted_app_version   app_want,
 			deployed_app_version app_depl,
 			deployed_app_commit  app_comm,
@@ -1374,8 +1376,7 @@ function hybrid_api.prepare(to_text, machine)
 		machine_prepare
 	]=], vars, {
 		task = 'prepare '..machine,
-		out_stdout = to_text,
-		out_stderr = to_text,
+		out_stdouterr = to_text,
 	})
 	return {notify = 'Machine prepared: '..machine}
 end
@@ -1441,19 +1442,20 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 	]], vars, {
 		task = 'deploy '..deploy,
 		capture_stdout = true,
-		out_stdout = to_text,
-		out_stderr = to_text,
+		out_stdouterr = to_text,
 	})
 	local s = task:stdout()
 	local app_commit = s:match'app_commit=([^%s]+)'
 	local sdk_commit = s:match'sdk_commit=([^%s]+)'
+	local now = time()
 	update_row('deploy', {
 		vars.DEPLOY,
 		deployed_app_version = vars.VERSION,
 		deployed_sdk_version = vars.SDK_VERSION,
 		deployed_app_commit = app_commit,
 		deployed_sdk_commit = sdk_commit,
-		deployed_at = time(),
+		deployed_at = now,
+		started_at = now,
 	})
 	return {notify = 'Deployed: '..deploy}
 end
@@ -1482,9 +1484,17 @@ end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
 	mm.deploy_remove_text)
 
-function text_api.app(deploy, ...)
+local function find_cmd(...)
+	for i=1,select('#',...) do
+		local s = select(i, ...)
+		if not s:starts'-' then return s end
+	end
+end
+
+function hybrid_api.app(to_text, deploy, ...)
 	local vars = deploy_vars(deploy)
 	local args = proc.quote_args_unix(...)
+	local task_name = 'app '..deploy..' '..args
 	local task = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		app $args
@@ -1493,23 +1503,48 @@ function text_api.app(deploy, ...)
 			APP = vars.APP,
 			args = args,
 		}, {
-			task = 'app '..deploy..' '..args,
-			out_stdout = true,
-			out_stderr = true,
+			task = task_name,
+			out_stdouterr = to_text,
 		})
+	local ok = task.exit_code == 0
+	if ok then
+		local cmd = find_cmd(...)
+		if cmd == 'start' or cmd == 'restart' then
+			update_row('deploy', {deploy, started_at = time()})
+			rowset_changed'deploys'
+		end
+	end
+	return {
+		notify = task_name..(ok and ' ok' or ' exit code: '..task.exit_code),
+		notify_kind = not ok and 'error' or nil,
+	}
 end
 cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app)
 
 --remote logging -------------------------------------------------------------
 
 mm.log_port = 5555
-mm.log_queue_size = 10000
 
-mm.deploy_logs = {}
-mm.deploy_state_vars = {}
-mm.deploy_procinfo_log = {}
-local log_server_chan = {}
+mm.deploy_logs = {queue_size = 10000} --{deploy->queue}
+mm.deploy_procinfo_logs = {queue_size = 60} --{deploy->queue}
+mm.deploy_state_vars = {} --{deploy->{var->val}}
+local log_server_chan = {} --{machine->mess_channel}
 local deploys_changed
+
+function deploy_queue_push(queues, deploy, msg)
+	local q = queues[deploy]
+	if not q then
+		q = queue.new(queues.queue_size)
+		q.next_id = 1
+		queues[deploy] = q
+	end
+	if q:full() then
+		q:pop()
+	end
+	msg.id = q.next_id
+	q.next_id = q.next_id + 1
+	q:push(msg)
+end
 
 local function update_deploy_live_state()
 	local changed
@@ -1559,7 +1594,7 @@ function mm.log_server(machine)
 				mm.log_server_rpc(machine, 'get_osinfo')
 				sleep(1)
 			end
-		end))
+		end, 'log-server-rpc-tick %s', machine))
 		chan:recvall(function(chan, msg)
 			msg.machine = machine
 			if msg.event == 'set' then
@@ -1567,22 +1602,11 @@ function mm.log_server(machine)
 				if msg.k == 'livelist' then
 					rowset_changed'deploy_livelist'
 				elseif msg.k == 'procinfo' then
+					deploy_queue_push(mm.deploy_procinfo_logs, msg.deploy, msg.v)
 					rowset_changed'deploy_procinfo_log'
-					add(attr(mm.deploy_procinfo_log, msg.deploy), msg.v)
 				end
 			else
-				local q = mm.deploy_logs[msg.deploy]
-				if not q then
-					q = queue.new(mm.log_queue_size)
-					q.next_id = 1
-					mm.deploy_logs[msg.deploy] = q
-				end
-				if q:full() then
-					q:pop()
-				end
-				msg.id = q.next_id
-				q.next_id = q.next_id + 1
-				q:push(msg)
+				deploy_queue_push(mm.deploy_logs, msg.deploy, msg)
 				rowset_changed'deploy_log'
 			end
 		end)
@@ -1624,10 +1648,19 @@ rowset.deploy_log = virtual_rowset(function(self)
 		local deploys = params['param:filter']
 		if deploys then
 			for _, deploy in ipairs(deploys) do
-				local msg_queue = mm.deploy_logs[deploy]
-				if msg_queue then
-					for msg in msg_queue:items() do
-						add(rs.rows, {msg.id, msg.time, msg.deploy, msg.severity, msg.module, msg.event, msg.message, msg.env})
+				local log_queue = mm.deploy_logs[deploy]
+				if log_queue then
+					for msg in log_queue:items() do
+						add(rs.rows, {
+							msg.id,
+							msg.time,
+							msg.deploy,
+							msg.severity,
+							msg.module,
+							msg.event,
+							msg.message,
+							msg.env,
+						})
 					end
 				end
 			end
@@ -1682,13 +1715,13 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 		local deploys = params['param:filter']
 		if deploys then
 			for _, deploy in ipairs(deploys) do
-				local pilog = mm.deploy_procinfo_log[deploy]
-				if pilog then
+				local log_queue = mm.deploy_procinfo_logs[deploy]
+				if log_queue then
 					local utime0 = 0
 					local stime0 = 0
 					local clock0 = 0
 					for i = -60, 0 do
-						local t = pilog[#pilog + i]
+						local t = log_queue:item_at(log_queue:count() + i)
 						if t then
 							local dt = (t.clock - clock0)
 							local up = (t.utime - utime0) / dt * 100
@@ -1811,8 +1844,7 @@ function mm.backup(to_text, deploy, parent_bkp, name)
 	}, {
 		task = task_name,
 		capture_stdout = true,
-		out_stdout = to_text,
-		out_stderr = to_text,
+		out_stdouterr = to_text,
 	})
 
 	local s = task:stdout()
@@ -2259,6 +2291,7 @@ rowset.deploys = sql_rowset{
 			wanted_app_version, deployed_app_version, deployed_app_commit,
 			wanted_sdk_version, deployed_sdk_version, deployed_sdk_commit,
 			deployed_at,
+			started_at,
 			env,
 			repo,
 			secret,
@@ -2288,6 +2321,7 @@ rowset.deploys = sql_rowset{
 		deployed_app_commit
 		deployed_sdk_commit
 		deployed_at
+		started_at
 	]],
 	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
@@ -2359,17 +2393,15 @@ end
 local run_server = mm.run_server
 function mm:run_server()
 
-	if false then
+	if true then
+		runevery(1, function()
+			if update_deploy_live_state() then
+				rowset_changed'deploys'
+			end
+		end, 'rowset-changed-deploys-every-second')
 
-	runevery(1, function()
-		if update_deploy_live_state() then
-			rowset_changed'deploys'
-		end
-	end, 'rowset-changed-deploys-every-second')
-
-	runafter(0, run_tasks, 'run-tasks-first-time')
-	runevery(60, run_tasks, 'run-tasks-every-60s')
-
+		runafter(0, run_tasks, 'run-tasks-first-time')
+		runevery(60, run_tasks, 'run-tasks-every-60s')
 	end
 
 	run_server(self)
