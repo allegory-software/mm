@@ -46,9 +46,6 @@ LIMITATIONS
 	- single ssh key for root access.
 	- single ssh key for git access.
 
-	TODO: make mm portable by using file rowsets instead of mysql.
-	TODO: make mm even more portable by saving the var dir to git-hosted encrypted zip files.
-
 ]]
 
 local function mm_schema()
@@ -165,15 +162,15 @@ local function mm_schema()
 		--running
 		action        , name, not_null,
 		--schedule
-		start_at      , timeofday, --null means start right away.
-		run_every     , uint, --in seconds; null means de-arm after start.
+		start_hours   , timeofday, --null means start right away.
+		run_every     , duration, --null means de-arm after start.
 		armed         , bool1,
 		--editing
 		generated_by  , name,
 		editable      , bool1,
 		--log
 		last_run      , timeago,
-		last_duration , double, --in seconds
+		last_duration , duration,
 		last_status   , strid,
 	}
 
@@ -226,16 +223,6 @@ config('getpage_debug', 'stream')
 
 mm.schema:import(mm_schema)
 
---tools ----------------------------------------------------------------------
-
-function sshcmd(cmd)
-	return win and indir(mm.sshdir, cmd) or cmd
-end
-
-local function from_server(from_db)
-	return not from_db and mm.conf.mm_host and not mm.server_running
-end
-
 local function NYI(event)
 	logerror('mm', event, 'NYI')
 end
@@ -252,7 +239,160 @@ cmd('install [forealz]', 'Install or migrate mm', function(doit)
 	say'Install done.'
 end)
 
---running tasks --------------------------------------------------------------
+--web api / server -----------------------------------------------------------
+
+mm.json_api = {} --{action->fn}
+mm.text_api = {} --{action->fn}
+local function api_action(api)
+	return function(action, ...)
+		local f = checkfound(api[action:gsub('-', '_')])
+		checkarg(method'post', 'try POST')
+		local post = repl(post(), '')
+		checkarg(post == nil or istab(post))
+		allow(admin())
+		--args are passed as `getarg1, getarg2, ..., postarg1, postarg2, ...`
+		--in any combination, including only get args or only post args.
+		local args = extend(pack_json(...), post)
+		return f(unpack_json(args))
+	end
+end
+action['api.json'] = api_action(mm.json_api)
+action['api.txt' ] = api_action(mm.text_api)
+
+--web api / client -----------------------------------------------------------
+
+local function unpack_ret(ret)
+	if istab(ret) and ret.unpack then
+		return unpack_json(ret.unpack)
+	end
+	return ret
+end
+
+local function _api(ext, out_it, action, ...)
+
+	local out_buf, out_content
+	if out_it then
+		out_buf = {}
+		function out_content(req, buf, sz)
+			local res = req.response
+			if res.status == 200 then
+				out(buf, sz)
+			else
+				add(out_buf, ffi.string(buf, sz))
+			end
+		end
+	end
+	local uri = url{segments = {'', 'api.'..ext, action}}
+	local ret, res = getpage{
+		host = config'mm_host',
+		uri = uri,
+		headers = {
+			cookie = {
+				session = config'session_cookie',
+			},
+		},
+		method = 'POST',
+		upload = pack_json(...),
+		receive_content = out_content,
+		compress = not out_it,
+			--^^let text come in chunked so we can see each line as soom as it comes.
+	}
+
+	check500(ret ~= nil, '%s', res)
+
+	if out_buf then
+		ret = concat(out_buf)
+	end
+
+	ret = repl(ret, '') --json action that returned nil.
+
+	if res.status ~= 200 then --check*(), http_error(), error(), or bug.
+		local err = istab(ret) and ret.error or ret or res.status_message
+		checkfound (res.status ~= 404, '%s', err)
+		checkarg   (res.status ~= 400, '%s', err)
+		allow      (res.status ~= 403, '%s', err)
+		check500   (res.status ~= 500, '%s', err)
+	end
+
+	return ret
+end
+local function call_json_api(action, ...)
+	return unpack_ret(_api('json', false, action, ...))
+end
+local function out_text_api(action, ...)
+	_api('txt', true, action, ...)
+end
+
+--Lua/web/cmdline api generator ----------------------------------------------
+
+local function from_server(from_db)
+	return not from_db and mm.conf.mm_host and not mm.server_running
+end
+
+local json_api = setmetatable({}, {__newindex = function(_, name, fn)
+	local ext_name = name:gsub('_', '-')
+	mm[name] = function(...)
+		if from_server() then
+			return call_json_api(ext_name, ...)
+		end
+		return unpack_ret(fn(...))
+	end
+	mm.json_api[name] = fn
+end})
+
+local text_api = setmetatable({}, {__newindex = function(_, name, fn)
+	local ext_name = name:gsub('_', '-')
+	mm[name] = function(...)
+		if from_server() then
+			out_text_api(ext_name, ...)
+			return
+		end
+		fn(...)
+	end
+	mm.text_api[name] = fn
+end})
+
+local hybrid_api = setmetatable({}, {__newindex = function(_, name, fn)
+	text_api[name] = function(...) return fn(true , ...) end
+	mm[name..'_text'] = mm[name]
+	json_api[name] = function(...) return fn(false, ...) end
+end})
+
+local function _call(die_on_error, fn, ...)
+	local ok, ret = errors.pcall(fn, ...)
+	if not ok then
+		local err = ret
+		if die_on_error then
+			die('%s', err)
+		else
+			say('ERROR: %s', err)
+		end
+	end
+	if istab(ret) and ret.notify then
+		local kind = ret.notify_kind
+		say('%s%s', kind and kind:upper()..': ' or '', ret.notify)
+	end
+	return ret
+end
+local call = function(...) return _call(true, ...) end
+local callp = function(...) return _call(false, ...) end
+
+local function wrap(fn)
+	return function(...)
+		call(fn, ...)
+	end
+end
+local cmd_ssh_keys    = cmdsection('SSH KEY MANAGEMENT', wrap)
+local cmd_ssh         = cmdsection('SSH TERMINALS'     , wrap)
+local cmd_ssh_tunnels = cmdsection('SSH TUNNELS'       , wrap)
+local cmd_ssh_mounts  = cmdsection('SSH-FS MOUNTS'     , wrap)
+local cmd_mysql       = cmdsection('MYSQL'             , wrap)
+local cmd_machines    = cmdsection('MACHINES'          , wrap)
+local cmd_deployments = cmdsection('DEPLOYMENTS'       , wrap)
+local cmd_backups     = cmdsection('BACKUPS'           , wrap)
+local cmd_tasks       = cmdsection('TASKS'             , wrap)
+
+--task system ----------------------------------------------------------------
 
 mm.tasks = {}
 mm.tasks_by_id = {}
@@ -353,6 +493,10 @@ function task:stdout    () return cat(self._out) end
 function task:stderr    () return cat(self._err) end
 function task:stdouterr () return cat(self._outerr) end
 
+local function cmp_start_time(t1, t2)
+	return t1.start_time < t2.start_time
+end
+
 rowset.running_tasks = virtual_rowset(function(self, ...)
 
 	self.allow = 'admin'
@@ -396,7 +540,7 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 	function self:load_rows(rs, params)
 		local filter = params['param:filter']
 		rs.rows = {}
-		for task in sortedpairs(mm.tasks, function(t1, t2) return t1.start_time < t2.start_time end) do
+		for task in sortedpairs(mm.tasks, cmp_start_time) do
 			add(rs.rows, task_row(task))
 		end
 	end
@@ -417,6 +561,34 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 	end
 
 end)
+
+function text_api.out_running_tasks()
+	local fields = {
+		{name = 'task'},
+		{name = 'action'},
+		{name = 'args'},
+		{name = 'machine'},
+		{name = 'status'},
+		{name = 'start_time', type = 'timeago'},
+		{name = 'duration', type = 'duration'},
+		{name = 'exit_code', type = 'number'},
+	}
+	local rows = {}
+	for task in sortedpairs(mm.tasks, cmp_start_time) do
+		add(rows, {
+			task.task,
+			task.action,
+			task.args and cat(imap(task.args, tostring), ' '),
+			task.machine,
+			task.status,
+			task.start_time,
+			task.duration,
+			task.exit_code,
+		})
+	end
+	outpqr(rows, fields)
+end
+cmd_tasks('t|tasks', 'Show running tasks', mm.out_running_tasks)
 
 --scheduled tasks ------------------------------------------------------------
 
@@ -454,15 +626,27 @@ rowset.lookup_task_action = virtual_rowset(function(self)
 	end
 end)
 
-rowset.scheduled_task = virtual_rowset(function(self)
+local function scheduled_task_args(task)
+	local args = {}
+	for _, i, n, s, machine, deploy in each_row_vals([[
+			select task_arg, n, s, machine, deploy
+			from task_arg where task = ? order by task_arg
+		]], task)
+	do
+		args[i] = n or s or machine or deploy
+		args.n = i
+	end
+	return args
+end
+
+rowset.scheduled_task_args = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.manual_init_fields = true
 	function self:load_rows(rs, params)
 		local tasks = params['param:filter']
 		checkarg(tasks and #tasks == 1)
 		local task = tasks[1]
-		local task = first_row('select task, action, args from task where task = ?', task)
-		local row = check500(loadstring('return '..task.args))()
+		local task = first_row('select task, action from task where task = ?', task)
 		self.fields = mm.argdef[task.action]
 		if not self.fields then
 			self.fields = {}
@@ -470,12 +654,13 @@ rowset.scheduled_task = virtual_rowset(function(self)
 				self.fields[i] = {name = 'arg'..i}
 			end
 		end
+		local row = scheduled_task_args(task)
 		rs.rows = {row}
 		self:init_fields()
 	end
 	function self:update_row(row)
 		local task = row['task:old']
-		local task = first_row('select args from task where task = ?', task)
+		--TODO
 	end
 end)
 
@@ -493,8 +678,7 @@ rowset.scheduled_tasks = sql_rowset{
 		select
 			task,
 			action,
-			args,
-			start_at,
+			start_hours,
 			run_every,
 			armed,
 			generated_by,
@@ -506,8 +690,7 @@ rowset.scheduled_tasks = sql_rowset{
 			task
 	]],
 	pk = 'task',
-	ro_cols = 'task', -- action args',
-	--hide_cols = 'action args',
+	ro_cols = 'task',
 	field_attrs = {
 		task = {
 			not_null = false,
@@ -520,7 +703,7 @@ rowset.scheduled_tasks = sql_rowset{
 	},
 	insert_row = function(self, row)
 		row.task = task_name(row.action, row.args)
-		self:insert_into('task', row, 'task action args start_at run_every armed')
+		self:insert_into('task', row, 'task action args start_hours run_every armed')
 	end,
 	update_row = function(self, row)
 		local editable, action, args = first_row_vals([[
@@ -528,7 +711,7 @@ rowset.scheduled_tasks = sql_rowset{
 		]], row['task:old'])
 		checkarg(editable ~= false, 'task not editable')
 		row.task = task_name(row.action or action, row.args or args)
-		self:update_into('task', row, 'task action args start_at run_every armed')
+		self:update_into('task', row, 'task action args start_hours run_every armed')
 	end,
 	delete_row = function(self, row)
 		checkarg(row['editable:old'])
@@ -536,34 +719,24 @@ rowset.scheduled_tasks = sql_rowset{
 	end,
 }
 
-local function run_task(action, args)
-	local cmd = mm[action]
-	local args, err = loadstring('return '..(args or '{}'))
-	args = args and args()
-	if not istab(args) then
-		args, err = nil, 'task args not a table'
-	end
-	warnif('mm', 'task', not cmd, 'invalid task action "%s"', action)
-	warnif('mm', 'task', not args, 'invalid task args "%s": %s', args, err)
-	if not (cmd and args) then
-		return
-	end
-	resume(webb.thread(function()
-		cmd(unpack(args))
-	end, 'run-task'))
+function text_api.out_scheduled_tasks()
+	local rt = rowset.scheduled_tasks
+	local rs = {}
+	rt:load_rows(rs, {})
+	outpqr(rs.rows, rt.fields)
 end
+cmd_tasks('sched', 'Show scheduled tasks', mm.out_scheduled_tasks)
 
 local function run_tasks()
 	local now = time()
 	local today = glue.day(now)
-	for _, task, action, args, start_at, run_every in each_row_vals[[
+	for _, task, action, start_hours, run_every, last_run in each_row_vals[[
 		select
 			task,
 			action,
-			args,
-			time_to_sec(start_at) start_at,
+			time_to_sec(start_hours) start_hours,
 			run_every,
-			last_run
+			unix_timestamp(last_run) last_run
 		from
 			task
 		where
@@ -571,20 +744,42 @@ local function run_tasks()
 		order by
 			last_run
 	]] do
-		local start_at = start_at and today + start_at or now
-		local dt = run_every and run_every ~= 0
-			and (now - start_at) % run_every or 0
-		--^^ seconds past last target time
-		if dt <= (run_every or 0) / 2 then --up-to half-interval late
-			local target_time = now - dt
-			if (last_run or -1/0) < target_time then --not already run
-				if not mm.running_task(task) then
-					local armed = run_every and true or false
-					update_row('task', {task, last_run = now, armed = armed})
-					run_task(action, args)
-				end
+
+		local cmd = mm[action]
+		warnif('mm', 'sched', not cmd, 'invalid action %s', action)
+		if not action then goto skip end
+
+		local min_time = not start_hours and last_run and run_every
+			and last_run + run_every or -1/0
+
+		if start_hours and run_every then
+			local today_at = today + start_hours
+			local seconds_late = (now - today_at) % run_every --always >= 0
+			local last_sched_time = now - seconds_late
+			local already_run = last_run and last_run >= last_sched_time
+			local too_late = seconds_late > run_every / 2
+			if already_run or too_late then
+				min_time = 1/0
 			end
 		end
+
+		if now < min_time then goto skip end
+		if mm.running_task(task) then goto skip end
+
+		local armed = run_every and true or false
+		update_row('task', {task, last_run = now, armed = armed})
+
+		local args = scheduled_task_args(task)
+		local args_s = cat(imap(args, function(v)
+			return isstr(v) and pp.format(v) or logarg(v)
+		end), ', ')
+		note('mm', 'sched', '%s: mm.%s('..args_s..')', task, action, args_s)
+
+		resume(webb.thread(function()
+			cmd(unpack(args))
+		end, 'run-task %s', task))
+
+		::skip::
 	end
 end
 
@@ -602,155 +797,11 @@ end
 	end
 ]]
 
---web api / server -----------------------------------------------------------
-
-mm.json_api = {} --{action->fn}
-mm.text_api = {} --{action->fn}
-local function api_action(api)
-	return function(action, ...)
-		local f = checkfound(api[action:gsub('-', '_')])
-		checkarg(method'post', 'try POST')
-		local post = repl(post(), '')
-		checkarg(post == nil or istab(post))
-		allow(admin())
-		--args are passed as `getarg1, getarg2, ..., postarg1, postarg2, ...`
-		--in any combination, including only get args or only post args.
-		local args = extend(pack_json(...), post)
-		return f(unpack_json(args))
-	end
-end
-action['api.json'] = api_action(mm.json_api)
-action['api.txt' ] = api_action(mm.text_api)
-
---web api / client -----------------------------------------------------------
-
-local function unpack_ret(ret)
-	if istab(ret) and ret.unpack then
-		return unpack_json(ret.unpack)
-	end
-	return ret
-end
-
-local function _api(ext, out_it, action, ...)
-
-	local out_buf, out_content
-	if out_it then
-		out_buf = {}
-		function out_content(req, buf, sz)
-			local res = req.response
-			if res.status == 200 then
-				out(buf, sz)
-			else
-				add(out_buf, ffi.string(buf, sz))
-			end
-		end
-	end
-	local uri = url{segments = {'', 'api.'..ext, action}}
-	local ret, res = getpage{
-		host = config'mm_host',
-		uri = uri,
-		headers = {
-			cookie = {
-				session = config'session_cookie',
-			},
-		},
-		method = 'POST',
-		upload = pack_json(...),
-		receive_content = out_content,
-		compress = not out_it,
-			--^^let text come in chunked so we can see each line as soom as it comes.
-	}
-
-	check500(ret ~= nil, '%s', res)
-
-	if out_buf then
-		ret = concat(out_buf)
-	end
-
-	ret = repl(ret, '') --json action that returned nil.
-
-	if res.status ~= 200 then --check*(), http_error(), error(), or bug.
-		local err = istab(ret) and ret.error or ret or res.status_message
-		checkfound (res.status ~= 404, '%s', err)
-		checkarg   (res.status ~= 400, '%s', err)
-		allow      (res.status ~= 403, '%s', err)
-		check500   (res.status ~= 500, '%s', err)
-	end
-
-	return ret
-end
-local function call_json_api(action, ...)
-	return unpack_ret(_api('json', false, action, ...))
-end
-local function out_text_api(action, ...)
-	_api('txt', true, action, ...)
-end
-
---Lua/web/cmdline api generator ----------------------------------------------
-
-local json_api = setmetatable({}, {__newindex = function(_, name, fn)
-	local ext_name = name:gsub('_', '-')
-	mm[name] = function(...)
-		if from_server() then
-			return call_json_api(ext_name, ...)
-		end
-		return unpack_ret(fn(...))
-	end
-	mm.json_api[name] = fn
-end})
-
-local text_api = setmetatable({}, {__newindex = function(_, name, fn)
-	local ext_name = name:gsub('_', '-')
-	mm[name] = function(...)
-		if from_server() then
-			out_text_api(ext_name, ...)
-			return
-		end
-		fn(...)
-	end
-	mm.text_api[name] = fn
-end})
-
-local hybrid_api = setmetatable({}, {__newindex = function(_, name, fn)
-	text_api[name] = function(...) return fn(true , ...) end
-	mm[name..'_text'] = mm[name]
-	json_api[name] = function(...) return fn(false, ...) end
-end})
-
-local function _call(die_on_error, fn, ...)
-	local ok, ret = errors.pcall(fn, ...)
-	if not ok then
-		local err = ret
-		if die_on_error then
-			die('%s', err)
-		else
-			say('ERROR: %s', err)
-		end
-	end
-	if istab(ret) and ret.notify then
-		local kind = ret.notify_kind
-		say('%s%s', kind and kind:upper()..': ' or '', ret.notify)
-	end
-	return ret
-end
-local call = function(...) return _call(true, ...) end
-local callp = function(...) return _call(false, ...) end
-
-local function wrap(fn)
-	return function(...)
-		call(fn, ...)
-	end
-end
-local cmd_ssh_keys    = cmdsection('SSH KEY MANAGEMENT', wrap)
-local cmd_ssh         = cmdsection('SSH TERMINALS'     , wrap)
-local cmd_ssh_tunnels = cmdsection('SSH TUNNELS'       , wrap)
-local cmd_ssh_mounts  = cmdsection('SSH-FS MOUNTS'     , wrap)
-local cmd_mysql       = cmdsection('MYSQL'             , wrap)
-local cmd_machines    = cmdsection('MACHINES'          , wrap)
-local cmd_deployments = cmdsection('DEPLOYMENTS'       , wrap)
-local cmd_backups     = cmdsection('BACKUPS'           , wrap)
-
 --Lua/web/cmdline info api ---------------------------------------------------
+
+function sshcmd(cmd)
+	return win and indir(mm.sshdir, cmd) or cmd
+end
 
 function json_api.machines()
 	return (query'select machine from machine')
@@ -1388,6 +1439,7 @@ function hybrid_api.prepare(to_text, machine)
 	mm.ip(machine)
 	local vars = git_hosting_vars()
 	vars.MYSQL_ROOT_PASS = mm.mysql_root_pass(machine)
+	vars.MACHINE = machine
 	mm.ssh_sh(machine, [=[
 		#use deploy
 		machine_prepare
@@ -1536,7 +1588,7 @@ function hybrid_api.app(to_text, deploy, ...)
 		notify_kind = not ok and 'error' or nil,
 	}
 end
-cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app)
+cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app_text)
 
 --remote logging -------------------------------------------------------------
 
@@ -1579,10 +1631,10 @@ local function update_deploy_live_state()
 end
 
 function mm.log_server(machine)
-	machine = checkarg(machine)
+
 	local lport = first_row([[
 		select log_local_port from machine where machine = ?
-	]], machine)
+	]], checkarg(machine, 'machine required'))
 	checkfound(lport, 'log_local_port not set for machine '..machine)
 
 	local task = mm.task({

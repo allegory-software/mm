@@ -1,7 +1,32 @@
 #use die ssh user mysql git apt
 
+machine_set_hostname() { # machine
+	local HOST="$1"
+	checkvars HOST
+	must hostnamectl set-hostname $HOST
+	must sed -i '/^127.0.0.1/d' /etc/hosts
+	must append "\
+127.0.0.1 $HOST $HOST
+127.0.0.1 localhost
+" /etc/hosts
+	say "Machine hostname set to: $HOST."
+}
+
+machine_set_timezone() { # tz
+	local TZ="$1"
+	checkvars TZ
+	must timedatectl set-timezone "$TZ" # sets /etc/localtime and /etc/timezone
+	say "Machine timezone set to: $TZ."
+}
+
 machine_prepare() {
-	checkvars MYSQL_ROOT_PASS
+	checkvars MACHINE MYSQL_ROOT_PASS
+
+	# disable clound-init because it resets our changes on reboot.
+	sudo touch /etc/cloud/cloud-init.disabled
+
+	machine_set_hostname $MACHINE
+	machine_set_timezone UTC
 
 	apt_get_install sudo htop mc git gnupg2 lsb-release
 
@@ -9,15 +34,17 @@ machine_prepare() {
 	git_config_user "mm@allegory.ro" "Many Machines"
 	ssh_git_keys_update
 
-	percona_pxc_install
-	mysql_config "log_bin_trust_function_creators = 1"
+	percona_pxc_install "\
+log_bin_trust_function_creators = 1
+default-time-zone = '+00:00'
+"
 	must service mysql start
 	mysql_update_root_pass "$MYSQL_ROOT_PASS"
 
-	# allow binding to ports < 1024.
+	# allow binding to ports < 1024 by any user.
 	must save 'net.ipv4.ip_unprivileged_port_start=0' \
 		/etc/sysctl.d/50-unprivileged-ports.conf
-	sysctl --system
+	must sysctl --system
 
 	say "Prepare done."
 }
