@@ -116,7 +116,8 @@ rsync_to() { # host dir|file
 	local O
 	[ "$VERBOSE" ] && O="-v"
 	[ "$DEBUG"   ] && O="-vvvv"
-	must rsync $O -e "ssh -o UserKnownHostsFile=$h -i $p" -aR "$DIR" "root@$HOST:/"
+	must rsync $O --timeout=5 -e "ssh -o UserKnownHostsFile=$h -i $p" \
+		-aR "$DIR" "root@$HOST:/"
 	rm -f $p $h
 	say "Files copied."
 }

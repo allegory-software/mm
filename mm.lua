@@ -164,7 +164,6 @@ local function mm_schema()
 		task          , url, {type = 'text'}, pk,
 		--running
 		action        , name, not_null,
-		args          , url, --as Lua serialized array
 		--schedule
 		start_at      , timeofday, --null means start right away.
 		run_every     , uint, --in seconds; null means de-arm after start.
@@ -176,6 +175,15 @@ local function mm_schema()
 		last_run      , timeago,
 		last_duration , double, --in seconds
 		last_status   , strid,
+	}
+
+	tables.task_arg = {
+		task          , url, child_fk,
+		task_arg      , uint, not_null, pk,
+		n             , double,
+		s             , text,
+		machine       , strid, fk,
+		deploy        , strid, fk,
 	}
 
 end
@@ -420,7 +428,31 @@ mm.argdef = {
 		{name = 'machine', lookup_cols = 'machine', lookup_rowset_name = 'lookup_machine'},
 		{name = 'ports'},
 	},
+	backup = {
+		{name = 'deploy', lookup_cols = 'deploy', lookup_rowset_name = 'lookup_deploy'},
+		{name = 'machines',
+			type = 'tags',
+			lookup_cols = 'machine',
+			lookup_rowset_name = 'lookup_machine',
+		},
+	},
 }
+
+rowset.lookup_task_action = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'action'},
+	}
+	self.pk = 'action'
+	self.rows = {
+		{'backup'},
+	}
+	function self:load_rows(rs, params)
+		local filter = params['param:filter']
+		rs.name_col = 'action'
+		rs.rows = self.rows
+	end
+end)
 
 rowset.scheduled_task = virtual_rowset(function(self)
 	self.allow = 'admin'
@@ -447,6 +479,14 @@ rowset.scheduled_task = virtual_rowset(function(self)
 	end
 end)
 
+local function task_name(action, args)
+	local cmd = mm[action]
+	local args = checkarg(loadstring('return '..(args or '{}')), 'args: invalid syntax')
+	args = args()
+	checkarg(istab(args), 'args: invalid syntax (must be a Lua table)')
+	return action .. (#args > 0 and ' ' .. cat(imap(args, tostring), ' ') or '')
+end
+
 rowset.scheduled_tasks = sql_rowset{
 	allow = 'admin',
 	select = [[
@@ -466,13 +506,28 @@ rowset.scheduled_tasks = sql_rowset{
 			task
 	]],
 	pk = 'task',
-	ro_cols = 'task action args',
-	hide_cols = 'action args',
+	ro_cols = 'task', -- action args',
+	--hide_cols = 'action args',
+	field_attrs = {
+		task = {
+			not_null = false,
+		},
+		action = {
+			lookup_cols = 'action',
+			lookup_rowset_name = 'lookup_task_action',
+			display_col = 'action',
+		},
+	},
 	insert_row = function(self, row)
+		row.task = task_name(row.action, row.args)
 		self:insert_into('task', row, 'task action args start_at run_every armed')
 	end,
 	update_row = function(self, row)
-		checkarg(row['editable:old'])
+		local editable, action, args = first_row_vals([[
+			select editable, action, args from task where task = ?
+		]], row['task:old'])
+		checkarg(editable ~= false, 'task not editable')
+		row.task = task_name(row.action or action, row.args or args)
 		self:update_into('task', row, 'task action args start_at run_every armed')
 	end,
 	delete_row = function(self, row)
@@ -713,7 +768,7 @@ end
 local function callm(cmd, machine)
 	if not machine then
 		call(mm.each_machine, function(m)
-			callp(cmd, m)
+			callp(mm[cmd], m)
 		end, cmd..' %s')
 		return
 	end
@@ -986,10 +1041,6 @@ function mm.exec(cmd, opt)
 	end
 
 	return task
-end
-
-action.test = function()
-	check500(false, '%s', 'dude wtf')
 end
 
 --ssh ------------------------------------------------------------------------
@@ -1796,7 +1847,7 @@ function text_api.out_backups(dm)
 end
 cmd_backups('b|backups DEPLOY|MACHINE', 'Show a list of backups', mm.out_backups)
 
-function hybrid_api.backup(to_text, deploy, name, parent_bkp)
+function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 
 	parent_bkp = parent_bkp and checkarg(id_arg(parent_bkp), 'invalid parent_bkp')
 
@@ -1873,9 +1924,15 @@ function hybrid_api.backup(to_text, deploy, name, parent_bkp)
 	rowset_changed'backups'
 	rowset_changed'backup_replicas'
 
+	for i=1,select('#',...) do
+		local machine = select(i,...)
+		;(to_text and mm.backup_copy_text or mm.backup_copy)(bkp_repl, machine)
+	end
+
 	return {notify = 'Backup done for '..deploy}
 end
-cmd_backups('backup DEPLOY [NAME] [PARENT_BKP]', 'Backup a database', mm.backup_text)
+cmd_backups('backup DEPLOY [NAME] [PARENT_BKP] [MACHINE1,...]',
+	'Backup a database', mm.backup_text)
 
 local function rsync_vars(machine)
 	return {
@@ -1919,6 +1976,14 @@ function hybrid_api.backup_copy(to_text, src_bkp_repl, machine)
 		task = 'backup_copy '..src_bkp_repl..' '..machine,
 		out_stdouterr = to_text,
 	})
+	if task.exit_code ~= 0 then
+		if to_text then
+			out('Backup copy script exit code: '..task.exit_code)
+			return
+		else
+			check500(false, 'Backup copy script exit code: %d', task.exit_code)
+		end
+	end
 
 	update_row('bkp_repl', {
 		bkp_repl,
@@ -1938,11 +2003,27 @@ function json_api.backup_remove(bkp)
 		mm.backup_repl_remove(bkp_repl)
 		found = true
 	end
-	check500(found, 'Backup not found')
-	return {notify = 'Backup removed'}
+	check500(found, 'Backup not found '..bkp)
+	return {notify = 'Backup removed: '..bkp}
 end
-cmd_backups('backup-remove BKP', 'Remove backup and all its replicas',
-	mm.backup_remove)
+cmd_backups('backup-remove BKP1[-BKP2] ...', 'Remove backup(s) with all copies',
+	function(...)
+		for i=1,select('#',...) do
+			local s = select(i,...)
+			if s:find'%-' then
+				local bkp1, bkp2 = s:match'(%d+)%-(%d+)'
+				bkp1 = id_arg(bkp1)
+				bkp2 = id_arg(bkp2)
+				checkarg(bkp1 and bkp2, 'invalid range')
+				for bkp = bkp1, bkp2 do
+					callp(mm.backup_remove, bkp)
+				end
+			else
+				local bkp = checkarg(id_arg(s), 'invalid bkp')
+				callp(mm.backup_remove, bkp)
+			end
+		end
+	end)
 
 function json_api.backup_repl_remove(bkp_repl)
 
