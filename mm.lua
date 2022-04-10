@@ -78,6 +78,7 @@ local function mm_schema()
 		location    , strid, not_null,
 		public_ip   , strid,
 		local_ip    , strid,
+		active      , bool1,
 		ssh_hostkey , public_key,
 		ssh_key     , private_key,
 		ssh_pubkey  , public_key,
@@ -120,9 +121,9 @@ local function mm_schema()
 	}
 
 	tables.deploy_vars = {
-		deploy           , strid, not_null,
-		name             , strid, not_null, pk,
-		val              , text, not_null,
+		deploy , strid, not_null,
+		name   , strid, not_null, pk,
+		val    , text, not_null,
 	}
 
 	tables.deploy_log = {
@@ -157,10 +158,19 @@ local function mm_schema()
 		duration    , duration,
 	}
 
+	tables.action = {
+		action, strpk,
+	}
+
+	tables.action.rows = {
+		{'backup'},
+	}
+
 	tables.task = {
-		task          , url, {type = 'text'}, pk,
+		task          , idpk,
+		name          , longstrid, uk,
 		--running
-		action        , name, not_null,
+		action        , strid, not_null, fk,
 		--schedule
 		start_hours   , timeofday, --null means start right away.
 		run_every     , duration, --null means de-arm after start.
@@ -172,15 +182,29 @@ local function mm_schema()
 		last_run      , timeago,
 		last_duration , duration,
 		last_status   , strid,
+		ctime         , ctime,
+		mtime         , mtime,
 	}
 
-	tables.task_arg = {
-		task          , url, child_fk,
-		task_arg      , uint, not_null, pk,
-		n             , double,
-		s             , text,
-		machine       , strid, fk,
-		deploy        , strid, fk,
+	tables.task_bkp = {
+		task    , idpk, fk,
+		deploy  , strid, not_null, fk,
+		name    , name,
+	}
+
+	tables.task_bkp_machine = {
+		task    , id, fk,
+		machine , strid, fk, pk,
+	}
+
+	tables.task_run = {
+		task_run   , idpk,
+		start_time , timeago, not_null,
+		task       , id,
+		name       , longstrid,
+		duration   , duration,
+		stdouterr  , text,
+		exit_code  , int,
 	}
 
 end
@@ -396,20 +420,21 @@ local cmd_tasks       = cmdsection('TASKS'             , wrap)
 
 mm.tasks = {}
 mm.tasks_by_id = {}
-mm.tasks_by_strid = {}
+mm.tasks_by_name = {}
 local last_task_id = 0
 local task_events_thread
 
 local task = {}
 
-function mm.running_task(task)
-	local task = mm.tasks_by_strid[task]
-	return task and (task.status == 'new' or task.status == 'running') and task or nil
+function mm.running_task(name)
+	local task = mm.tasks_by_name[name]
+	return task and task.keyed ~= false
+		and (task.status == 'new' or task.status == 'running') and task or nil
 end
 
 function mm.task(opt)
-	check500(not mm.running_task(opt.keyed ~= false and opt.task),
-		'task already running: %s', opt.task)
+	check500(not mm.running_task(opt.keyed ~= false and opt.name),
+		'task already running: %s', opt.name)
 	last_task_id = last_task_id + 1
 	local self = object(task, opt, {
 		id = last_task_id,
@@ -419,21 +444,22 @@ function mm.task(opt)
 		errors = {},
 		_out = {},
 		_err = {},
-		_outerr = {}, --interlaced, as they come
+		_outerr = {}, --interleaved as they come
 	})
 	mm.tasks[self] = true
 	mm.tasks_by_id[self.id] = self
-	if self.task then
-		mm.tasks_by_strid[self.task] = self
+	if self.name then
+		mm.tasks_by_name[self.name] = self
 	end
 	return self
 end
 
 function task:free()
+	self:finish()
 	mm.tasks[self] = nil
 	mm.tasks_by_id[self.id] = nil
-	if self.task then
-		mm.tasks_by_strid[self.task] = nil
+	if self.name then
+		mm.tasks_by_name[self.name] = nil
 	end
 	rowset_changed'running_tasks'
 end
@@ -443,28 +469,45 @@ function task:changed()
 	rowset_changed'running_tasks'
 end
 
-function task:setstatus(s, exit_code)
+function task:setstatus(s)
 	self.status = s
 	self:changed()
+	if not self.nolog then
+		if not self.task_run then
+			self.task_run = insert_row('task_run', {
+				start_time = self.start_time,
+				task = self.task,
+				name = self.name,
+				duration = self.duration,
+				stdouterr = self:stdouterr(),
+				exit_code = self.exit_code,
+			})
+		else
+			update_row('task_run', {
+				self.task_run,
+				duration = self.duration,
+				stdouterr = self:stdouterr(),
+				exit_code = self.exit_code,
+			})
+		end
+	end
 end
 
 function task:finish(exit_code)
+	if self.end_time then return end --already called.
 	self.end_time = time()
 	self.exit_code = exit_code
 	self:setstatus(exit_code and 'finished' or 'killed')
 	local s = self:stdouterr()
 	if s ~= '' then
-		dbg('mm', 'taskout', '%s\n%s', self.task or self.action or self.id, s)
+		dbg('mm', 'taskout', '%s\n%s', self.name or self.id, s)
+	end
+	if self.on_finish then
+		self:on_finish()
 	end
 end
 
-function task:do_stop() end --stub
-
-function task:stop()
-	self:do_stop()
-end
-
-function task:do_kill() end
+function task:do_kill() NYI() end --stub
 
 function task:kill()
 	self:do_kill()
@@ -503,9 +546,7 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 	self.fields = {
 		{name = 'id'        , type = 'number', w = 20},
 		{name = 'pinned'    , type = 'bool'},
-		{name = 'task'      , },
-		{name = 'action'    , hidden = true, },
-		{name = 'args'      , hidden = true, },
+		{name = 'name'      , },
 		{name = 'machine'   , hidden = true, hint = 'Machine(s) that this task affects'},
 		{name = 'status'    , },
 		{name = 'start_time', type = 'timestamp'},
@@ -523,9 +564,7 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 		return {
 			task.id,
 			task.pinned or false,
-			task.task,
-			task.action,
-			task.args and cat(imap(task.args, tostring), ' '),
+			task.name,
 			task.machine,
 			task.status,
 			task.start_time,
@@ -564,9 +603,8 @@ end)
 
 function text_api.out_running_tasks()
 	local fields = {
-		{name = 'task'},
-		{name = 'action'},
-		{name = 'args'},
+		{name = 'id'},
+		{name = 'name'},
 		{name = 'machine'},
 		{name = 'status'},
 		{name = 'start_time', type = 'timeago'},
@@ -576,9 +614,8 @@ function text_api.out_running_tasks()
 	local rows = {}
 	for task in sortedpairs(mm.tasks, cmp_start_time) do
 		add(rows, {
-			task.task,
-			task.action,
-			task.args and cat(imap(task.args, tostring), ' '),
+			task.id,
+			task.name,
 			task.machine,
 			task.status,
 			task.start_time,
@@ -592,84 +629,24 @@ cmd_tasks('t|tasks', 'Show running tasks', mm.out_running_tasks)
 
 --scheduled tasks ------------------------------------------------------------
 
-mm.argdef = {
-	log_server = {
-		{name = 'machine', lookup_cols = 'machine', lookup_rowset_name = 'lookup_machine'},
-	},
-	rtunnel = {
-		{name = 'machine', lookup_cols = 'machine', lookup_rowset_name = 'lookup_machine'},
-		{name = 'ports'},
-	},
-	backup = {
-		{name = 'deploy', lookup_cols = 'deploy', lookup_rowset_name = 'lookup_deploy'},
-		{name = 'machines',
-			type = 'tags',
-			lookup_cols = 'machine',
-			lookup_rowset_name = 'lookup_machine',
-		},
-	},
-}
-
-rowset.lookup_task_action = virtual_rowset(function(self)
-	self.allow = 'admin'
-	self.fields = {
-		{name = 'action'},
-	}
-	self.pk = 'action'
-	self.rows = {
-		{'backup'},
-	}
-	function self:load_rows(rs, params)
-		local filter = params['param:filter']
-		rs.name_col = 'action'
-		rs.rows = self.rows
+local function update_task_name(task)
+	local action = first_row('select action from task where task = ?', task)
+	if action == 'backup' then
+		local deploy = first_row('select deploy from task_bkp where task = ?', task)
+		if not deploy then return end
+		update_row('task', {task, name = 'backup '..action})
 	end
-end)
-
-local function scheduled_task_args(task)
-	local args = {}
-	for _, i, n, s, machine, deploy in each_row_vals([[
-			select task_arg, n, s, machine, deploy
-			from task_arg where task = ? order by task_arg
-		]], task)
-	do
-		args[i] = n or s or machine or deploy
-		args.n = i
-	end
-	return args
 end
 
-rowset.scheduled_task_args = virtual_rowset(function(self)
-	self.allow = 'admin'
-	self.manual_init_fields = true
-	function self:load_rows(rs, params)
-		local tasks = params['param:filter']
-		checkarg(tasks and #tasks == 1)
-		local task = tasks[1]
-		local task = first_row('select task, action from task where task = ?', task)
-		self.fields = mm.argdef[task.action]
-		if not self.fields then
-			self.fields = {}
-			for i,v in ipairs(row) do
-				self.fields[i] = {name = 'arg'..i}
-			end
+local function task_function(task)
+	local action = first_row('select action from task where task = ?', task)
+	if action == 'backup' then
+		local t = first_row('select deploy, name from task_bkp where task = ?', task)
+		local machines = query('select machine from task_bkp_machine where task = ?', task)
+		return function()
+			mm.backup(t.deploy, t.name, nil, unpack(machines))
 		end
-		local row = scheduled_task_args(task)
-		rs.rows = {row}
-		self:init_fields()
 	end
-	function self:update_row(row)
-		local task = row['task:old']
-		--TODO
-	end
-end)
-
-local function task_name(action, args)
-	local cmd = mm[action]
-	local args = checkarg(loadstring('return '..(args or '{}')), 'args: invalid syntax')
-	args = args()
-	checkarg(istab(args), 'args: invalid syntax (must be a Lua table)')
-	return action .. (#args > 0 and ' ' .. cat(imap(args, tostring), ' ') or '')
 end
 
 rowset.scheduled_tasks = sql_rowset{
@@ -677,6 +654,7 @@ rowset.scheduled_tasks = sql_rowset{
 	select = [[
 		select
 			task,
+			name,
 			action,
 			start_hours,
 			run_every,
@@ -690,49 +668,61 @@ rowset.scheduled_tasks = sql_rowset{
 			task
 	]],
 	pk = 'task',
-	ro_cols = 'task',
+	ro_cols = 'name',
 	field_attrs = {
-		task = {
-			not_null = false,
-		},
-		action = {
-			lookup_cols = 'action',
-			lookup_rowset_name = 'lookup_task_action',
-			display_col = 'action',
-		},
+		--
 	},
 	insert_row = function(self, row)
-		row.task = task_name(row.action, row.args)
-		self:insert_into('task', row, 'task action args start_hours run_every armed')
+		local task = self:insert_into('task', row, 'action start_hours run_every armed')
+		update_task_name(task)
 	end,
 	update_row = function(self, row)
+		local task = row['task:old']
 		local editable, action, args = first_row_vals([[
-			select editable, action, args from task where task = ?
-		]], row['task:old'])
+			select editable, action from task where task = ?
+		]], task)
 		checkarg(editable ~= false, 'task not editable')
-		row.task = task_name(row.action or action, row.args or args)
-		self:update_into('task', row, 'task action args start_hours run_every armed')
+		self:update_into('task', row, 'action start_hours run_every armed')
+		update_task_name(task)
 	end,
 	delete_row = function(self, row)
-		checkarg(row['editable:old'])
+		checkarg(row['editable:old'], 'task not editable')
 		self:delete_from('task', row)
 	end,
 }
 
 function text_api.out_scheduled_tasks()
-	local rt = rowset.scheduled_tasks
-	local rs = {}
-	rt:load_rows(rs, {})
-	outpqr(rs.rows, rt.fields)
+	local rows, fields = query({compact=1}, [[
+		select
+			task,
+			name,
+			action,
+			start_hours,
+			run_every,
+			armed,
+			generated_by,
+			editable,
+			last_run,
+			last_duration,
+			last_status
+		from
+			task
+		order by
+			last_run desc,
+			ctime desc
+	]])
+	outpqr(rows, fields)
 end
-cmd_tasks('sched', 'Show scheduled tasks', mm.out_scheduled_tasks)
+cmd_tasks('st|scheduled-tasks', 'Show scheduled tasks', mm.out_scheduled_tasks)
 
 local function run_tasks()
 	local now = time()
 	local today = glue.day(now)
-	for _, task, action, start_hours, run_every, last_run in each_row_vals[[
+
+	for _, task, name, action, start_hours, run_every, last_run in each_row_vals[[
 		select
 			task,
+			name,
 			action,
 			time_to_sec(start_hours) start_hours,
 			run_every,
@@ -741,13 +731,10 @@ local function run_tasks()
 			task
 		where
 			armed = 1
+			and name is not null
 		order by
 			last_run
 	]] do
-
-		local cmd = mm[action]
-		warnif('mm', 'sched', not cmd, 'invalid action %s', action)
-		if not action then goto skip end
 
 		local min_time = not start_hours and last_run and run_every
 			and last_run + run_every or -1/0
@@ -763,39 +750,21 @@ local function run_tasks()
 			end
 		end
 
-		if now < min_time then goto skip end
-		if mm.running_task(task) then goto skip end
+		if now >= min_time and not mm.running_task(name) then
 
-		local armed = run_every and true or false
-		update_row('task', {task, last_run = now, armed = armed})
-
-		local args = scheduled_task_args(task)
-		local args_s = cat(imap(args, function(v)
-			return isstr(v) and pp.format(v) or logarg(v)
-		end), ', ')
-		note('mm', 'sched', '%s: mm.%s('..args_s..')', task, action, args_s)
-
-		resume(webb.thread(function()
-			cmd(unpack(args))
-		end, 'run-task %s', task))
-
-		::skip::
+			local task_func = task_function(task)
+			warnif('mm', 'task-func', not task_func, 'invalid task action %s', action)
+			if task_func then
+				local rearm = run_every and true or false
+				note('mm', 'run-task', '%s', name)
+				update_row('task', {task, last_run = now, armed = armed})
+				resume(thread(function()
+					local ok, err = pcall(task_func)
+				end, 'run-task %s', task))
+			end
+		end
 	end
 end
-
---TODO
---[[
-	if self.persistent then
-		insert_or_update_row('task', {
-			task = assert(self.task),
-			action = assert(self.action),
-			args = pp.format(assert(self.args), false),
-			run_every = self.run_every,
-			generated_by = self.generated_by,
-			editable = self.editable or false,
-		})
-	end
-]]
 
 --Lua/web/cmdline info api ---------------------------------------------------
 
@@ -921,7 +890,8 @@ function json_api.ssh_hostkey_sha(machine)
 	}, {
 		stdin = key,
 		capture_stdout = true,
-		task = 'ssh_hostkey_sha '..machine, keyed = false,
+		name = 'ssh_hostkey_sha '..machine,
+		keyed = false, nolog = true,
 	})
 	check500(task.exit_code == 0, 'ssh-keygen exit code: %d', task.exit_code)
 	return (task:stdout():trim():match'%s([^%s]+)')
@@ -953,7 +923,7 @@ function mm.ssh_key_gen_ppk(machine)
 		and fmt('%s /keygen %s /output=%s', indir(mm.bindir, 'winscp.com'), key, ppk)
 		or fmt('%s %s -O private -o %s%s', indir(mm.bindir, 'puttygen'), key, ppk, p76)
 	local task = mm.exec(cmd, {
-		task = 'ssh_key_gen_ppk'..(machine and ' '..machine or ''), keyed = false,
+		name = 'ssh_key_gen_ppk'..(machine and ' '..machine or ''),
 	})
 	check500(task.exit_code == 0, 'winscp/puttygen exit code: %d', task.exit_code)
 	return {notify = 'PPK file generated'}
@@ -996,6 +966,8 @@ function mm.exec(cmd, opt)
 		stderr = capture_stderr,
 		stdin = opt.stdin and true or false,
 	}
+
+	local wait
 
 	if not p then
 		task:logerror('exec', '%s', err)
@@ -1060,35 +1032,56 @@ function mm.exec(cmd, opt)
 		--release all db connections now in case this is a long running task.
 		release_dbs()
 
-		local exit_code, err = p:wait()
-		if not exit_code then
-			task:logerror('procwait', '%s', err)
-		end
-		while not (
-				 (not p.stdin or p.stdin:closed())
-			and (not p.stdout or p.stdout:closed())
-			and (not p.stderr or p.stderr:closed())
-		) do
-			sleep(.1)
-		end
-		p:forget()
-		task:finish(exit_code)
-	end
-
-	if opt and not mm.server_running then
-		task:free()
-	else
-		resume(thread(function()
-			sleep(10)
-			while task.pinned do
-				sleep(1)
+		function wait()
+			local exit_code, err = p:wait()
+			if not exit_code then
+				task:logerror('procwait', '%s', err)
 			end
-			task:free()
-		end, 'exec-linger %s', p))
+			while not (
+					 (not p.stdin or p.stdin:closed())
+				and (not p.stdout or p.stdout:closed())
+				and (not p.stderr or p.stderr:closed())
+			) do
+				sleep(.1)
+			end
+			p:forget()
+			task:finish(exit_code)
+		end
+
+		function task:do_kill()
+			p:kill()
+		end
 	end
 
-	if #task.errors > 0 then
-		check500(false, cat(task.errors, '\n'))
+	local function finish()
+		if opt and not mm.server_running then
+			task:free()
+		else
+			resume(thread(function()
+				sleep(10)
+				while task.pinned do
+					sleep(1)
+				end
+				task:free()
+			end, 'exec-zombie %s', p))
+		end
+		if #task.errors > 0 then
+			check500(false, cat(task.errors, '\n'))
+		end
+	end
+
+	if not p then
+		finish()
+	else
+		if opt.async then
+			resume(thread(function()
+				wait()
+				finish()
+			end), 'exec-wait %s', p)
+		else
+			wait()
+			finish()
+		end
 	end
 
 	return task
@@ -1257,7 +1250,8 @@ function text_api.update_machine_info(machine)
 		echo "      hdd_free_gb $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
 
 	]=], nil, {
-		task = 'update_machine_info '..(machine or ''), keyed = false,
+		name = 'update_machine_info '..(machine or ''),
+		keyed = false, nolog = true,
 		capture_stdout = true,
 	}):stdout()
 	local t = {machine = machine, last_seen = time()}
@@ -1309,7 +1303,7 @@ function json_api.ssh_hostkey_update(machine)
 	local task = mm.exec({
 		sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', ip
 	}, {
-		task = 'ssh_hostkey_update '..machine,
+		name = 'ssh_hostkey_update '..machine,
 		capture_stdout = true,
 	})
 	check500(task.exit_code == 0, 'ssh-keyscan exit code: %d', task.exit_code)
@@ -1353,7 +1347,7 @@ function json_api.ssh_key_update(machine)
 		PUBKEY = pubkey,
 		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
 	}, {
-		task = 'ssh_key_update '..machine,
+		name = 'ssh_key_update '..machine,
 		capture_stdout = true,
 	})
 	check500(task.exit_code == 0, 'SSH key update script exit code %d for %s',
@@ -1380,7 +1374,8 @@ function json_api.ssh_key_check(machine)
 		#use ssh
 		ssh_pubkey mm
 	]], nil, {
-		task = 'ssh_key_check '..(machine or ''),
+		name = 'ssh_key_check '..(machine or ''),
+		keyed = false, nolog = true,
 		capture_stdout = true,
 	})
 	check500(task.exit_code == 0, 'SSH key check script exit code %d for %s',
@@ -1423,7 +1418,9 @@ function json_api.git_keys_update(machine)
 	local task = mm.ssh_sh(machine, [=[
 		#use ssh
 		ssh_git_keys_update
-	]=], vars, {task = 'git_keys_update '..(machine or '')})
+	]=], vars, {
+		task = 'git_keys_update '..(machine or ''),
+	})
 	check500(task.exit_code == 0, 'Git keys update script exit code %d for %s',
 		task.exit_code, machine)
 	return {notify = 'Git keys updated for '..machine}
@@ -1444,7 +1441,7 @@ function hybrid_api.prepare(to_text, machine)
 		#use deploy
 		machine_prepare
 	]=], vars, {
-		task = 'prepare '..machine,
+		name = 'prepare '..machine,
 		out_stdouterr = to_text,
 	})
 	return {notify = 'Machine prepared: '..machine}
@@ -1509,7 +1506,7 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 		#use deploy
 		deploy
 	]], vars, {
-		task = 'deploy '..deploy,
+		name = 'deploy '..deploy,
 		capture_stdout = true,
 		out_stdouterr = to_text,
 	})
@@ -1539,7 +1536,9 @@ function hybrid_api.deploy_remove(deploy)
 	]], {
 		DEPLOY = vars.DEPLOY,
 		APP = vars.APP,
-	}, {task = 'deploy_remove '..deploy})
+	}, {
+		name = 'deploy_remove '..deploy,
+	})
 
 	update_row('deploy', {
 		vars.DEPLOY,
@@ -1572,7 +1571,7 @@ function hybrid_api.app(to_text, deploy, ...)
 			APP = vars.APP,
 			args = args,
 		}, {
-			task = task_name,
+			name = task_name,
 			out_stdouterr = to_text,
 		})
 	local ok = task.exit_code == 0
@@ -1598,7 +1597,6 @@ mm.deploy_logs = {queue_size = 10000} --{deploy->queue}
 mm.deploy_procinfo_logs = {queue_size = 61} --{deploy->queue}
 mm.deploy_state_vars = {} --{deploy->{var->val}}
 local log_server_chan = {} --{machine->mess_channel}
-local deploys_changed
 
 function deploy_queue_push(queues, deploy, msg)
 	local q = queues[deploy]
@@ -1638,21 +1636,26 @@ function mm.log_server(machine)
 	checkfound(lport, 'log_local_port not set for machine '..machine)
 
 	local task = mm.task({
-		task = 'log_server '..machine,
-		action = 'log_server', args = {machine},
+		name = 'log_server '..machine,
 		machine = machine,
 		run_every = 0,
-		generated_by = 'log_server',
 		editable = false,
 	})
 
-	resume(thread(function()
-		mm.rtunnel(machine, lport..':'..mm.log_port, {
+	local tunnel_task
+	local function start_tunnel()
+		tunnel_task = mm.rtunnel(machine, lport..':'..mm.log_port, {
 			run_every = 0,
-			generated_by = 'log_server',
+			generated_by = 'log_server '..machine,
 			editable = false,
+			async = true,
+			on_finish = function(task)
+				sleep(1)
+				start_tunnel()
+			end,
 		})
-	end, 'log-server-rtunnel %s', machine))
+	end
+	start_tunnel()
 
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
 		log_server_chan[machine] = chan
@@ -1681,12 +1684,15 @@ function mm.log_server(machine)
 		end)
 	end, nil, 'log-server-'..machine)
 
-	function task:do_stop()
+	function task:do_kill()
 		logserver:stop()
-		task:finish(0)
+		if tunnel_task then
+			tunnel_task:kill()
+		end
 	end
 
 	task:setstatus'running'
+	return task
 end
 function mm.json_api.log_server(machine)
 	mm.log_server(machine)
@@ -1816,6 +1822,15 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	end
 end)
 
+function mm.start_log_servers()
+	for _, machine in each_row_vals[[
+		select machine
+		from machine where active = 1 order by machine
+	]] do
+		pcall(mm.log_server, machine)
+	end
+end
+
 --backups --------------------------------------------------------------------
 
 rowset.backups = sql_rowset{
@@ -1912,7 +1927,7 @@ function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 	]], checkarg(deploy, 'deploy required')), 'deploy not found')
 
 	local task_name = 'backup '..deploy..(parent_bkp and ' '..parent_bkp or '')
-	check500(not mm.running_task(task_name), 'task already running')
+	check500(not mm.running_task(task_name), 'already running: %s', task_name)
 
 	local start_time = time()
 
@@ -1944,7 +1959,7 @@ function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 		bkp = bkp,
 		parent_bkp = parent_bkp,
 	}, {
-		task = task_name,
+		name = task_name,
 		capture_stdout = true,
 		out_stdouterr = to_text,
 	})
@@ -2025,7 +2040,7 @@ function hybrid_api.backup_copy(to_text, src_bkp_repl, machine)
 		DEPLOY = r.deploy,
 		BKP = r.bkp,
 	}, rsync_vars(machine)), {
-		task = 'backup_copy '..src_bkp_repl..' '..machine,
+		name = 'backup_copy '..src_bkp_repl..' '..machine,
 		out_stdouterr = to_text,
 	})
 	if task.exit_code ~= 0 then
@@ -2088,7 +2103,7 @@ function json_api.backup_repl_remove(bkp_repl)
 		DEPLOY = r.deploy,
 		BKP = r.bkp,
 	}, {
-		task = 'backup_repl_remove '..bkp_repl,
+		name = 'backup_repl_remove '..bkp_repl,
 	})
 	check500(task.exit_code == 0, 'Backup replica remove script exit code: %d',
 		task.exit_code)
@@ -2180,10 +2195,8 @@ function mm.tunnel(machine, ports, opt, rev)
 		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
 		add(rports, rport)
 	end
-	local action = (rev and 'r' or '')..'tunnel'
 	return mm.ssh(machine, args, update({
-		task = action..' '..machine..' '..cat(rports, ','),
-		action = action, args = {machine, ports},
+		name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
 		run_every = 0,
 	}, opt))
 end
@@ -2196,28 +2209,32 @@ function mm.mysql_tunnel(machine, opt)
 	local lport = mm.machine_info(machine).mysql_local_port
 	checkfound(lport, 'mysql_local_port not set for machine '..machine)
 	local task_name = 'tunnel '..machine..' 3306'
-	check500(not mm.running_task(task_name), 'task already running')
+	check500(not mm.running_task(task_name), 'already running: %s', task_name)
 	return mm.tunnel(machine, lport..':3306', {
 		run_every = 0,
 		editable = false,
-		task = task_name,
+		name = task_name,
 	})
 end
 
-cmd_ssh_tunnels('tunnel MACHINE RPORT1[:LPORT1],...', 'Create SSH tunnel(s) to machine', function(machine, ports)
-	return mm.tunnel(machine, ports, {allocate_tty = true})
-end)
+cmd_ssh_tunnels('tunnel MACHINE RPORT1[:LPORT1],...',
+	'Create SSH tunnel(s) to machine',
+	function(machine, ports)
+		return mm.tunnel(machine, ports, {allocate_tty = true})
+	end)
 
-cmd_ssh_tunnels('rtunnel MACHINE RPORT1[:LPORT1],...', 'Create reverse SSH tunnel(s) to machine', function(machine, ports)
-	return mm.rtunnel(machine, ports, {allocate_tty = true})
-end)
+cmd_ssh_tunnels('rtunnel MACHINE RPORT1[:LPORT1],...',
+	'Create reverse SSH tunnel(s) to machine',
+	function(machine, ports)
+		return mm.rtunnel(machine, ports, {allocate_tty = true})
+	end)
 
 cmd_mysql('mysql DEPLOY|MACHINE [SQL]', 'Execute MySQL command or remote REPL', function(md, sql)
 	local ip, machine = mm.ip(md)
 	local deploy = machine ~= md and md
 	local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
 	if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
-	mm.ssh(machine, args, not sql and {allocate_tty = true} or nil)
+	return mm.ssh(machine, args, not sql and {allocate_tty = true} or nil)
 end)
 
 --TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
@@ -2244,8 +2261,7 @@ function mm.mount(machine, rem_path, drive, bg)
 			exec(cmd)
 		else
 			local task = mm.exec(cmd, {
-				task = 'mount '..drive,
-				action = 'mount', args = {rem_path, drive},
+				name = 'mount '..drive,
 			})
 			assertf(task.exit_code == 0, 'sshfs exit code: %d', task.exit_code)
 		end
@@ -2540,13 +2556,17 @@ local run_server = mm.run_server
 function mm:run_server()
 
 	if true then
+
 		runevery(1, function()
 			if update_deploy_live_state() then
 				rowset_changed'deploys'
 			end
 		end, 'rowset-changed-deploys-every-second')
 
-		runafter(0, run_tasks, 'run-tasks-first-time')
+		runafter(0, function()
+			mm.start_log_servers()
+			run_tasks()
+		end, 'run-tasks-first-time')
 		runevery(60, run_tasks, 'run-tasks-every-60s')
 	end
 
