@@ -91,10 +91,8 @@ local function mm_schema()
 		log_local_port   , uint16,
 		cpu         , name,
 		cores       , uint16,
-		ram_gb      , double,
-		ram_free_gb , double,
-		hdd_gb      , double,
-		hdd_free_gb , double,
+		ram         , filesize,
+		hdd         , filesize,
 		pos         , pos,
 		ctime       , ctime,
 	}
@@ -1077,7 +1075,7 @@ function mm.exec(cmd, opt)
 			resume(thread(function()
 				wait()
 				finish()
-			end), 'exec-wait %s', p)
+			end, 'exec-wait %s', p))
 		else
 			wait()
 			finish()
@@ -1194,8 +1192,8 @@ function text_api.out_machines()
 			public_ip,
 			last_seen,
 			cores,
-			ram_gb, ram_free_gb,
-			hdd_gb, hdd_free_gb,
+			ram,
+			hdd,
 			cpu,
 			os_ver,
 			mysql_ver,
@@ -1236,25 +1234,14 @@ cmd_deployments('d|deploys', 'Show the list of deployments', mm.out_deploys)
 
 function text_api.update_machine_info(machine)
 	local stdout = mm.ssh_sh(machine, [=[
-		#use mysql
-
-		echo "           os_ver $(lsb_release -sd)"
-		echo "        mysql_ver $(has_mysql && query 'select version();')"
-		echo "              cpu $(lscpu | sed -n 's/^Model name:\s*\(.*\)/\1/p')"
-		                   cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
-		               sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
-		echo "            cores $(expr $sockets \* $cps)"
-		echo "           ram_gb $(cat /proc/meminfo | awk '/MemTotal/ {$2/=1024*1024; printf "%.2f",$2}')"
-		echo "      ram_free_gb $(cat /proc/meminfo | awk '/MemAvailable/ {$2/=1024*1024; printf "%.2f",$2}')"
-		echo "           hdd_gb $(df -l | awk '$6=="/" {printf "%.2f",$2/(1024*1024)}')"
-		echo "      hdd_free_gb $(df -l | awk '$6=="/" {printf "%.2f",$4/(1024*1024)}')"
-
+		#use monitor
+		machine_info
 	]=], nil, {
 		name = 'update_machine_info '..(machine or ''),
 		keyed = false, nolog = true,
 		capture_stdout = true,
 	}):stdout()
-	local t = {machine = machine, last_seen = time()}
+	local t = {machine = machine}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^%s*(.-)%s+(.*)')
 		add(t, k)
@@ -1263,20 +1250,19 @@ function text_api.update_machine_info(machine)
 
 	assert(query([[
 	update machine set
-		os_ver      = :os_ver,
-		mysql_ver   = :mysql_ver,
-		cpu         = :cpu,
-		cores       = :cores,
-		ram_gb      = :ram_gb,
-		ram_free_gb = :ram_free_gb,
-		hdd_gb      = :hdd_gb,
-		hdd_free_gb = :hdd_free_gb,
-		last_seen   = from_unixtime(:last_seen)
+		os_ver    = :os_ver,
+		mysql_ver = :mysql_ver,
+		cpu       = :cpu,
+		cores     = :cores,
+		ram       = :ram,
+		hdd       = :hdd
 	where
 		machine = :machine
 	]], t).affected_rows == 1)
 	rowset_changed'machines'
 
+	t.ram = kbytes(t.ram, 1)
+	t.hdd = kbytes(t.hdd, 1)
 	for i,k in ipairs(t) do
 		outprint(_('%20s %s', k, t[k]))
 	end
@@ -1523,6 +1509,7 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 		deployed_at = now,
 		started_at = now,
 	})
+	rowset_changed'deploys'
 	return {notify = 'Deployed: '..deploy}
 end
 cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
@@ -1595,15 +1582,16 @@ mm.log_port = 5555
 
 mm.deploy_logs = {queue_size = 10000} --{deploy->queue}
 mm.deploy_procinfo_logs = {queue_size = 61} --{deploy->queue}
+mm.machine_osinfo_logs = {queue_size = 61} --{deploy->queue}
 mm.deploy_state_vars = {} --{deploy->{var->val}}
 local log_server_chan = {} --{machine->mess_channel}
 
-function deploy_queue_push(queues, deploy, msg)
-	local q = queues[deploy]
+function queue_push(queues, k, msg)
+	local q = queues[k]
 	if not q then
 		q = queue.new(queues.queue_size)
 		q.next_id = 1
-		queues[deploy] = q
+		queues[k] = q
 	end
 	if q:full() then
 		q:pop()
@@ -1674,11 +1662,16 @@ function mm.log_server(machine)
 				if msg.k == 'livelist' then
 					rowset_changed'deploy_livelist'
 				elseif msg.k == 'procinfo' then
-					deploy_queue_push(mm.deploy_procinfo_logs, msg.deploy, msg.v)
-					rowset_changed'deploy_procinfo_log'
+					msg.v.time = msg.time
+					queue_push(mm.deploy_procinfo_logs, msg.deploy, msg.v)
+					--TODO: filter this on deploy
+					rowset_changed('deploy_procinfo_log')
+				elseif msg.k == 'osinfo' then
+					msg.v.time = msg.time
+					queue_push(mm.machine_osinfo_logs, msg.machine, msg.v)
 				end
 			else
-				deploy_queue_push(mm.deploy_logs, msg.deploy, msg)
+				queue_push(mm.deploy_logs, msg.deploy, msg)
 				rowset_changed'deploy_log'
 			end
 		end)
@@ -2355,6 +2348,45 @@ rowset.providers = sql_rowset{
 	end,
 }
 
+local function compute_cpu_loads(self, vals)
+	local q = mm.machine_osinfo_logs[vals.machine]
+	local t1 = q and q:item_at(q:count())
+	local t0 = q and q:item_at(q:count() - 1)
+	if not (t1 and t0) then return end
+	if t1.time < time() - 2 then return end
+	local d = t1.clock - t0.clock
+	local dt = {}
+	for i,cpu1 in ipairs(t1.cputimes) do
+		local cpu0 = t0.cputimes[i]
+		dt[i] = floor((
+			(cpu1.user - cpu0.user) +
+			(cpu1.nice - cpu0.nice) +
+			(cpu1.sys  - cpu0.sys )
+		) * d * 100)
+	end
+	return cat(dt, ' ')..' %'
+end
+
+local function compute_uptime(self, vals)
+	return vals.t1 and vals.t1.uptime
+end
+
+local function compute_ram_free(self, vals)
+	return vals.t1 and vals.t1.mem_free
+end
+
+local function compute_hdd_free(self, vals)
+	return vals.t1 and vals.t1.hdd_free
+end
+
+local function compute_ram(self, vals)
+	return vals.t1 and vals.t1.mem_size or vals.ram
+end
+
+local function compute_hdd(self, vals)
+	return vals.t1 and vals.t1.hdd_size or vals.hdd
+end
+
 rowset.machines = sql_rowset{
 	allow = 'admin',
 	select = [[
@@ -2362,6 +2394,9 @@ rowset.machines = sql_rowset{
 			pos,
 			machine as refresh,
 			machine,
+			'' as cpu_loads,
+			0 as ram_free,
+			0 as hdd_free,
 			provider,
 			location,
 			public_ip,
@@ -2373,19 +2408,21 @@ rowset.machines = sql_rowset{
 			last_seen,
 			cpu,
 			cores,
-			ram_gb,
-			ram_free_gb,
-			hdd_gb,
-			hdd_free_gb,
+			ram,
+			hdd,
 			os_ver,
 			mysql_ver,
-			ctime
+			ctime,
+			0 as uptime
 		from
 			machine
 	]],
 	pk = 'machine',
 	order_by = 'pos, ctime',
 	field_attrs = {
+		cpu_loads   = {readonly = true, text = 'CPU loads', compute = compute_cpu_loads},
+		ram_free    = {readonly = true, w = 40, type = 'filesize', filesize_decimals = 1, text = 'RAM/free (GB)', compute = compute_ram_free},
+		hdd_free    = {readonly = true, w = 40, type = 'filesize', filesize_decimals = 1, text = 'HDD/free (GB)', compute = compute_hdd_free},
 		public_ip   = {text = 'Public IP Address'},
 		local_ip    = {text = 'Local IP Address', hidden = true},
 		admin_page  = {text = 'VPS admin page of this machine'},
@@ -2393,13 +2430,21 @@ rowset.machines = sql_rowset{
 		last_seen   = {readonly = true},
 		cpu         = {readonly = true, text = 'CPU'},
 		cores       = {readonly = true, w = 20},
-		ram_gb      = {readonly = true, w = 40, decimals = 1, text = 'RAM (GB)'},
-		ram_free_gb = {readonly = true, w = 40, decimals = 1, text = 'RAM/free (GB)'},
-		hdd_gb      = {readonly = true, w = 40, decimals = 1, text = 'HDD (GB)'},
-		hdd_free_gb = {readonly = true, w = 40, decimals = 1, text = 'HDD/free (GB)'},
+		ram         = {readonly = true, w = 40, filesize_decimals = 1, text = 'RAM (GB)', compute = compute_ram},
+		hdd         = {readonly = true, w = 40, filesize_decimals = 1, text = 'HDD (GB)', compute = compute_hdd},
 		os_ver      = {readonly = true, text = 'Operating System'},
 		mysql_ver   = {readonly = true, text = 'MySQL Version'},
+		uptime      = {readonly = true, text = 'Uptime', type = 'duration', compute = compute_uptime},
 	},
+	compute_row_vals = function(self, vals)
+		local q = mm.machine_osinfo_logs[vals.machine]
+		local t1 = q and q:item_at(q:count())
+		local t0 = q and q:item_at(q:count() - 1)
+		if not (t1 and t0) then return end
+		if t1.time < time() - 2 then return end --too old
+		vals.t1 = t1
+		vals.t0 = t0
+	end,
 	insert_row = function(self, row)
 		self:insert_into('machine', row, [[
 			machine provider location
@@ -2490,12 +2535,14 @@ rowset.deploys = sql_rowset{
 		row.secret = b64(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
  		self:insert_into('deploy', row, [[
-			deploy machine repo app wanted_app_version env secret mysql_pass pos
+			deploy machine repo app wanted_app_version wanted_sdk_version
+			env secret mysql_pass pos
 		]])
 	end,
 	update_row = function(self, row)
 		self:update_into('deploy', row, [[
-			deploy machine repo app wanted_app_version env pos
+			deploy machine repo app wanted_app_version wanted_sdk_version
+			env pos
 		]])
 	end,
 	delete_row = function(self, row)
@@ -2561,7 +2608,8 @@ function mm:run_server()
 			if update_deploy_live_state() then
 				rowset_changed'deploys'
 			end
-		end, 'rowset-changed-deploys-every-second')
+			rowset_changed'machines'
+		end, 'rowsets-changed-every-second')
 
 		runafter(0, function()
 			mm.start_log_servers()
