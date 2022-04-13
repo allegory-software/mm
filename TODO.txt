@@ -2,6 +2,8 @@
 ------------------------------------------------------------------------------
 TODO
 
+- xrowset: let sqlpp tell it when tables change.
+
 - xrowset: use schema on virtual_rowset
 
 - xrowset_table: derived from xrowset_sql
@@ -9,15 +11,23 @@ TODO
 
 - mm: save logs (excluding debug lines) in partitioned tables.
 
-- mm: alerts.
+- mm: alerts:
+	events:
+		- the app stopped sending procinfo
+		- max proc on machine is > X % for Y s in a row
+		- free ram on machine is < X MB
+		- app rss is > X MB
+	actions:
+		- log alert
+		- send email describing the situation
+	complications:
+		- prevent repeat email for the same alert type at intervals < X hours
 
 - mm: auto-restart when lost contact (restart -f ?).
 
 
 ------------------------------------------------------------------------------
 BUGS
-
-- mm: logserver chan is per deploy.
 
 - mm: align log queue entries to current time (maybe just send correct clock field?).
 

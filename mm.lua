@@ -1732,15 +1732,15 @@ function mm.log_server(machine)
 	start_tunnel()
 
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
+		local deploy
 		resume(thread(function()
-			while not task.killed do
+			while not chan:closed() do
 				if deploy then
 					mm.log_server_rpc(deploy, 'get_procinfo')
 				end
-				sleep(1)
+				chan:sleep(1)
 			end
 		end, 'log-server-get-procinfo %s', machine))
-		local deploy
 		chan:recvall(function(chan, msg)
 			if not deploy then --first message identifies the client.
 				deploy = msg.deploy
@@ -1767,6 +1767,7 @@ function mm.log_server(machine)
 		end, function()
 			log_server_chan[deploy] = nil
 		end)
+		log_server_chan[deploy] = nil
 	end, nil, 'log-server-'..machine)
 
 	function task:do_kill()
@@ -2568,7 +2569,7 @@ rowset.providers = sql_rowset{
 	end,
 }
 
-local function compute_cpu_loads(self, vals)
+local function compute_cpu_max(self, vals)
 	local t1 = vals.t1
 	local t0 = vals.t0
 	if not (t1 and t0) then return end
@@ -2583,7 +2584,7 @@ local function compute_cpu_loads(self, vals)
 		) * d * 100)
 		max_tp = max(max_tp, tp)
 	end
-	return max_tp..' %'
+	return max_tp
 end
 
 local function compute_uptime(self, vals)
@@ -2613,7 +2614,7 @@ rowset.machines = sql_rowset{
 			pos,
 			machine as refresh,
 			machine,
-			'' as cpu_loads,
+			0 as cpu_max,
 			0 as ram_free,
 			0 as hdd_free,
 			provider,
@@ -2638,7 +2639,7 @@ rowset.machines = sql_rowset{
 	pk = 'machine',
 	order_by = 'pos, ctime',
 	field_attrs = {
-		cpu_loads   = {readonly = true, w = 60, align = 'right', text = 'CPU Max %', compute = compute_cpu_loads},
+		cpu_max     = {readonly = true, w = 60, type = 'percent', align = 'right', text = 'CPU Max %', compute = compute_cpu_max},
 		ram_free    = {readonly = true, w = 60, type = 'filesize', filesize_decimals = 1, text = 'Free RAM', compute = compute_ram_free},
 		hdd_free    = {readonly = true, w = 60, type = 'filesize', filesize_decimals = 1, text = 'Free Disk', compute = compute_hdd_free},
 		public_ip   = {text = 'Public IP Address'},
