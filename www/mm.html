@@ -108,21 +108,27 @@ textarea.x-editbox-input[console] {
 								nav_id=mm_machine_procinfo_log_nav
 								shape=area sum_cols="max_cpu_sys max_cpu avg_cpu_sys avg_cpu" group_cols=clock/1
 								min_sum=0 max_sum=100
+								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
 								shape=area sum_cols="ram_used ram_size" group_cols=clock/1
 								min_sum=0 max_sum=4294967296
+								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
 								shape=area sum_cols="hdd_used hdd_size" group_cols=clock/1
 								min_sum=0 max_sum=107374182400
+								min_val=-60 max_val=0
 							>
 							</x-chart>
 						</div>
+					</x-ct>
+					<x-ct label="MySQL Stats">
+
 					</x-ct>
 				</x-tabs>
 			</x-tabs>
@@ -161,12 +167,18 @@ textarea.x-editbox-input[console] {
 							></x-grid>
 						</x-tabs>
 						<x-form id=mm_deploy_buttons_form grid>
-							<x-button icon="fa fa-arrow-rotate-left" area=restart
+							<x-button
+								icon="fa fa-arrow-rotate-left"
+								load_spin="fa-spin fa-spin-reverse"
+								area=restart
 								action_name=deploy_restart
 								text="Restart"
 							></x-button>
 
-							<x-button icon="fa fa-play" area=start
+							<x-button
+								icon="fa fa-play"
+								load_spin="fa-beat-fade"
+								area=start
 								action_name=deploy_start
 								text="Start"
 								style="align-self: bootom"
@@ -177,7 +189,10 @@ textarea.x-editbox-input[console] {
 								text="Stop"
 							></x-button>
 
-							<x-button icon="fa fa-pizza-slice" area=dep
+							<x-button
+								icon="fa fa-pizza-slice"
+								load_spin="fa-fade"
+								area=dep
 								action_name=deploy_deploy
 								text="Deploy"
 							></x-button>
@@ -196,12 +211,14 @@ textarea.x-editbox-input[console] {
 									nav_id=mm_deploy_procinfo_log
 									shape=area sum_cols="cpu_sys cpu" group_cols=clock/1
 									min_sum=0 max_sum=100
+									min_val=-60 max_val=0
 								>
 								</x-chart>
 								<x-chart
 									nav_id=mm_deploy_procinfo_log
-									shape=area sum_cols="rss ram_used..ram_size" group_cols=clock/1
+									shape=area sum_cols="rss ram_free..ram_size" group_cols=clock/1
 									min_sum=0 max_sum=2147483648
+									min_val=-60 max_val=0
 								>
 								</x-chart>
 							</div>
@@ -229,7 +246,7 @@ textarea.x-editbox-input[console] {
 							<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
 								<x-tabs>
 									<x-grid label="Backup Replicas"
-										id=mm_backup_replicas
+										id=mm_backup_replicas_grid
 										rowset_name=backup_replicas
 										param_nav_id=mm_backups params=bkp
 									></x-grid>

@@ -78,6 +78,8 @@ local function mm_schema()
 		location    , strid, not_null,
 		public_ip   , strid,
 		local_ip    , strid,
+		cost_per_month, money,
+		cost_per_year , money,
 		active      , bool1,
 		ssh_hostkey , public_key,
 		ssh_key     , private_key,
@@ -544,7 +546,8 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'id'        , type = 'number'},
-		{name = 'pinned'    , type = 'bool'},
+		{name = 'pinned'    , 'bool'},
+		{name = 'type'      , },
 		{name = 'name'      , },
 		{name = 'machine'   , hidden = true, hint = 'Machine(s) that this task affects'},
 		{name = 'status'    , },
@@ -563,6 +566,7 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 		return {
 			task.id,
 			task.pinned or false,
+			task.type,
 			task.name,
 			task.machine,
 			task.status,
@@ -1713,6 +1717,7 @@ function mm.log_server(machine)
 		machine = machine,
 		run_every = 0,
 		editable = false,
+		type = 'long',
 	})
 
 	local tunnel_task
@@ -1721,6 +1726,7 @@ function mm.log_server(machine)
 			run_every = 0,
 			generated_by = 'log_server '..machine,
 			editable = false,
+			type = 'long',
 			async = true,
 			on_finish = function(task)
 				sleep(1)
@@ -1880,7 +1886,7 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 		{name = 'cpu'      , type = 'number'   , text = 'CPU'},
 		{name = 'cpu_sys'  , type = 'number'   , text = 'CPU (kernel)'},
 		{name = 'rss'      , type = 'filesize' , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
-		{name = 'ram_used' , type = 'filesize' , text = 'RAM used (total)', filesize_magnitude = 'M'},
+		{name = 'ram_free' , type = 'filesize' , text = 'RAM free (total)', filesize_magnitude = 'M'},
 		{name = 'ram_size' , type = 'filesize' , text = 'RAM size', hidden = true},
 	}
 	self.pk = ''
@@ -1888,32 +1894,34 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 		rs.rows = {}
 		local deploys = params['param:filter']
 		if deploys then
+			local now = time()
 			for _, deploy in ipairs(deploys) do
 				local log_queue = mm.deploy_procinfo_logs[deploy]
 				if log_queue then
-					local utime0 = 0
-					local stime0 = 0
-					local clock0 = 0
-					for i = -60, 0 do
+					local utime0
+					local stime0
+					local clock0
+					for i = -61, 0 do
 						local t = log_queue:item_at(log_queue:count() + i)
 						if t then
-							local dt = (t.clock - clock0)
-							local up = (t.utime - utime0) / dt * 100
-							local sp = (t.stime - stime0) / dt * 100
-							add(rs.rows, {
-								deploy,
-								i,
-								up + sp,
-								up,
-								t.rss,
-								t.ram_size - t.ram_free,
-								t.ram_size,
-							})
+							local clock = t.time - now
+							if clock0 then
+								local dt = (clock - clock0)
+								local up = (t.utime - utime0) / dt * 100
+								local sp = (t.stime - stime0) / dt * 100
+								add(rs.rows, {
+									deploy,
+									clock,
+									up + sp,
+									up,
+									t.rss,
+									t.ram_free + t.rss,
+									t.ram_size,
+								})
+							end
 							utime0 = t.utime
 							stime0 = t.stime
-							clock0 = t.clock
-						else
-							add(rs.rows, {deploy, i})
+							clock0 = clock
 						end
 					end
 				end
@@ -2067,7 +2075,7 @@ rowset.backups = sql_rowset{
 		self:update_into('bkp', row, 'name')
 	end,
 	delete_row = function(self, row)
-		self:delete_from('bkp', row)
+		mm.backup_remove(row['bkp:old'])
 	end,
 }
 
@@ -2087,7 +2095,7 @@ rowset.backup_replicas = sql_rowset{
 	where_all = 'bkp in (:param:filter)',
 	pk = 'bkp_repl',
 	delete_row = function(self, row)
-		mm.backup_remove(row['bkp_repl:old'])
+		mm.backup_repl_remove(row['bkp_repl:old'])
 	end,
 }
 
@@ -2138,7 +2146,7 @@ end
 
 function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 
-	parent_bkp = check_bkp_arg(parent_bkp)
+	parent_bkp = parent_bkp and check_bkp_arg(parent_bkp)
 
 	local d = checkfound(first_row([[
 		select
@@ -2629,6 +2637,8 @@ rowset.machines = sql_rowset{
 			location,
 			public_ip,
 			local_ip,
+			cost_per_month,
+			cost_per_year,
 			log_local_port,
 			mysql_local_port,
 			admin_page,
@@ -2678,7 +2688,7 @@ rowset.machines = sql_rowset{
 	end,
 	insert_row = function(self, row)
 		self:insert_into('machine', row, [[
-			machine provider location
+			machine provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
 			admin_page pos
 		]])
@@ -2687,7 +2697,7 @@ rowset.machines = sql_rowset{
 	end,
 	update_row = function(self, row)
 		self:update_into('machine', row, [[
-			machine provider location
+			machine provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
 			admin_page pos
 		]])

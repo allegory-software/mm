@@ -2,11 +2,19 @@
 ------------------------------------------------------------------------------
 TODO
 
-- xrowset: use schema on virtual_rowset.
+- x-chart: sum_cols="col1/min|max|sum|avg ..."
 
-- xrowset: let sqlpp tell it when tables change.
+- x-chart: show x-markers independent of of data.
+
+- x-chart optimization: continuous mode
+	- when all sum_cols are avg and shape is line* or area* and data is small
+	enough that drawing is faster than grouping.
+
+- let sqlpp tell xrowset when tables change.
 
 - xrowset_table: derived from xrowset_sql.
+
+- xrowset: gen col_map for self:insert_into() etc. from all non-r/o cols.
 
 
 - mm: save logs (excluding debug lines) in partitioned tables.
