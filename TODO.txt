@@ -2,11 +2,11 @@
 ------------------------------------------------------------------------------
 TODO
 
+- xrowset: use schema on virtual_rowset.
+
 - xrowset: let sqlpp tell it when tables change.
 
-- xrowset: use schema on virtual_rowset
-
-- xrowset_table: derived from xrowset_sql
+- xrowset_table: derived from xrowset_sql.
 
 
 - mm: save logs (excluding debug lines) in partitioned tables.

@@ -150,7 +150,7 @@ local function mm_schema()
 	tables.bkp_repl = {
 		bkp_repl    , idpk,
 		bkp         , id, not_null, fk,
-		machine     , strid, not_null, fk,
+		machine     , strid, not_null, fk, uk(bkp, machine),
 		start_time  , timeago,
 		duration    , duration,
 	}
@@ -364,7 +364,7 @@ end})
 
 local text_api = setmetatable({}, {__newindex = function(_, name, fn)
 	local ext_name = name:gsub('_', '-')
-	mm[name] = function(...)
+	mm['out_'..name] = function(...)
 		if from_server() then
 			out_text_api(ext_name, ...)
 			return
@@ -376,7 +376,6 @@ end})
 
 local hybrid_api = setmetatable({}, {__newindex = function(_, name, fn)
 	text_api[name] = function(...) return fn(true , ...) end
-	mm[name..'_text'] = mm[name]
 	json_api[name] = function(...) return fn(false, ...) end
 end})
 
@@ -602,7 +601,7 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 
 end)
 
-function text_api.out_running_tasks()
+function text_api.running_tasks()
 	local fields = {
 		{name = 'id'},
 		{name = 'name'},
@@ -762,7 +761,7 @@ rowset.scheduled_tasks_backup_machines = sql_rowset{
 	end,
 }
 
-function text_api.out_scheduled_tasks()
+function text_api.scheduled_tasks()
 	local rows, fields = query({compact=1}, [[
 		select
 			task,
@@ -1258,7 +1257,7 @@ end
 
 --text listings --------------------------------------------------------------
 
-function text_api.out_machines()
+function text_api.machines()
 	local rows, cols = query({
 		compact=1,
 	}, [[
@@ -1279,7 +1278,7 @@ function text_api.out_machines()
 end
 cmd_machines('m|machines', 'Show the list of machines', mm.out_machines)
 
-function text_api.out_deploys()
+function text_api.deploys()
 	local rows, cols = query({
 		compact=1,
 	}, [[
@@ -1344,7 +1343,7 @@ function text_api.update_machine_info(machine)
 		outprint(_('%20s %s', k, t[k]))
 	end
 end
-cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.update_machine_info)
+cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.out_update_machine_info)
 
 function json_api.machine_reboot(machine)
 	mm.ssh(machine, {
@@ -1518,7 +1517,7 @@ function hybrid_api.prepare(to_text, machine)
 	})
 	return {notify = 'Machine prepared: '..machine}
 end
-cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare_text)
+cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.out_prepare)
 
 --deploy commands ------------------------------------------------------------
 
@@ -1599,7 +1598,7 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 	return {notify = 'Deployed: '..deploy}
 end
 cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
-	mm.deploy_text)
+	mm.out_deploy)
 
 function hybrid_api.deploy_remove(deploy)
 	local vars = deploy_vars(deploy)
@@ -1623,7 +1622,7 @@ function hybrid_api.deploy_remove(deploy)
 	return {notify = 'Deploy removed: '..deploy}
 end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
-	mm.deploy_remove_text)
+	mm.out_deploy_remove)
 
 local function find_cmd(...)
 	for i=1,select('#',...) do
@@ -1660,7 +1659,7 @@ function hybrid_api.app(to_text, deploy, ...)
 		notify_kind = not ok and 'error' or nil,
 	}
 end
-cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app_text)
+cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.out_app)
 
 --remote logging -------------------------------------------------------------
 
@@ -2092,14 +2091,14 @@ rowset.backup_replicas = sql_rowset{
 	end,
 }
 
-function text_api.out_backups(dm)
+function text_api.backups(dm)
 	deploy = checkarg(dm, 'deploy or machine required')
 	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
-			b.bkp,
-			r.bkp_repl,
+			concat('b', b.bkp) bkp,
+			concat('r', r.bkp_repl) bkp_repl,
 			b.deploy,
 			r.machine,
 			b.app_version app_ver,
@@ -2118,6 +2117,8 @@ function text_api.out_backups(dm)
 			b.deploy = ? or r.machine = ?
 		order by bkp
 	]], dm, dm)
+	cols.bkp.align = 'right'
+	cols.bkp_repl.align = 'right'
 	outpqr(rows, cols, {
 		size = 'sum',
 		bkp_time = 'max',
@@ -2126,11 +2127,18 @@ function text_api.out_backups(dm)
 		repl_took = 'max',
 	})
 end
-cmd_backups('b|backups DEPLOY|MACHINE', 'Show a list of backups', mm.out_backups)
+cmd_backups('b|backups DEPLOY|MACHINE', 'Show backup and their replicas', mm.out_backups)
+
+local function check_bkp_arg(s)
+	return isnum(s) and s or checkarg(id_arg(s and s:match'b(%d+)'), 'invalid bkp')
+end
+local function check_bkp_repl_arg(s)
+	return isnum(s) and s or checkarg(id_arg(s and s:match'r(%d+)'), 'invalid bkp_repl')
+end
 
 function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 
-	parent_bkp = parent_bkp and checkarg(id_arg(parent_bkp), 'invalid parent_bkp')
+	parent_bkp = check_bkp_arg(parent_bkp)
 
 	local d = checkfound(first_row([[
 		select
@@ -2207,13 +2215,13 @@ function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 
 	for i=1,select('#',...) do
 		local machine = select(i,...)
-		;(to_text and mm.backup_copy_text or mm.backup_copy)(bkp_repl, machine)
+		;(to_text and mm.out_backup_copy or mm.backup_copy)(bkp_repl, machine)
 	end
 
 	return {notify = 'Backup done for '..deploy}
 end
 cmd_backups('backup DEPLOY [NAME] [PARENT_BKP] [MACHINE1,...]',
-	'Backup a database', mm.backup_text)
+	'Backup a database', mm.out_backup)
 
 local function rsync_vars(machine)
 	return {
@@ -2229,7 +2237,7 @@ local function bkp_repl_info(bkp_repl)
 		from bkp_repl r
 		inner join bkp b on r.bkp = b.bkp
 		where bkp_repl = ?
-	]], checkarg(id_arg(bkp_repl), 'bkp_repl required')), 'bkp_repl not found')
+	]], check_bkp_repl_arg(bkp_repl)), 'bkp_repl not found')
 end
 
 function hybrid_api.backup_copy(to_text, src_bkp_repl, machine)
@@ -2239,7 +2247,7 @@ function hybrid_api.backup_copy(to_text, src_bkp_repl, machine)
 
 	checkarg(r.duration, _('bkp_repl %d is not complete (didn\'t finish)', r.bkp_repl))
 
-	local bkp_repl = insert_row('bkp_repl', {
+	local bkp_repl = insert_or_update_row('bkp_repl', {
 		bkp = r.bkp,
 		machine = machine,
 		start_time = time(),
@@ -2272,35 +2280,35 @@ function hybrid_api.backup_copy(to_text, src_bkp_repl, machine)
 	})
 
 	rowset_changed'backup_replicas'
-	return {notify = 'Backup copied'}
+	return {notify = _('Backup copied: b%d r%d', r.bkp, bkp_repl)}
 end
-cmd_backups('backup-copy BKP_REPL MACHINE', 'Replicate a backup', mm.backup_copy_text)
+cmd_backups('backup-copy BKP_REPL MACHINE', 'Replicate a backup', mm.out_backup_copy)
 
 function json_api.backup_remove(bkp)
 	local found
+	bkp = check_bkp_arg(bkp)
 	for _,bkp_repl in each_row_vals([[
 		select bkp_repl from bkp_repl where bkp = ?
-	]], checkarg(bkp, 'bkp required')) do
+	]], bkp) do
 		mm.backup_repl_remove(bkp_repl)
 		found = true
 	end
 	check500(found, 'Backup not found '..bkp)
-	return {notify = 'Backup removed: '..bkp}
+	return {notify = 'Backup removed: b'..bkp}
 end
 cmd_backups('backup-remove BKP1[-BKP2] ...', 'Remove backup(s) with all copies',
 	function(...)
 		for i=1,select('#',...) do
 			local s = select(i,...)
 			if s:find'%-' then
-				local bkp1, bkp2 = s:match'(%d+)%-(%d+)'
-				bkp1 = id_arg(bkp1)
-				bkp2 = id_arg(bkp2)
-				checkarg(bkp1 and bkp2, 'invalid range')
+				local bkp1, bkp2 = s:match'(.-)%-(.*)'
+				bkp1 = check_bkp_arg(bkp1)
+				bkp2 = check_bkp_arg(bkp2)
 				for bkp = bkp1, bkp2 do
 					callp(mm.backup_remove, bkp)
 				end
 			else
-				local bkp = checkarg(id_arg(s), 'invalid bkp')
+				local bkp = check_bkp_arg(s)
 				callp(mm.backup_remove, bkp)
 			end
 		end
