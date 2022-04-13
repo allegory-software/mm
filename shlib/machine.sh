@@ -10,3 +10,4 @@ machine_info() {
 	echo "      ram $(cat /proc/meminfo | awk '/MemTotal/ {$2*=1024; printf "%.0f",$2}')"
 	echo "      hdd $(df -l / | awk '(NR > 1) {$2*=1024; printf "%.0f",$2}')"
 }
+

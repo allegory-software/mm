@@ -31,42 +31,15 @@ on('mm_machines_grid.init', function(e) {
 			items: grid_items,
 		})
 
-		let ssh_items = []
+		let setup_items = []
 
 		items.push({
-			text: 'SSH',
-			items: ssh_items,
+			text: 'Setup',
+			items: setup_items,
 		})
 
-		ssh_items.push({
-			text: 'Update host fingerprint',
-			action: function() {
-				let machine = e.focused_row_cell_val('machine')
-				if (machine)
-					post('/api.json/ssh-hostkey-update', [machine])
-			},
-		})
-
-		ssh_items.push({
-			text: 'Update key',
-			action: function() {
-				let machine = e.focused_row_cell_val('machine')
-				if (machine)
-					post('/api.json/ssh-key-update', [machine])
-			},
-		})
-
-		ssh_items.push({
-			text: 'Check key',
-			action: function() {
-				let machine = e.focused_row_cell_val('machine')
-				if (machine)
-					post('/api.json/ssh-key-check', [machine])
-			},
-		})
-
-		items.push({
-			text: 'Prepare machine',
+		setup_items.push({
+			text: 'Prepare machine (first thing to do)',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
@@ -74,14 +47,51 @@ on('mm_machines_grid.init', function(e) {
 			},
 		})
 
-		items.push({
-			text: 'Update git keys',
+		setup_items.push({
+			text: 'Update SSH host fingerprint',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					post('/api.json/ssh-hostkey-update', [machine])
+			},
+		})
+
+		setup_items.push({
+			text: 'Update SSH key',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					post('/api.json/ssh-key-update', [machine])
+			},
+		})
+
+		setup_items.push({
+			text: 'Check that SSH key is up-to-date',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					post('/api.json/ssh-key-check', [machine])
+			},
+		})
+
+		setup_items.push({
+			text: 'Update SSH Git keys',
 			action: function() {
 				let machine = e.focused_row_cell_val('machine')
 				if (machine)
 					post('/api.json/git-keys-update', [machine])
 			},
 		})
+
+		items.push({
+			text: 'Reboot machine',
+			confirm: 'Are you sure you want to reboot the machine?',
+			action: function() {
+				let machine = e.focused_row_cell_val('machine')
+				if (machine)
+					post('/api.json/machine-reboot', [machine])
+			}
+		}),
 
 		items.push({
 			text: 'Start log server',
@@ -94,6 +104,20 @@ on('mm_machines_grid.init', function(e) {
 
 	})
 
+})
+
+on('mm_deploy_livelist.bind', function(e, on) {
+	if (on) {
+		e._get_livelist_timer = runagainevery(1, function get_livelist() {
+			let pv0 = e.param_vals && e.param_vals[0]
+			let deploy = pv0 && pv0.deploy
+			if (deploy)
+				post(['get-livelist', deploy])
+		})
+	} else if (e._get_livelist_timer) {
+		clearInterval(e._get_livelist_timer)
+		e._get_livelist_timer = null
+	}
 })
 
 function ssh_key_gen() {

@@ -1,0 +1,31 @@
+
+------------------------------------------------------------------------------
+TODO
+
+- xrowset: use schema on virtual_rowset
+
+- xrowset_table: derived from xrowset_sql
+
+
+- mm: save logs (excluding debug lines) in partitioned tables.
+
+- mm: alerts.
+
+- mm: auto-restart when lost contact (restart -f ?).
+
+
+------------------------------------------------------------------------------
+BUGS
+
+- mm: logserver chan is per deploy.
+
+- mm: align log queue entries to current time (maybe just send correct clock field?).
+
+- http: http_gzip_encode thread is gc'ed but does not explicitly terminates.
+
+
+------------------------------------------------------------------------------
+THINK
+- kbytes() with variable magnitude or max decimals?
+- x-chart: sub-unit log-1024-based steps
+

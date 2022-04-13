@@ -3,7 +3,6 @@
 # percona install ------------------------------------------------------------
 
 percona_pxc_install() {
-	local CONFIG="$1"
 	local f=percona-release_latest.generic_all.deb
 	must wget -nv https://repo.percona.com/apt/$f
 	export DEBIAN_FRONTEND=noninteractive
@@ -13,17 +12,18 @@ percona_pxc_install() {
 	must rm $f
 	must percona-release setup -y pxc80
 	apt_get_install percona-xtradb-cluster percona-xtrabackup-80 qpress
-	mysql_config "[mysqld]
-$CONFIG
-"
 }
 
 mysql_config() {
-	must save "$1" /etc/mysql/mysql.conf.d/z.cnf
+	must save "
+[mysqld]
+$1" /etc/mysql/mysql.conf.d/z.cnf
 }
 
-mysql_config_append() {
-	must append "$1" /etc/mysql/mysql.conf.d/z.cnf
+# TODO: install percona's monitoring and management tool and see if it's
+# worth having it running.
+mysql_set_pool_size() {
+	query "set global innodb_buffer_pool_size = $1"
 }
 
 # percona xtrabackup ---------------------------------------------------------

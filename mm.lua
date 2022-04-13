@@ -84,7 +84,6 @@ local function mm_schema()
 		ssh_pubkey  , public_key,
 		ssh_key_ok  , bool,
 		admin_page  , url,
-		last_seen   , timeago,
 		os_ver      , name,
 		mysql_ver   , name,
 		mysql_local_port , uint16,
@@ -185,7 +184,7 @@ local function mm_schema()
 	}
 
 	tables.task_bkp = {
-		task    , idpk, fk,
+		task    , id, pk, fk,
 		deploy  , strid, not_null, fk,
 		name    , name,
 	}
@@ -201,6 +200,7 @@ local function mm_schema()
 		task       , id,
 		name       , longstrid,
 		duration   , duration,
+		stdin      , text,
 		stdouterr  , text,
 		exit_code  , int,
 	}
@@ -477,6 +477,7 @@ function task:setstatus(s)
 				task = self.task,
 				name = self.name,
 				duration = self.duration,
+				stdin = self.stdin,
 				stdouterr = self:stdouterr(),
 				exit_code = self.exit_code,
 			})
@@ -508,6 +509,7 @@ end
 function task:do_kill() NYI() end --stub
 
 function task:kill()
+	self.killed = true
 	self:do_kill()
 	self:finish()
 end
@@ -542,7 +544,7 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 
 	self.allow = 'admin'
 	self.fields = {
-		{name = 'id'        , type = 'number', w = 20},
+		{name = 'id'        , type = 'number'},
 		{name = 'pinned'    , type = 'bool'},
 		{name = 'name'      , },
 		{name = 'machine'   , hidden = true, hint = 'Machine(s) that this task affects'},
@@ -594,6 +596,7 @@ rowset.running_tasks = virtual_rowset(function(self, ...)
 	end
 
 	function self:delete_row(row)
+		local task = mm.tasks_by_id[row['id:old']]
 		task:kill()
 	end
 
@@ -624,6 +627,25 @@ function text_api.out_running_tasks()
 	outpqr(rows, fields)
 end
 cmd_tasks('t|tasks', 'Show running tasks', mm.out_running_tasks)
+
+rowset.task_runs = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			task_run   ,
+			start_time ,
+			task       ,
+			name       ,
+			duration   ,
+			stdin      ,
+			stdouterr  ,
+			exit_code
+		from
+			task_run
+	]],
+	pk = 'task_run',
+	hide_cols = 'stdin stdouterr',
+}
 
 --scheduled tasks ------------------------------------------------------------
 
@@ -686,6 +708,57 @@ rowset.scheduled_tasks = sql_rowset{
 	delete_row = function(self, row)
 		checkarg(row['editable:old'], 'task not editable')
 		self:delete_from('task', row)
+	end,
+}
+
+rowset.scheduled_tasks_backup = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			task,
+			deploy,
+			name
+		from task_bkp
+	]],
+	where = 'task in (:param:filter)',
+	pk = 'task',
+	hide_cols = 'task',
+	insert_row = function(self, row)
+		self:insert_into('task_bkp', row, 'deploy name')
+		update_task_name(row.task)
+	end,
+	update_row = function(self, row)
+		local task = row['task:old']
+		self:update_into('task_bkp', row, 'deploy name')
+		update_task_name(task)
+	end,
+	delete_row = function(self, row)
+		self:delete_from('task_bkp', row)
+	end,
+}
+
+rowset.scheduled_tasks_backup_machines = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			task,
+			machine
+		from task_bkp_machine
+	]],
+	where = 'task in (:param:filter)',
+	pk = 'task machine',
+	hide_cols = 'task',
+	insert_row = function(self, row)
+		self:insert_into('task_bkp_machine', row, 'machine')
+		update_task_name(row.task)
+	end,
+	update_row = function(self, row)
+		local task = row['task:old']
+		self:update_into('task_bkp_machine', row, 'machine')
+		update_task_name(task)
+	end,
+	delete_row = function(self, row)
+		self:delete_from('task_bkp_machine', row)
 	end,
 }
 
@@ -1033,7 +1106,9 @@ function mm.exec(cmd, opt)
 		function wait()
 			local exit_code, err = p:wait()
 			if not exit_code then
-				task:logerror('procwait', '%s', err)
+				if not (err == 'killed' and task.killed) then
+					task:logerror('procwait', '%s', err)
+				end
 			end
 			while not (
 					 (not p.stdin or p.stdin:closed())
@@ -1190,7 +1265,6 @@ function text_api.out_machines()
 		select
 			machine,
 			public_ip,
-			last_seen,
 			cores,
 			ram,
 			hdd,
@@ -1233,14 +1307,17 @@ cmd_deployments('d|deploys', 'Show the list of deployments', mm.out_deploys)
 --command: machine-info ------------------------------------------------------
 
 function text_api.update_machine_info(machine)
-	local stdout = mm.ssh_sh(machine, [=[
-		#use monitor
+	local task = mm.ssh_sh(machine, [=[
+		#use machine
 		machine_info
 	]=], nil, {
 		name = 'update_machine_info '..(machine or ''),
 		keyed = false, nolog = true,
 		capture_stdout = true,
-	}):stdout()
+	})
+	check500(task.exit_code == 0, 'machine_info script exit code: %d',
+		task.exit_code)
+	local stdout = task:stdout()
 	local t = {machine = machine}
 	for s in stdout:trim():lines() do
 		local k,v = assert(s:match'^%s*(.-)%s+(.*)')
@@ -1268,6 +1345,15 @@ function text_api.update_machine_info(machine)
 	end
 end
 cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.update_machine_info)
+
+function json_api.machine_reboot(machine)
+	mm.ssh(machine, {
+		'reboot',
+	}, {
+		name = 'machine_reboot '..(machine or ''),
+	})
+	return {notify = 'Machine rebooted: '..machine}
+end
 
 --command: ssh-hostkey-update ------------------------------------------------
 
@@ -1581,10 +1667,10 @@ cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app_text)
 mm.log_port = 5555
 
 mm.deploy_logs = {queue_size = 10000} --{deploy->queue}
-mm.deploy_procinfo_logs = {queue_size = 61} --{deploy->queue}
-mm.machine_osinfo_logs = {queue_size = 61} --{deploy->queue}
+mm.deploy_procinfo_logs = {queue_size = 62} --{deploy->queue}
+mm.machine_procinfo_logs = {queue_size = 62} --{machine->queue}
 mm.deploy_state_vars = {} --{deploy->{var->val}}
-local log_server_chan = {} --{machine->mess_channel}
+local log_server_chan = {} --{deploy->mess_channel}
 
 function queue_push(queues, k, msg)
 	local q = queues[k]
@@ -1601,7 +1687,7 @@ function queue_push(queues, k, msg)
 	q:push(msg)
 end
 
-local function update_deploy_live_state()
+local function update_deploys_live_state()
 	local changed
 	local now = time()
 	for deploy, vars in pairs(mm.deploy_state_vars) do
@@ -1646,34 +1732,40 @@ function mm.log_server(machine)
 	start_tunnel()
 
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
-		log_server_chan[machine] = chan
 		resume(thread(function()
-			while 1 do
-				mm.log_server_rpc(machine, 'get_livelist')
-				mm.log_server_rpc(machine, 'get_procinfo')
-				mm.log_server_rpc(machine, 'get_osinfo')
+			while not task.killed do
+				if deploy then
+					mm.log_server_rpc(deploy, 'get_procinfo')
+				end
 				sleep(1)
 			end
-		end, 'log-server-rpc-tick %s', machine))
+		end, 'log-server-get-procinfo %s', machine))
+		local deploy
 		chan:recvall(function(chan, msg)
+			if not deploy then --first message identifies the client.
+				deploy = msg.deploy
+				log_server_chan[deploy] = chan
+			end
 			msg.machine = machine
 			if msg.event == 'set' then
-				attr(mm.deploy_state_vars, msg.deploy)[msg.k] = msg.v
+				attr(mm.deploy_state_vars, deploy)[msg.k] = msg.v
 				if msg.k == 'livelist' then
 					rowset_changed'deploy_livelist'
 				elseif msg.k == 'procinfo' then
 					msg.v.time = msg.time
-					queue_push(mm.deploy_procinfo_logs, msg.deploy, msg.v)
+					queue_push(mm.deploy_procinfo_logs, deploy, msg.v)
+					queue_push(mm.machine_procinfo_logs, machine, msg.v)
 					--TODO: filter this on deploy
 					rowset_changed('deploy_procinfo_log')
-				elseif msg.k == 'osinfo' then
-					msg.v.time = msg.time
-					queue_push(mm.machine_osinfo_logs, msg.machine, msg.v)
+					--TODO: filter this on machine
+					rowset_changed('machine_procinfo_log')
 				end
 			else
-				queue_push(mm.deploy_logs, msg.deploy, msg)
+				queue_push(mm.deploy_logs, deploy, msg)
 				rowset_changed'deploy_log'
 			end
+		end, function()
+			log_server_chan[deploy] = nil
 		end)
 	end, nil, 'log-server-'..machine)
 
@@ -1692,10 +1784,15 @@ function mm.json_api.log_server(machine)
 	return {notify = 'Log server started'}
 end
 
-function mm.log_server_rpc(machine, cmd, ...)
-	local chan = log_server_chan[machine]
+function mm.log_server_rpc(deploy, cmd, ...)
+	local chan = log_server_chan[deploy]
 	if not chan then return end
 	chan:send(pack(cmd, ...))
+end
+
+function action.get_livelist(deploy)
+	allow(admin())
+	mm.log_server_rpc(deploy, 'get_livelist')
 end
 
 rowset.deploy_log = virtual_rowset(function(self)
@@ -1779,10 +1876,12 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'deploy'},
-		{name = 'clock'},
+		{name = 'clock'    , type = 'number'   , },
 		{name = 'cpu'      , type = 'number'   , text = 'CPU'},
 		{name = 'cpu_sys'  , type = 'number'   , text = 'CPU (kernel)'},
-		{name = 'ram'      , type = 'filesize' , text = 'RAM'},
+		{name = 'rss'      , type = 'filesize' , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
+		{name = 'ram_used' , type = 'filesize' , text = 'RAM used (total)', filesize_magnitude = 'M'},
+		{name = 'ram_size' , type = 'filesize' , text = 'RAM size', hidden = true},
 	}
 	self.pk = ''
 	function self:load_rows(rs, params)
@@ -1801,12 +1900,133 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 							local dt = (t.clock - clock0)
 							local up = (t.utime - utime0) / dt * 100
 							local sp = (t.stime - stime0) / dt * 100
-							add(rs.rows, {deploy, i, up + sp, up, t.rss})
+							add(rs.rows, {
+								deploy,
+								i,
+								up + sp,
+								up,
+								t.rss,
+								t.ram_size - t.ram_free,
+								t.ram_size,
+							})
 							utime0 = t.utime
 							stime0 = t.stime
 							clock0 = t.clock
 						else
-							add(rs.rows, {deploy, i, 0, 0, 0})
+							add(rs.rows, {deploy, i})
+						end
+					end
+				end
+			end
+		end
+	end
+end)
+
+rowset.machine_procinfo_log = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'machine'},
+		{name = 'clock'        , type = 'number'   , },
+		{name = 'max_cpu'      , type = 'number'   , text = 'Max CPU'},
+		{name = 'max_cpu_sys'  , type = 'number'   , text = 'Max CPU (kernel)'},
+		{name = 'avg_cpu'      , type = 'number'   , text = 'Avg CPU'},
+		{name = 'avg_cpu_sys'  , type = 'number'   , text = 'Avg CPU (kernel)'},
+		{name = 'ram_used'     , type = 'filesize' , filesize_magnitude = 'M', text = 'RAM Used'},
+		{name = 'hdd_used'     , type = 'filesize' , filesize_magnitude = 'M', text = 'Disk Used'},
+		{name = 'ram_size'     , type = 'filesize' , filesize_magnitude = 'M', text = 'RAM Size'},
+		{name = 'hdd_size'     , type = 'filesize' , filesize_magnitude = 'M', text = 'Disk Size'},
+	}
+	self.pk = ''
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local machines = params['param:filter']
+		if machines then
+			for _, machine in ipairs(machines) do
+				local log_queue = mm.machine_procinfo_logs[machine]
+				if log_queue then
+					local max_ttime0
+					local max_stime0
+					local avg_ttime0
+					local avg_stime0
+					local clock0
+					for i = -61, 0 do
+						local t = log_queue:item_at(log_queue:count() + i)
+						if t then
+							local max_ttime = 0
+							local max_stime = 0
+							local sum_ttime = 0
+							local sum_stime = 0
+							for cpu_num, t in ipairs(t.cputimes) do
+								local ttime = t.user + t.nice + t.sys
+								local stime = t.sys
+								max_ttime = max(max_ttime, ttime)
+								max_stime = max(max_stime, stime)
+								sum_ttime = sum_ttime + ttime
+								sum_stime = sum_stime + stime
+							end
+							avg_ttime = sum_ttime / #t.cputimes
+							avg_stime = sum_stime / #t.cputimes
+							if clock0 then
+								local dt = (t.clock - clock0)
+								local max_tp = (max_ttime - max_ttime0) / dt * 100
+								local max_sp = (max_stime - max_stime0) / dt * 100
+								local avg_tp = (avg_ttime - avg_ttime0) / dt * 100
+								local avg_sp = (avg_stime - avg_stime0) / dt * 100
+								add(rs.rows, {
+									machine,
+									i,
+									max_tp, max_sp,
+									avg_tp, avg_sp,
+									t.ram_size - t.ram_free,
+									t.hdd_size - t.hdd_free,
+									t.ram_size,
+									t.hdd_size,
+								})
+							end
+							max_ttime0 = max_ttime
+							max_stime0 = max_stime
+							avg_ttime0 = avg_ttime
+							avg_stime0 = avg_stime
+							clock0 = t.clock
+						else
+							add(rs.rows, {machine, i})
+						end
+					end
+				end
+			end
+		end
+	end
+end)
+
+rowset.machine_ram_log = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'machine'},
+		{name = 'clock'},
+	}
+	self.pk = ''
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local machines = params['param:filter']
+		if machines then
+			for _, machine in ipairs(machines) do
+				local log_queue = mm.machine_procinfo_logs[machine]
+				if log_queue then
+					local utime0 = 0
+					local stime0 = 0
+					local clock0 = 0
+					for i = -60, 0 do
+						local t = log_queue:item_at(log_queue:count() + i)
+						if t then
+							local dt = (t.clock - clock0)
+							local up = (t.utime - utime0) / dt * 100
+							local sp = (t.stime - stime0) / dt * 100
+							add(rs.rows, {machine, i, up + sp, up, t.rss})
+							utime0 = t.utime
+							stime0 = t.stime
+							clock0 = t.clock
+						else
+							add(rs.rows, {machine, i})
 						end
 					end
 				end
@@ -2349,22 +2569,21 @@ rowset.providers = sql_rowset{
 }
 
 local function compute_cpu_loads(self, vals)
-	local q = mm.machine_osinfo_logs[vals.machine]
-	local t1 = q and q:item_at(q:count())
-	local t0 = q and q:item_at(q:count() - 1)
+	local t1 = vals.t1
+	local t0 = vals.t0
 	if not (t1 and t0) then return end
-	if t1.time < time() - 2 then return end
 	local d = t1.clock - t0.clock
-	local dt = {}
+	local max_tp = 0
 	for i,cpu1 in ipairs(t1.cputimes) do
 		local cpu0 = t0.cputimes[i]
-		dt[i] = floor((
+		local tp = floor((
 			(cpu1.user - cpu0.user) +
 			(cpu1.nice - cpu0.nice) +
 			(cpu1.sys  - cpu0.sys )
 		) * d * 100)
+		max_tp = max(max_tp, tp)
 	end
-	return cat(dt, ' ')..' %'
+	return max_tp..' %'
 end
 
 local function compute_uptime(self, vals)
@@ -2372,7 +2591,7 @@ local function compute_uptime(self, vals)
 end
 
 local function compute_ram_free(self, vals)
-	return vals.t1 and vals.t1.mem_free
+	return vals.t1 and vals.t1.ram_free
 end
 
 local function compute_hdd_free(self, vals)
@@ -2380,7 +2599,7 @@ local function compute_hdd_free(self, vals)
 end
 
 local function compute_ram(self, vals)
-	return vals.t1 and vals.t1.mem_size or vals.ram
+	return vals.t1 and vals.t1.ram_size or vals.ram
 end
 
 local function compute_hdd(self, vals)
@@ -2405,7 +2624,6 @@ rowset.machines = sql_rowset{
 			mysql_local_port,
 			admin_page,
 			ssh_key_ok,
-			last_seen,
 			cpu,
 			cores,
 			ram,
@@ -2420,28 +2638,32 @@ rowset.machines = sql_rowset{
 	pk = 'machine',
 	order_by = 'pos, ctime',
 	field_attrs = {
-		cpu_loads   = {readonly = true, text = 'CPU loads', compute = compute_cpu_loads},
-		ram_free    = {readonly = true, w = 40, type = 'filesize', filesize_decimals = 1, text = 'RAM/free (GB)', compute = compute_ram_free},
-		hdd_free    = {readonly = true, w = 40, type = 'filesize', filesize_decimals = 1, text = 'HDD/free (GB)', compute = compute_hdd_free},
+		cpu_loads   = {readonly = true, w = 60, align = 'right', text = 'CPU Max %', compute = compute_cpu_loads},
+		ram_free    = {readonly = true, w = 60, type = 'filesize', filesize_decimals = 1, text = 'Free RAM', compute = compute_ram_free},
+		hdd_free    = {readonly = true, w = 60, type = 'filesize', filesize_decimals = 1, text = 'Free Disk', compute = compute_hdd_free},
 		public_ip   = {text = 'Public IP Address'},
 		local_ip    = {text = 'Local IP Address', hidden = true},
 		admin_page  = {text = 'VPS admin page of this machine'},
 		ssh_key_ok  = {readonly = true, text = 'SSH key is up-to-date'},
-		last_seen   = {readonly = true},
 		cpu         = {readonly = true, text = 'CPU'},
 		cores       = {readonly = true, w = 20},
-		ram         = {readonly = true, w = 40, filesize_decimals = 1, text = 'RAM (GB)', compute = compute_ram},
-		hdd         = {readonly = true, w = 40, filesize_decimals = 1, text = 'HDD (GB)', compute = compute_hdd},
+		ram         = {readonly = true, w = 60, filesize_decimals = 1, text = 'RAM Size', compute = compute_ram},
+		hdd         = {readonly = true, w = 60, filesize_decimals = 1, text = 'Root Disk Size', compute = compute_hdd},
 		os_ver      = {readonly = true, text = 'Operating System'},
 		mysql_ver   = {readonly = true, text = 'MySQL Version'},
 		uptime      = {readonly = true, text = 'Uptime', type = 'duration', compute = compute_uptime},
 	},
 	compute_row_vals = function(self, vals)
-		local q = mm.machine_osinfo_logs[vals.machine]
+		vals.t1 = nil
+		vals.t0 = nil
+		local q = mm.machine_procinfo_logs[vals.machine]
 		local t1 = q and q:item_at(q:count())
 		local t0 = q and q:item_at(q:count() - 1)
 		if not (t1 and t0) then return end
-		if t1.time < time() - 2 then return end --too old
+		local now = time()
+		if t1.time < now - 2 then
+			return
+		end
 		vals.t1 = t1
 		vals.t0 = t0
 	end,
@@ -2605,7 +2827,7 @@ function mm:run_server()
 	if true then
 
 		runevery(1, function()
-			if update_deploy_live_state() then
+			if update_deploys_live_state() then
 				rowset_changed'deploys'
 			end
 			rowset_changed'machines'

@@ -34,7 +34,8 @@ machine_prepare() {
 	git_config_user "mm@allegory.ro" "Many Machines"
 	ssh_git_keys_update
 
-	percona_pxc_install "\
+	percona_pxc_install
+	mysql_config "\
 log_bin_trust_function_creators = 1
 default-time-zone = '+00:00'
 "
