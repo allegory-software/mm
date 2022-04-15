@@ -106,21 +106,21 @@ textarea.x-editbox-input[console] {
 						<div flex>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
-								shape=area sum_cols="max_cpu_sys max_cpu avg_cpu_sys avg_cpu" group_cols=clock/1
+								shape=area sum_cols="max_cpu_sys max_cpu avg_cpu_sys avg_cpu" group_cols=clock
 								min_sum=0 max_sum=100
 								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
-								shape=area sum_cols="ram_used ram_size" group_cols=clock/1
+								shape=area sum_cols="ram_used ram_size" group_cols=clock
 								min_sum=0 max_sum=4294967296
 								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
-								shape=area sum_cols="hdd_used hdd_size" group_cols=clock/1
+								shape=area sum_cols="hdd_used hdd_size" group_cols=clock
 								min_sum=0 max_sum=107374182400
 								min_val=-60 max_val=0
 							>
@@ -128,7 +128,11 @@ textarea.x-editbox-input[console] {
 						</div>
 					</x-ct>
 					<x-ct label="MySQL Stats">
-
+						<x-grid
+							rowset_name=machine_mysql_stats
+							param_nav_id=mm_machines_grid params=machine
+						>
+						</x-grid>
 					</x-ct>
 				</x-tabs>
 			</x-tabs>
@@ -209,14 +213,14 @@ textarea.x-editbox-input[console] {
 							<div flex>
 								<x-chart
 									nav_id=mm_deploy_procinfo_log
-									shape=area sum_cols="cpu_sys cpu" group_cols=clock/1
+									shape=area sum_cols="cpu_sys cpu" group_cols=clock
 									min_sum=0 max_sum=100
 									min_val=-60 max_val=0
 								>
 								</x-chart>
 								<x-chart
 									nav_id=mm_deploy_procinfo_log
-									shape=area sum_cols="rss ram_free..ram_size" group_cols=clock/1
+									shape=area sum_cols="rss ram_free..ram_size" group_cols=clock
 									min_sum=0 max_sum=2147483648
 									min_val=-60 max_val=0
 								>

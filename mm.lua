@@ -1668,10 +1668,11 @@ cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.out_app)
 --remote logging -------------------------------------------------------------
 
 mm.log_port = 5555
+mm.mysql_port = 3306
 
 mm.deploy_logs = {queue_size = 10000} --{deploy->queue}
-mm.deploy_procinfo_logs = {queue_size = 62} --{deploy->queue}
-mm.machine_procinfo_logs = {queue_size = 62} --{machine->queue}
+mm.deploy_procinfo_logs = {queue_size = 100} --{deploy->queue}
+mm.machine_procinfo_logs = {queue_size = 100} --{machine->queue}
 mm.deploy_state_vars = {} --{deploy->{var->val}}
 local log_server_chan = {} --{deploy->mess_channel}
 
@@ -1715,26 +1716,9 @@ function mm.log_server(machine)
 	local task = mm.task({
 		name = 'log_server '..machine,
 		machine = machine,
-		run_every = 0,
 		editable = false,
 		type = 'long',
 	})
-
-	local tunnel_task
-	local function start_tunnel()
-		tunnel_task = mm.rtunnel(machine, lport..':'..mm.log_port, {
-			run_every = 0,
-			generated_by = 'log_server '..machine,
-			editable = false,
-			type = 'long',
-			async = true,
-			on_finish = function(task)
-				sleep(1)
-				start_tunnel()
-			end,
-		})
-	end
-	start_tunnel()
 
 	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
 		local deploy
@@ -1777,9 +1761,6 @@ function mm.log_server(machine)
 
 	function task:do_kill()
 		logserver:stop()
-		if tunnel_task then
-			tunnel_task:kill()
-		end
 	end
 
 	task:setstatus'running'
@@ -1901,7 +1882,7 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 					local utime0
 					local stime0
 					local clock0
-					for i = -61, 0 do
+					for i = -80, 0 do
 						local t = log_queue:item_at(log_queue:count() + i)
 						if t then
 							local clock = t.time - now
@@ -1957,7 +1938,7 @@ rowset.machine_procinfo_log = virtual_rowset(function(self)
 					local avg_ttime0
 					local avg_stime0
 					local clock0
-					for i = -61, 0 do
+					for i = -80, 0 do
 						local t = log_queue:item_at(log_queue:count() + i)
 						if t then
 							local max_ttime = 0
@@ -2043,14 +2024,47 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 	end
 end)
 
-function mm.start_log_servers()
-	for _, machine in each_row_vals[[
-		select machine
-		from machine where active = 1 order by machine
-	]] do
-		pcall(mm.log_server, machine)
-	end
-end
+rowset.machine_mysql_stats = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			schema_name,
+			digest,
+			lower(replace(
+				if(length(digest_text) > 256,
+					concat(left(digest_text, 200), ' ... ', right(digest_text, 56)),
+					digest_text
+				), '`', '')) as query,
+			if(sum_no_good_index_used > 0 or sum_no_index_used > 0, 1, 0) as full_scan,
+			count_star as exec_count,
+			cast(sum_timer_wait/1000000000000 as double) as exec_time_total,
+			cast(max_timer_wait/1000000000000 as double) as exec_time_max,
+			cast(avg_timer_wait/1000000000000 as double) as exec_time_avg,
+			sum_rows_sent as rows_sent,
+			cast(round(sum_rows_sent / count_star) as double) rows_sent_avg,
+			sum_rows_examined as rows_scanned
+		from
+			performance_schema.events_statements_summary_by_digest
+		order by
+			sum_timer_wait desc
+		limit 20
+	]],
+	pk = 'schema_name digest',
+	field_attrs = {
+		query = {w = 400},
+		exec_count      = {w = 40},
+		exec_time_total = {w = 40, decimals = 2},
+		exec_time_max   = {w = 40, decimals = 2},
+		exec_time_avg   = {w = 40, decimals = 2},
+		full_scan = {'bool'},
+	},
+	hide_cols = 'digest',
+	db = function(params)
+		local machines = params['param:filter']
+		local machine = checkarg(machines and machines[1], 'machine required')
+		return db(machine)
+	end,
+}
 
 --backups --------------------------------------------------------------------
 
@@ -2411,13 +2425,14 @@ cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function
 	proc.exec(cmd):forget()
 end)
 
+--TODO: accept NAME as in `[LPORT|NAME:][LPORT|NAME]`
 function mm.tunnel(machine, ports, opt, rev)
 	local args = {'-N'}
 	if logging.debug then add(args, '-v') end
 	ports = checkarg(ports, 'ports expected')
 	local rports = {}
 	for ports in ports:gmatch'([^,]+)' do
-		local rport, lport = ports:match'(.-):(.*)'
+		local lport, rport = ports:match'(.-):(.*)'
 		rport = rport or ports
 		lport = lport or ports
 		add(args, rev and '-R' or '-L')
@@ -2425,35 +2440,33 @@ function mm.tunnel(machine, ports, opt, rev)
 		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
 		add(rports, rport)
 	end
-	return mm.ssh(machine, args, update({
-		name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
-		run_every = 0,
-	}, opt))
+	local on_finish
+	local function start_tunnel()
+		mm.ssh(machine, args, update({
+			name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
+		}, update({
+			type = 'long',
+			on_finish = on_finish,
+		}, opt)))
+	end
+	function on_finish(task)
+		if task.killed then return end
+		sleep(1)
+		start_tunnel()
+	end
+	start_tunnel()
 end
 function mm.rtunnel(machine, ports, opt)
 	return mm.tunnel(machine, ports, opt, true)
 end
 
-function mm.mysql_tunnel(machine, opt)
-	machine = checkarg(machine, 'machine expected')
-	local lport = mm.machine_info(machine).mysql_local_port
-	checkfound(lport, 'mysql_local_port not set for machine '..machine)
-	local task_name = 'tunnel '..machine..' 3306'
-	check500(not mm.running_task(task_name), 'already running: %s', task_name)
-	return mm.tunnel(machine, lport..':3306', {
-		run_every = 0,
-		editable = false,
-		name = task_name,
-	})
-end
-
-cmd_ssh_tunnels('tunnel MACHINE RPORT1[:LPORT1],...',
+cmd_ssh_tunnels('tunnel MACHINE [LPORT1:]RPORT1,...',
 	'Create SSH tunnel(s) to machine',
 	function(machine, ports)
-		return mm.tunnel(machine, ports, {allocate_tty = true})
+		mm.tunnel(machine, ports, {allocate_tty = true})
 	end)
 
-cmd_ssh_tunnels('rtunnel MACHINE RPORT1[:LPORT1],...',
+cmd_ssh_tunnels('rtunnel MACHINE [LPORT1:]RPORT1,...',
 	'Create reverse SSH tunnel(s) to machine',
 	function(machine, ports)
 		return mm.rtunnel(machine, ports, {allocate_tty = true})
@@ -2840,11 +2853,39 @@ end
 
 ------------------------------------------------------------------------------
 
+local function start_tunnels_and_log_servers()
+	for _, machine, log_local_port, mysql_local_port in each_row_vals([[
+		select
+			machine,
+			log_local_port,
+			mysql_local_port
+		from machine order by machine
+	]]) do
+		if log_local_port then
+			mm.rtunnel(machine, log_local_port..':'..mm.log_port, {
+				editable = false,
+				async = true,
+			})
+		end
+		if mysql_local_port then
+			mm.tunnel(machine, mysql_local_port..':'..mm.mysql_port, {
+				editable = false,
+				async = true,
+			})
+			config(machine..'_db_host', '127.0.0.1')
+			config(machine..'_db_port', mysql_local_port)
+			config(machine..'_db_pass', mm.mysql_root_pass(machine))
+			config(machine..'_db_name', 'performance_schema')
+			config(machine..'_db_schema', false)
+		end
+		pcall(mm.log_server, machine)
+	end
+end
+
 local run_server = mm.run_server
 function mm:run_server()
 
 	if true then
-
 		runevery(1, function()
 			if update_deploys_live_state() then
 				rowset_changed'deploys'
@@ -2853,10 +2894,10 @@ function mm:run_server()
 		end, 'rowsets-changed-every-second')
 
 		runafter(0, function()
-			mm.start_log_servers()
-			run_tasks()
-		end, 'run-tasks-first-time')
-		runevery(60, run_tasks, 'run-tasks-every-60s')
+			start_tunnels_and_log_servers()
+		end, 'start-log-servers')
+
+		runagainevery(60, run_tasks, 'run-tasks-every-60s')
 	end
 
 	run_server(self)
