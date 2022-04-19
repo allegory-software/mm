@@ -34,7 +34,7 @@ machine_prepare() {
 	git_config_user "mm@allegory.ro" "Many Machines"
 	ssh_git_keys_update
 
-	percona_pxc_install
+	mysql_install
 	mysql_config "\
 log_bin_trust_function_creators = 1
 default-time-zone = '+00:00'
@@ -48,6 +48,13 @@ default-time-zone = '+00:00'
 	must sysctl --system
 
 	say "Prepare done."
+}
+
+machine_rename() { # OLD_MACHINE NEW_MACHINE
+	local OLD_MACHINE=$1
+	local NEW_MACHINE=$2
+	checkvars OLD_MACHINE NEW_MACHINE
+	machine_set_hostname "$NEW_MACHINE"
 }
 
 deploy_setup() {
@@ -149,6 +156,13 @@ app_setup_script() {
 	must deploy_gen_conf > /home/$DEPLOY/$APP/${APP}.conf
 }
 
+deploy_rename() { # OLD_DEPLOY NEW_DEPLOY
+	local OLD_DEPLOY=$1
+	local NEW_DEPLOY=$2
+	checkvars OLD_DEPLOY NEW_DEPLOY
+	user_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
+}
+
 deploy_status() {
 	checkvars DEPLOY APP
 	[ -d /home/$DEPLOY                    ] || say "no /home/$DEPLOY dir"
@@ -157,4 +171,11 @@ deploy_status() {
 	[ -d /home/$DEPLOY/$APP/sdk/bin/linux ] || say "no sdk/bin/linux dir"
 	[ -f /home/$DEPLOY/$APP/${APP}.conf   ] || say "no ${APP}.conf"
 	app status
+}
+
+deploy_backup_file_list() { # deploy app
+	local DEPLOY="$1"
+	local APP="$2"
+	checkvars DEPLOY APP
+	echo /home/$DEPLOY/$APP/var
 }

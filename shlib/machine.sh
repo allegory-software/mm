@@ -1,5 +1,11 @@
 #use mysql
 
+machine_cores() {
+	local      cps="$(lscpu | sed -n 's/^Core(s) per socket:\s*\(.*\)/\1/p')"
+	local  sockets="$(lscpu | sed -n 's/^Socket(s):\s*\(.*\)/\1/p')"
+	echo "    cores $(expr $sockets \* $cps)"
+}
+
 machine_info() {
 	echo "   os_ver $(lsb_release -sd)"
 	echo "mysql_ver $(has_mysql && query 'select version();')"

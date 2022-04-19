@@ -2,7 +2,7 @@
 
 # percona install ------------------------------------------------------------
 
-percona_pxc_install() {
+mysql_install() {
 	local f=percona-release_latest.generic_all.deb
 	must wget -nv https://repo.percona.com/apt/$f
 	export DEBIAN_FRONTEND=noninteractive
@@ -26,48 +26,101 @@ mysql_set_pool_size() {
 	query "set global innodb_buffer_pool_size = $1"
 }
 
-# percona xtrabackup ---------------------------------------------------------
+mysql_stop() {
+	say "Stopping mysql server..."
+	must service mysql stop
+}
+
+mysql_start() {
+	say "Starting mysql server..."
+	must service mysql start
+}
+
+# xtrabackup backups ---------------------------------------------------------
+
+# https://www.percona.com/doc/percona-xtrabackup/8.0/xtrabackup_bin/incremental_backups.html
+# https://www.percona.com/doc/percona-xtrabackup/8.0/backup_scenarios/incremental_backup.html
 
 xbkp() {
-	local DIR="$1"; shift
-	must xtrabackup --target-dir="$DIR" --user=root $@ # password read from ~/.my.cnf
+	must xtrabackup --user=root "$@" # password is read from ~/.my.cnf
 }
 
-xbkp_backup() { # deploy bkp [parent_bkp]
-	local DEPLOY="$1"
-	local BKP="$2"
-	local PARENT_BKP="$3"
-	checkvars DEPLOY BKP
-	local d="/root/mm-bkp/$DEPLOY/$BKP"
-	must mkdir -p "$d"
-	xbkp "$d" --backup --databases="$DEPLOY" --compress --compress-threads=2
-	du -b "$d" | cut -f1                      # backup size
-	sha1sum "$d"/* | sha1sum | cut -d' ' -f1  # checksum
+mysql_backup_all() { # BKP_DIR [PARENT_BKP_DIR]
+	local BKP_DIR="$1"
+	local PARENT_BKP_DIR="$2"
+	checkvars BKP_DIR
+
+	must mkdir -p $BKP_DIR
+
+	xbkp --backup --target-dir=$BKP_DIR \
+		--rsync --parallel=$(nproc) --compress --compress-threads=$(nproc) \
+		${PARENT_BKP_DIR:+--incremental-basedir=$PARENT_BKP_DIR}
+
+	[ "$PARENT_BKP_DIR" ] && \
+		must ln -s $PARENT_BKP_DIR $BKP_DIR-parent
 }
 
-xbkp_restore() { # deploy bkp
-	local DEPLOY="$1"
-	local BKP="$2"
-	checkvars DEPLOY BKP
-	local d="/root/mm-bkp/$DEPLOY/$BKO"
-	xbkp "$d" --decompress --parallel --decompress-threads=2
-	xbkp "$d" --prepare --export
-	xbkp "$d" --move-back
+mysql_restore_all() { # BKP_DIR
+
+	local BKP_DIR="$1"
+	checkvars BKP_DIR
+
+	# walk up the parent chain and collect dirs in reverse.
+	# BKP_DIR becomes the last parent, i.e. the non-incremental backup.
+	local BKP_DIRS="$BKP_DIR"
+	while true; do
+		local PARENT_BKP_DIR="$(readlink $BKP_DIR-parent)"
+		[ "$PARENT_BKP_DIR" ] || break
+		BKP_DIRS="$PARENT_BKP_DIR $DIRS"
+		BKP_DIR="$PARENT_BKP_DIR"
+	done
+
+	local RESTORE_DIR=/root/mm-machine-restore/mysql
+
+	# prepare base backup and all incrementals in order without doing rollbacks.
+	cp_dir "$BKP_DIR" "$RESTORE_DIR"
+	local PARENT_BKP_DIR=""
+	for BKP_DIR in $BKP_DIRS; do
+		xbkp --prepare --target-dir=$RESTORE_DIR --apply-log-only \
+			--rsync --parallel=$(nproc) --decompress --decompress-threads=$(nproc) $O \
+			${PARENT_BKP_DIR:+--incremental-dir=$BKP_DIR}
+		PARENT_BKP_DIR=$BKP_DIR
+	done
+
+	# perform rollbacks.
+	xbkp --prepare --target-dir=$RESTORE_DIR
+
+	mysql_stop
+
+	rm_dir /var/lib/mysql
+	must mkdir -p /var/lib/mysql
+	xbkp --move-back --target-dir=$RESTORE_DIR
+	must chown -R mysql:mysql /var/lib/mysql
+	rm_dir $RESTORE_DIR
+
+	mysql_start
+
 }
 
-xbkp_copy() { # deploy bkp host
-	local DEPLOY="$1"
-	local BKP="$2"
-	local HOST="$3"
-	checkvars DEPLOY BKP HOST
-	rsync_to "$HOST" "/root/mm-bkp/$DEPLOY/$BKP"
+# mysqldump backups ----------------------------------------------------------
+
+mysql_backup_db() { # DB BKP_DIR
+	local DB="$1"
+	local BKP_DIR="$2"
+	checkvars DB BKP_DIR
+	must mkdir -p "$BKP_DIR"
+	must mysqldump -u root \
+		--add-drop-database \
+		--extended-insert \
+		--order-by-primary \
+		--routines \
+		--single-transaction \
+		--quick \
+		"$DB" > "$BKP_DIR/mysqldump.sql"
 }
 
-xbkp_remove() { # deploy bkp
-	local DEPLOY="$1"
-	local BKP="$2"
-	checkvars DEPLOY BKP
-	rm_subdir "/root/mm-bkp/$DEPLOY" "$BKP"
+mysql_restore_db() { # DB BKP_DIR
+	echo NYI
 }
 
 # mysql queries --------------------------------------------------------------

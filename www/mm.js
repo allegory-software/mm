@@ -187,7 +187,7 @@ on('mm_deploy_livelist.bind', function(e, on) {
 			let pv0 = e.param_vals && e.param_vals[0]
 			let deploy = pv0 && pv0.deploy
 			if (deploy)
-				post(['get-livelist', deploy])
+				post(['poll-livelist', deploy])
 		})
 	} else if (e._get_livelist_timer) {
 		clearInterval(e._get_livelist_timer)

@@ -113,10 +113,8 @@ rsync_to() { # host dir|file
 	SSH_KEY=
 	SSH_HOSTKEY=
 	must chmod 400 $p $h
-	local O
-	[ "$VERBOSE" ] && O="-v"
-	[ "$DEBUG"   ] && O="-vvvv"
-	must rsync $O --timeout=5 -e "ssh -o UserKnownHostsFile=$h -i $p" \
+	must rsync --timeout=5 \
+		-e "ssh -o UserKnownHostsFile=$h -i $p" \
 		-aR "$DIR" "root@$HOST:/"
 	rm -f $p $h
 	say "Files copied."
