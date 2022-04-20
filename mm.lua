@@ -1595,56 +1595,30 @@ function text_api.deploys()
 end
 cmd_deployments('d|deploys', 'Show the list of deployments', mm.out_deploys)
 
-function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
-
-	checkarg(new_deploy, 'new_deploy required')
-
-	local machine = checkfound(first_row([[
-		select machine from deploy where deploy = ?
-	]], old_deploy), 'unknown deploy: %s', old_deploy)
-
-	checkarg(not first_row([[
-		select 1 from deploy where deploy = ?
-	]], new_deploy), 'deploy already exists: %s', new_deploy)
-
-
-	local task = mm.ssh_sh(machine, [=[
-		#use deploy
-		deploy_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
-	]=], {
-		OLD_DEPLOY = old_deploy,
-		NEW_DEPLOY = new_deploy,
-	}, {
-		name = 'deploy_rename '..old_deploy,
-		out_stdouterr = to_text,
-	})
-	check500(task.exit_code == 0, 'deploy_rename exit code: %d', task.exit_code)
-
-	update_row('deploy', {old_deploy, deploy = new_deploy})
-
-	return {notify = 'Deploy renamed from '..old_deploy..' to '..new_deploy}
+local function validate_deploy(d)
+	if not d then return end
+	d = d:trim()
+	if d == '' then return 'cannot be empty' end
+	if d:find'^[^a-z]' then return 'must start with a small letter' end
+	if d:find'[_%-]$' then return 'cannot end in a hyphen or underscore' end
+	if d:find'[^a-z0-9_%-]' then return 'can only contain small letters, digits, hyphens and underscores' end
+	if d:find'%-%-' then return 'cannot contain double-hyphens' end
+	if d:find'__' then return 'cannot contain double-underscores' end
 end
 
-cmd_deployments('deploy-rename OLD_DEPLOY NEW_DEPLOY',
-	'Rename a deployment (requires app restart)',
-	mm.out_deploy_rename)
-
-local function deploy_vars(deploy)
+local function deploy_vars(deploy, new_deploy)
 
 	deploy = checkarg(deploy, 'deploy required')
 
 	local vars = {}
 	for k,v in pairs(checkfound(first_row([[
 		select
-			d.deploy,
 			d.machine,
 			d.repo,
 			d.app,
 			d.wanted_app_version app_version,
 			d.wanted_sdk_version sdk_version,
 			coalesce(d.env, 'dev') env,
-			d.deploy mysql_db,
-			d.deploy mysql_user,
 			d.mysql_pass,
 			d.secret
 		from
@@ -1654,6 +1628,11 @@ local function deploy_vars(deploy)
 	]], deploy), 'invalid deploy "%s"', deploy)) do
 		vars[k:upper()] = v
 	end
+
+	new_deploy = new_deploy or deploy
+	vars.DEPLOY = new_deploy
+	vars.MYSQL_DB = new_deploy
+	vars.MYSQL_USER = new_deploy
 
 	for _, name, val in each_row_vals([[
 		select
@@ -1731,6 +1710,49 @@ function hybrid_api.deploy_remove(deploy)
 end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
 	mm.out_deploy_remove)
+
+function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
+
+	checkarg(new_deploy, 'new_deploy required')
+	if new_deploy == old_deploy then return end
+	local err = validate_deploy(new_deploy)
+	checkarg(not err, err)
+
+	local machine = checkfound(first_row([[
+		select machine from deploy where deploy = ?
+	]], old_deploy), 'unknown deploy: %s', old_deploy)
+
+	checkarg(not first_row([[
+		select 1 from deploy where deploy = ?
+	]], new_deploy), 'deploy already exists: %s', new_deploy)
+
+	local machine_db = db(machine) --secure a mysql connection first.
+	machine_db:use(old_deploy)
+
+	local vars = deploy_vars(old_deploy, new_deploy)
+	local task = mm.ssh_sh(machine, [=[
+		#use deploy
+		deploy_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
+	]=], update({
+		OLD_DEPLOY = old_deploy,
+		NEW_DEPLOY = new_deploy,
+	}, vars), {
+		name = 'deploy_rename '..old_deploy,
+		out_stdouterr = to_text,
+	})
+	check500(task.exit_code == 0, 'deploy_rename exit code: %d', task.exit_code)
+
+	machine_db:rename_db(old_deploy, new_deploy)
+	machine_db:rename_user(old_deploy, new_deploy)
+	machine_db:grant_user(new_deploy, new_deploy)
+
+	update_row('deploy', {old_deploy, deploy = new_deploy})
+
+	return {notify = 'Deploy renamed from '..old_deploy..' to '..new_deploy}
+end
+cmd_deployments('deploy-rename OLD_DEPLOY NEW_DEPLOY',
+	'Rename a deployment (requires app restart)',
+	mm.out_deploy_rename)
 
 local function find_cmd(...)
 	for i=1,select('#',...) do
@@ -2863,7 +2885,7 @@ cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function
 	proc.exec(cmd):forget()
 end)
 
---TODO: accept NAME as in `[LPORT|NAME:][LPORT|NAME]`
+--TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
 function mm.tunnel(machine, ports, opt, rev)
 	local args = {'-N'}
 	if logging.debug then add(args, '-v') end
@@ -2874,6 +2896,7 @@ function mm.tunnel(machine, ports, opt, rev)
 		rport = rport or ports
 		lport = lport or ports
 		add(args, rev and '-R' or '-L')
+		if rev then lport, rport = rport, lport end
 		add(args, '127.0.0.1:'..lport..':127.0.0.1:'..rport)
 		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
 		add(rports, rport)
@@ -3180,17 +3203,6 @@ rowset.machines = sql_rowset{
 	end,
 }
 
-local function validate_deploy(d)
-	if not d then return end
-	d = d:trim()
-	if d == '' then return 'cannot be empty' end
-	if d:find'^[^a-z]' then return 'must start with a small letter' end
-	if d:find'[_%-]$' then return 'cannot end in a hyphen or underscore' end
-	if d:find'[^a-z0-9_%-]' then return 'can only contain small letters, digits, hyphens and underscores' end
-	if d:find'%-%-' then return 'cannot contain double-hyphens' end
-	if d:find'__' then return 'cannot contain double-underscores' end
-end
-
 rowset.deploys = sql_rowset{
 	allow = 'admin',
 	select = [[
@@ -3246,9 +3258,12 @@ rowset.deploys = sql_rowset{
 	end,
 	update_row = function(self, row)
 		self:update_into('deploy', row, [[
-			deploy machine repo app wanted_app_version wanted_sdk_version
+			machine repo app wanted_app_version wanted_sdk_version
 			env pos
 		]])
+		if row.deploy then
+			mm.deploy_rename(row['deploy:old'], row.deploy)
+		end
 	end,
 	delete_row = function(self, row)
 		self:delete_from('deploy', row)
@@ -3336,7 +3351,7 @@ end
 local run_server = mm.run_server
 function mm:run_server()
 
-	if false then
+	if true then
 		runevery(1, function()
 			if update_deploys_live_state() then
 				rowset_changed'deploys'

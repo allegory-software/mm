@@ -41,4 +41,5 @@ user_rename() {
 	must usermod -l "$new_user" "$old_user"
 	must usermod -d /home/$new_user -m $new_user
 	must groupmod -n $new_user $old_user
+	say "Done."
 }

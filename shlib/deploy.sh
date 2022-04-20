@@ -111,9 +111,7 @@ deploy() {
 		git@github.com:allegory-software/allegory-sdk-bin-debian10 \
 		/home/$DEPLOY/$APP/sdk/bin/linux "$SDK_VERSION"
 
-	VARS="DEBUG VERBOSE $DEPLOY_VARS" \
-	FUNCS="say die debug run must deploy_gen_conf" \
-		run_as $DEPLOY app_setup_script
+	deploy_configure
 
 	say "Installing the app..."
 	must app install forealz
@@ -121,6 +119,12 @@ deploy() {
 	must app start
 
 	say "Deploy done."
+}
+
+deploy_configure() {
+	VARS="DEBUG VERBOSE $DEPLOY_VARS" \
+	FUNCS="say die debug run must deploy_gen_conf" \
+		run_as $DEPLOY app_setup_script
 }
 
 deploy_gen_conf() {
@@ -156,11 +160,13 @@ app_setup_script() {
 	must deploy_gen_conf > /home/$DEPLOY/$APP/${APP}.conf
 }
 
+# NOTE: database rename is a far more complicated operation and so is done in Lua.
 deploy_rename() { # OLD_DEPLOY NEW_DEPLOY
 	local OLD_DEPLOY=$1
 	local NEW_DEPLOY=$2
 	checkvars OLD_DEPLOY NEW_DEPLOY
 	user_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
+	deploy_configure
 }
 
 deploy_status() {
