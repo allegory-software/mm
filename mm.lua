@@ -515,14 +515,14 @@ function task:setstatus(s)
 				stdin = self.stdin,
 				stdouterr = self:stdouterr(),
 				exit_code = self.exit_code,
-			})
+			}, nil, {quiet = true})
 		else
 			update_row('task_run', {
 				self.task_run,
 				duration = self.duration,
 				stdouterr = self:stdouterr(),
 				exit_code = self.exit_code,
-			})
+			}, nil, nil, {quiet = true})
 		end
 	end
 end
@@ -1459,10 +1459,13 @@ function json_api.ssh_key_update(machine)
 	local pubkey = mm.ssh_pubkey()
 	local task = mm.ssh_sh(machine, [=[
 		#use ssh mysql user
-		has_mysql && mysql_update_root_pass "$MYSQL_ROOT_PASS"
+		has_mysql && {
+			mysql_update_pass localhost root "$MYSQL_ROOT_PASS"
+			mysql_gen_my_cnf  localhost root "$MYSQL_ROOT_PASS"
+		}
 		ssh_update_pubkey mm "$PUBKEY"
 		user_lock_pass root
-		ssh_pubkey mm
+		ssh_pubkey mm  # print it so we can check it
 	]=], {
 		PUBKEY = pubkey,
 		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
