@@ -113,7 +113,7 @@ rsync_to() { # HOST DIR|FILE
 	local HOST="$1"
 	local DIR="$2"
 	checkvars HOST DIR SSH_KEY- SSH_HOSTKEY-
-	say "Copying dir '$DIR' to host '$HOST' ... "
+	say "Copying dir $DIR to host $HOST ... "
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT

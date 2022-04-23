@@ -7,23 +7,22 @@ bkp_dir() { # machine|deploy [BKP] [files|mysql]
 	[ "$3" ] && echo -n /$3
 }
 
-deploy_backup_files() {
+deploy_backup_files() { # DIR
 	echo NYI
 }
 
-deploy_restore_files() {
+deploy_restore_files() { # DIR
 	echo NYI
 }
 
 machine_backup_files() { # BKP_DIR [PARENT_BKP_DIR]
-	local BKP_DIR="$1"
-	local PARENT_BKP_DIR="$2"
-	checkvars BKP_DIR
+	local dir="$1"
+	local parent_dir="$2"
+	checkvars dir
 
-	must rsync -aR ${PARENT_BKP_DIR:+ --link-dest=$PARENT_BKP_DIR} /home $BKP_DIR
+	must rsync -aR ${parent_dir:+ --link-dest=$parent_dir} /home $dir
 
-	[ "$PARENT_BKP_DIR" ] && \
-		must ln -s $PARENT_BKP_DIR $BKP_DIR-parent
+	[ "$parent_dir" ] && must ln -s $parent_dir $dir-parent
 }
 
 machine_restore_files() { # BKP_DIR
@@ -40,55 +39,65 @@ machine_restore_files() { # BKP_DIR
 }
 
 backup_info() { # TYPE BKP
-	local DIR="$(bkp_dir $1 $2)"
-	du -bs "$DIR" | cut -f1  # print dir size in bytes
-	sha_dir "$DIR"           # print dir sha checksum
+	local dir="$(bkp_dir $1 $2)"
+
+	# print dir size in bytes excluding files that have more than one hard-link.
+	find "$dir" -type f -links 1 -printf "%s\n" | awk '{s=s+$1} END {print s}'
+
+	# print dir sha checksum
+	sha_dir "$dir"
 }
 
 machine_backup_remove() {
-	local BKP="$1"
-	checkvars BKP
-	rm_dir "$(bkp_dir machine $MBKP)"
+	local mbkp="$1"
+	checkvars mbkp
+	rm_dir "$(bkp_dir machine $mbkp)"
 }
 
-machine_backup() { # BKP [PARENT_BKP]
-	local BKP="$1"
-	local PARENT_BKP="$2"
-	checkvars BKP
+machine_backup() { # MBKP [PARENT_MBKP]
+	local mbkp="$1"
+	local parent_mbkp="$2"
+	checkvars mbkp
 
-	mysql_backup_all     "$(bkp_dir machine $BKP mysql)" "$(bkp_dir machine "$PARENT_BKP" mysql)"
-	machine_backup_files "$(bkp_dir machine $BKP files)" "$(bkp_dir machine "$PARENT_BKP" files)"
+	mysql_backup_all     "$(bkp_dir machine $mbkp mysql)" "$(bkp_dir machine "$parent_mbkp" mysql)"
+	machine_backup_files "$(bkp_dir machine $mbkp files)" "$(bkp_dir machine "$parent_mbkp" files)"
 
-	backup_info machine $BKP
+	backup_info machine $mbkp
 }
 
-machine_restore() { # BKP
-	local BKP="$1"
-	checkvars BKP
+machine_restore() { # mbkp
+	local mbkp="$1"
+	checkvars mbkp
 
 	deploy_stop_all
 
-	mysql_restore_all     "$(bkp_dir machine $BKP mysql)"
-	machine_restore_files "$(bkp_dir machine $BKP files)"
+	mysql_restore_all     "$(bkp_dir machine $mbkp mysql)"
+	machine_restore_files "$(bkp_dir machine $mbkp files)"
 
 	deploy_start_all
 }
 
-deploy_backup() { # DEPLOY BKP
-	local DEPLOY="$1"
-	local BKP="$2"
-	checkvars DEPLOY BKP
+deploy_backup() { # DEPLOY DBKP
+	local deploy="$1"
+	local dbkp="$2"
+	checkvars deploy dbkp
 
-	mysql_backup_db     "$DEPLOY" "$(bkp_dir deploy $BKP mysql)"
-	deploy_backup_files "$DEPLOY" "$(bkp_dir deploy $BKP files)"
+	mysql_backup_db     "$deploy" "$(bkp_dir deploy $dbkp mysql)"
+	deploy_backup_files "$deploy" "$(bkp_dir deploy $dbkp files)"
 
-	backup_info deploy $BKP
+	backup_info deploy $dbkp
 }
 
-deploy_restore() { # DEPLOY BKP
-	local BKP="$1"
-	checkvars BKP
-	mysql_restore_db     "$DEPLOY" "$(bkp_dir deploy $BKP mysql)"
-	deploy_restore_files "$DEPLOY" "$(bkp_dir deploy $BKP files)"
+deploy_backup_remove() { # DBKP
+	local dbkp="$1"
+	checkvars dbkp
+	rm_dir "$(bkp_dir deploy $dbkp)"
 }
 
+deploy_restore() { # DBKP DEPLOY
+	local dbkp="$1"
+	local deploy="$2"
+	checkvars dbkp deploy
+	mysql_restore_db     "$deploy" "$(bkp_dir deploy $dbkp mysql)"
+	deploy_restore_files "$deploy" "$(bkp_dir deploy $dbkp files)"
+}

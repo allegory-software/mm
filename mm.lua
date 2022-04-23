@@ -136,10 +136,10 @@ local function mm_schema()
 	--machine backups: ideally backups should be per-deployment, not per-machine.
 	--but mysql only supports incremental backups for the entire server instance
 	--not per schema, so the idea of "machine backups" come from this limitation.
-	tables.mbkp = {
-		mbkp        , idpk,
+	tables.mbk = {
+		mbk         , idpk,
 		machine     , strid, weak_fk(machine),
-		parent_mbkp , id, fk(mbkp),
+		parent_mbk  , id, fk(mbk),
 		start_time  , timeago,
 		duration    , duration,
 		size        , filesize,
@@ -147,8 +147,8 @@ local function mm_schema()
 		name        , name,
 	}
 
-	tables.mbkp_deploy = {
-		mbkp        , id   , not_null, child_fk,
+	tables.mbk_deploy = {
+		mbk         , id   , not_null, child_fk,
 		deploy      , strid, not_null, fk, pk,
 		app_version , strid,
 		sdk_version , strid,
@@ -156,11 +156,11 @@ local function mm_schema()
 		sdk_commit  , strid,
 	}
 
-	tables.mbkp_copy = {
-		mbkp_copy   , idpk,
-		parent_mbkp_copy, id, fk(mbkp_copy),
-		mbkp        , id   , not_null, fk,
-		machine     , strid, not_null, fk, uk(mbkp, machine),
+	tables.mbk_copy = {
+		mbk_copy   , idpk,
+		parent_mbk_copy, id, fk(mbk_copy),
+		mbk        , id   , not_null, fk,
+		machine     , strid, not_null, fk, uk(mbk, machine),
 		start_time  , timeago,
 		duration    , duration,
 	}
@@ -168,8 +168,8 @@ local function mm_schema()
 	--deploy backups: done with mysqldump so they are slow and non-incremental,
 	--but they're the only way to backup & restore a single schema out of many
 	--on a mysql server.
-	tables.dbkp = {
-		dbkp        , idpk,
+	tables.dbk = {
+		dbk        , idpk,
 		deploy      , strid, not_null, fk,
 		app_version , strid,
 		sdk_version , strid,
@@ -182,10 +182,10 @@ local function mm_schema()
 		name        , name,
 	}
 
-	tables.dbkp_copy = {
-		dbkp_copy   , idpk,
-		dbkp        , id, not_null, fk,
-		machine     , strid, not_null, fk, uk(dbkp, machine),
+	tables.dbk_copy = {
+		dbk_copy   , idpk,
+		dbk        , id, not_null, fk,
+		machine     , strid, not_null, fk, uk(dbk, machine),
 		start_time  , timeago,
 		duration    , duration,
 	}
@@ -445,8 +445,8 @@ local cmd_ssh_mounts  = cmdsection('SSH-FS MOUNTS'     , wrap)
 local cmd_mysql       = cmdsection('MYSQL'             , wrap)
 local cmd_machines    = cmdsection('MACHINES'          , wrap)
 local cmd_deployments = cmdsection('DEPLOYMENTS'       , wrap)
-local cmd_mbkp        = cmdsection('MACHINE-LEVEL BACKUP & RESTORE', wrap)
-local cmd_dbkp        = cmdsection('DEPLOYMENT-LEVEL BACKUP & RESTORE', wrap)
+local cmd_mbk        = cmdsection('MACHINE-LEVEL BACKUP & RESTORE', wrap)
+local cmd_dbk        = cmdsection('DEPLOYMENT-LEVEL BACKUP & RESTORE', wrap)
 local cmd_tasks       = cmdsection('TASKS'             , wrap)
 
 --task system ----------------------------------------------------------------
@@ -2204,61 +2204,60 @@ rowset.deploy_mysql_stats = sql_rowset(update(mysql_stats_rowset, {
 
 --machine backups ------------------------------------------------------------
 
-rowset.mbkp = sql_rowset{
+rowset.machine_backups = sql_rowset{
 	allow = 'admin',
 	select = [[
 		select
-			b.mbkp       ,
+			b.mbk       ,
 			b.machine    ,
-			b.parent_mbkp,
+			b.parent_mbk,
 			b.start_time ,
 			b.duration   ,
 			b.size       ,
 			b.checksum   ,
 			b.name
-		from mbkp b
+		from mbk b
 	]],
 	where_all = 'b.machine in (:param:filter)',
-	pk = 'mbkp',
-	parent_col = 'parent_mbkp',
+	pk = 'mbk',
+	parent_col = 'parent_mbk',
 	tree_col = 'machine',
 	update_row = function(self, row)
-		self:update_into('mbkp', row, 'name')
+		self:update_into('mbk', row, 'name')
 	end,
 	delete_row = function(self, row)
-		mm.mbkp_remove(row['mbkp:old'])
+		mm.machine_backup_remove(row['mbk:old'])
 	end,
 }
 
-rowset.mbkp_copy = sql_rowset{
+rowset.machine_backup_copies = sql_rowset{
 	allow = 'admin',
 	select = [[
 		select
-			mbkp_copy,
-			mbkp,
-			parent_mbkp_copy,
+			mbk_copy,
+			mbk,
+			parent_mbk_copy,
 			machine,
 			start_time,
 			duration
 		from
-			mbkp_copy
+			mbk_copy
 	]],
-	pk = 'mbkp_copy',
-	where_all = 'mbkp in (:param:filter)',
-	pk = 'mbkp_copy',
+	pk = 'mbk_copy',
+	where_all = 'mbk in (:param:filter)',
+	pk = 'mbk_copy',
 	delete_row = function(self, row)
-		mm.mbkp_copy_remove(row['mbkp_copy:old'])
+		mm.machine_backup_copy_remove(row['mbk_copy:old'])
 	end,
 }
 
-function text_api.mbkp(m)
-	m = checkarg(m, 'machine required')
+function text_api.machine_backups(machine)
 	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
-			c.mbkp_copy  copy,
-			c.parent_mbkp_copy `from`,
+			c.mbk_copy  copy,
+			c.parent_mbk_copy `from`,
 			b.name,
 			b.machine    `of`,
 			c.machine    `in`,
@@ -2270,20 +2269,23 @@ function text_api.mbkp(m)
 					, coalesce(concat('=', d.app_commit ), '')
 				) separator ' '
 			) as contents,
-			b.mbkp        mbkp,
+			b.mbk        mbk,
 			b.size,
 			b.duration    bkp_took,
 			c.duration    copy_took
-		from mbkp b
-		left join mbkp_copy c on c.mbkp = b.mbkp
-		left join mbkp_deploy d on d.mbkp = b.mbkp
+		from mbk b
+		left join mbk_copy c on c.mbk = b.mbk
+		left join mbk_deploy d on d.mbk = b.mbk
+		#if machine
 		where
-			b.machine = ?
+			b.machine = :machine
+		#endif
 		group by
-			b.mbkp, c.mbkp_copy
+			b.mbk, c.mbk_copy
 		order by
-			c.mbkp_copy
-	]], m, m)
+			c.mbk_copy
+	]], {machine = machine})
+	checkfound(not machine or #rows > 0, 'machine not found')
 	outpqr(rows, cols, {
 		size = 'sum',
 		made = 'max',
@@ -2291,44 +2293,44 @@ function text_api.mbkp(m)
 		copy_took = 'max',
 	})
 end
-cmd_mbkp('mb|machine-backups MACHINE', 'Show machine and their copies', mm.out_mbkp)
+cmd_mbk('mbk|machine-backups MACHINE', 'Show machine backups', mm.out_machine_backups)
 
-function hybrid_api.mbkp_backup(to_text, machine, name, parent_mbkp_copy, ...)
+function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 
 	machine = checkarg(machine, 'machine required')
 
-	if parent_mbkp_copy == 'latest' then
-		parent_mbkp_copy = checkarg(first_row([[
+	if parent_mbk_copy == 'latest' then
+		parent_mbk_copy = checkarg(first_row([[
 			--find the local copy of the latest backup of :machine that has one.
-			select c.mbkp_copy from c.mbkp_copy, b.mbkp
-			where c.mbkp = b.mbkp and b.machine = :machine and c.machine = :machine
-			order by c.mbkp desc limit 1
+			select c.mbk_copy from mbk_copy c, mbk b
+			where c.mbk = b.mbk and b.machine = :machine and c.machine = :machine
+			order by c.mbk desc limit 1
 		]], {machine = machine}), 'no local backup of machine "%s" found for "latest"', nachine)
-	elseif parent_mbkp_copy then
-		parent_mbkp_copy = checkarg(parent_mbkp_copy, 'invalid backup copy')
+	elseif parent_mbk_copy then
+		parent_mbk_copy = checkarg(parent_mbk_copy, 'invalid backup copy')
 	end
 
-	local parent_mbkp = parent_mbkp_copy and checkarg(first_row([[
-		select c.mbkp from mbkp_copy c, mbkp b
-		where c.mbkp = b.mbkp and c.mbkp_copy = ? and b.machine = ?
-	]], parent_mbkp_copy, machine), 'parent backup copy not of the same machine')
+	local parent_mbk = parent_mbk_copy and checkarg(first_row([[
+		select c.mbk from mbk_copy c, mbk b
+		where c.mbk = b.mbk and c.mbk_copy = ? and b.machine = ?
+	]], parent_mbk_copy, machine), 'parent backup copy not of the same machine')
 
-	local task_name = 'mbkp_backup '..machine
+	local task_name = 'mbk_backup '..machine
 	check500(not mm.running_task(task_name), 'already running: %s', task_name)
 
 	local start_time = time()
 
-	local mbkp = insert_row('mbkp', {
-		parent_mbkp = parent_mbkp,
+	local mbk = insert_row('mbk', {
+		parent_mbk = parent_mbk,
 		machine = machine,
 		name = name,
 		start_time = start_time,
 	})
-	rowset_changed'mbkp'
+	rowset_changed'machine_backups'
 
 	query([[
-		insert into mbkp_deploy (
-			mbkp        ,
+		insert into mbk_deploy (
+			mbk        ,
 			deploy      ,
 			app_version ,
 			sdk_version ,
@@ -2345,22 +2347,23 @@ function hybrid_api.mbkp_backup(to_text, machine, name, parent_mbkp_copy, ...)
 			deploy
 		where
 			machine = ?
-	]], mbkp, machine)
+			and deployed_at is not null
+	]], mbk, machine)
 
-	local mbkp_copy = insert_row('mbkp_copy', {
-		mbkp = mbkp,
-		parent_mbkp_copy = parent_mbkp_copy,
+	local mbk_copy = insert_row('mbk_copy', {
+		mbk = mbk,
+		parent_mbk_copy = parent_mbk_copy,
 		machine = machine,
 		start_time = start_time,
 	})
-	rowset_changed'mbkp_copy'
+	rowset_changed'machine_backup_copies'
 
 	local task = mm.ssh_sh(machine, [[
 		#use backup
-		machine_backup "$MBKP" "$PARENT_MBKP"
+		machine_backup "$mbk" "$PARENT_mbk"
 	]], {
-		MBKP = mbkp,
-		PARENT_MBKP = parent_mbkp,
+		mbk = mbk,
+		PARENT_mbk = parent_mbk,
 	}, {
 		name = task_name,
 		capture_stdout = true,
@@ -2371,29 +2374,29 @@ function hybrid_api.mbkp_backup(to_text, machine, name, parent_mbkp_copy, ...)
 	local s = task:stdout()
 	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
 
-	update_row('mbkp', {
-		mbkp,
+	update_row('mbk', {
+		mbk,
 		duration = task.duration,
 		size = tonumber(size),
 		checksum = checksum,
 	})
-	rowset_changed'mbkp'
+	rowset_changed'machine_backups'
 
-	update_row('mbkp_copy', {
-		mbkp_copy,
+	update_row('mbk_copy', {
+		mbk_copy,
 		duration = 0,
 	})
-	rowset_changed'mbkp_copy'
+	rowset_changed'machine_backup_copies'
 
 	for i=1,select('#',...) do
 		local machine = select(i,...)
-		;(to_text and mm.out_mbkp_copy or mm.mbkp_copy)(mbkp_copy, machine)
+		;(to_text and mm.out_machine_backup_copy or mm.machine_backup_copy)(mbk_copy, machine)
 	end
 
 	return {notify = 'Machine backup done for '..machine}
 end
-cmd_mbkp('mb-backup MACHINE [NAME] [UP_COPY] [MACHINE1,...]',
-	'Backup a machine', mm.out_mbkp_backup)
+cmd_mbk('mbk-backup MACHINE [NAME] [UP_COPY] [MACHINE1,...]',
+	'Backup a machine', mm.out_machine_backup)
 
 local function rsync_vars(machine)
 	return {
@@ -2403,238 +2406,235 @@ local function rsync_vars(machine)
 	}
 end
 
-local function mbkp_copy_info(mbkp_copy)
+local function mbk_copy_info(mbk_copy)
 	return checkfound(first_row([[
 		select
-			c.mbkp_copy,
-			b.mbkp, b.parent_mbkp,
+			c.mbk_copy,
+			b.mbk, b.parent_mbk,
 			c.machine, c.duration
-		from mbkp_copy c
-		inner join mbkp b on c.mbkp = b.mbkp
-		where mbkp_copy = ?
-	]], checkarg(mbkp_copy, 'invalid backup copy')), 'backup copy not found')
+		from mbk_copy c
+		inner join mbk b on c.mbk = b.mbk
+		where c.mbk_copy = ?
+	]], mbk_copy), 'backup copy not found')
 end
 
-function hybrid_api.mbkp_copy(to_text, src_mbkp_copy, machine)
+function hybrid_api.machine_backup_copy(to_text, src_mbk_copy, machine)
 
 	machine = checkarg(machine)
-	local c = mbkp_copy_info(src_mbkp_copy)
+	src_mbk_copy = checkarg(id_arg(src_mbk_copy, 'backup copy required'))
+	local c = mbk_copy_info(src_mbk_copy)
 
-	checkarg(c.duration, _('mbkp_copy %d is not complete (didn\'t finish)', c.mbkp_copy))
+	checkarg(c.duration, 'Backup copy %d is not complete (didn\'t finish)', c.mbk_copy)
 	checkarg(machine ~= c.machine, 'Choose a different machine to copy the backup to.')
 
-	local parent_mbkp_copy = c.parent_mbkp and checkarg(first_row([[
-		select mbkp_copy from mbkp_copy
-		where mbkp = ? and machine = ? and duration is not null
-	]], c.parent_mbkp, machine),
+	local parent_mbk_copy = c.parent_mbk and checkarg(first_row([[
+		select mbk_copy from mbk_copy
+		where mbk = ? and machine = ? and duration is not null
+	]], c.parent_mbk, machine),
 		'a copy of the backup\'s parent backup was not found on machine "%s"', machine)
 
-	local mbkp_copy = insert_or_update_row('mbkp_copy', {
-		mbkp = c.mbkp,
-		parent_mbkp_copy = parent_mbkp_copy,
+	local mbk_copy = insert_or_update_row('mbk_copy', {
+		mbk = c.mbk,
+		parent_mbk_copy = parent_mbk_copy,
 		machine = machine,
 		start_time = time(),
 	})
-	rowset_changed'mbkp_copy'
+	rowset_changed'machine_backup_copies'
 
 	local task = mm.ssh_sh(c.machine, [[
 		#use ssh backup
-		rsync_to "$HOST" "$(bkp_dir machine $MBKP)"
+		rsync_to "$HOST" "$(bkp_dir machine $mbk)"
 	]], update({
-		MBKP = c.mbkp,
+		mbk = c.mbk,
 	}, rsync_vars(machine)), {
-		name = 'mbkp_copy '..src_mbkp_copy..' '..machine,
+		name = 'machine_backup_copy '..src_mbk_copy..' '..machine,
 		out_stdouterr = to_text,
 	})
-	check500(task.exit_code == 0, 'mbkp_copy exit code: %d', task.exit_code)
+	check500(task.exit_code == 0, 'rsync_to exit code: %d', task.exit_code)
 
-	update_row('mbkp_copy', {
-		mbkp_copy,
+	update_row('mbk_copy', {
+		mbk_copy,
 		duration = task.duration,
 	})
-	rowset_changed'mbkp_copy'
+	rowset_changed'machine_backup_copies'
 
-	return {notify = _('Backup copied: %d, copy id:  %d', c.mbkp, mbkp_copy)}
+	return {notify = _('Backup copied: %d, copy id: %d', c.mbk, mbk_copy)}
 end
-cmd_mbkp('mb-copy COPY MACHINE', 'Copy a backup', mm.out_mbkp_copy)
+cmd_mbk('mbk-copy COPY MACHINE', 'Copy a machine backup', mm.out_machine_backup_copy)
 
-function json_api.mbkp_copy_remove(mbkp_copy)
+function json_api.machine_backup_copy_remove(mbk_copy)
 
-	local c = mbkp_copy_info(mbkp_copy)
+	mbk_copy = checkarg(id_arg(mbk_copy, 'backup copy required'))
+	local c = mbk_copy_info(mbk_copy)
 
 	checkarg(not first_row([[
-		select 1 from mbkp_copy where parent_mbkp_copy = ? limit 1
-	]], mbkp_copy), 'Backup has derived incremental backups. Remove those first.')
+		select 1 from mbk_copy where parent_mbk_copy = ? limit 1
+	]], mbk_copy), 'Backup has derived incremental backups. Remove those first.')
 
 	local task = mm.ssh_sh(c.machine, [[
 		#use backup
-		machine_backup_remove "$MBKP"
+		machine_backup_remove "$mbk"
 	]], {
-		MBKP = c.mbkp,
+		mbk = c.mbk,
 	}, {
-		name = 'mbkp_copy_remove '..mbkp_copy,
+		name = 'machine_backup_remove '..mbk_copy,
 	})
-	check500(task.exit_code == 0, 'mbkp_remove exit code: %d', task.exit_code)
+	check500(task.exit_code == 0, 'machine_backup_remove exit code: %d', task.exit_code)
 
-	delete_row('mbkp_copy', {mbkp_copy})
-	rowset_changed'mbkp_copy'
+	delete_row('mbk_copy', {mbk_copy})
+	rowset_changed'machine_backup_copies'
 
 	local backup_removed
-	if first_row('select count(1) from mbkp_copy where mbkp = ?', c.mbkp) == 0 then
-		delete_row('mbkp', {c.mbkp})
-		rowset_changed'mbkp'
+	if first_row('select count(1) from mbk_copy where mbk = ?', c.mbk) == 0 then
+		delete_row('mbk', {c.mbk})
+		rowset_changed'machine_backups'
 		backup_removed = true
 	end
 
-	return {notify = 'Backup copy removed: '..mbkp_copy..'.'
+	return {notify = 'Backup copy removed: '..mbk_copy..'.'
 		..(backup_removed and ' That was the last copy of the backup.' or '')}
 end
-cmd_mbkp('mb-remove COPY1[-COPY2] ...', 'Remove backup copies', function(...)
+cmd_mbk('mbk-remove COPY1[-COPY2] ...', 'Remove machine backup copies', function(...)
 	for i=1,select('#',...) do
 		local s = select(i,...)
-		local mbkp_copy1, mbkp_copy2 = s, s
+		local mbk_copy1, mbk_copy2 = s, s
 		if s:find'%-' then
-			mbkp_copy1, mbkp_copy2 = s:match'(.-)%-(.*)'
+			mbk_copy1, mbk_copy2 = s:match'(.-)%-(.*)'
 		elseif s:find'%.%.' then
-			mbkp_copy1, mbkp_copy2 = s:match'(.-)%.%.(.*)'
+			mbk_copy1, mbk_copy2 = s:match'(.-)%.%.(.*)'
 		end
-		mbkp_copy1 = checkarg(mbkp_copy1, 'invalid backup copy')
-		mbkp_copy2 = checkarg(mbkp_copy2, 'invalid backup copy')
-		for mbkp_copy = max(mbkp_copy1, mbkp_copy2), min(mbkp_copy1, mbkp_copy2), -1 do
-			callp(mm.mbkp_copy_remove, mbkp_copy)
+		mbk_copy1 = checkarg(mbk_copy1, 'invalid backup copy')
+		mbk_copy2 = checkarg(mbk_copy2, 'invalid backup copy')
+		for mbk_copy = max(mbk_copy1, mbk_copy2), min(mbk_copy1, mbk_copy2), -1 do
+			callp(mm.machine_backup_copy_remove, mbk_copy)
 		end
 	end
 end)
 
-function hybrid_api.mbkp_restore(to_text, mbkp_copy)
+function hybrid_api.machine_restore(to_text, mbk_copy)
 
-	local c = mbkp_copy_info(mbkp_copy)
+	local c = mbk_copy_info(mbk_copy)
 
 	local task = mm.ssh_sh(c.machine, [[
 		#use backup
-		machine_restore $MBKP
+		machine_restore "$mbk"
 	]], {
-		MBKP = c.mbkp,
+		mbk = c.mbk,
 	}, {
-		name = 'mbkp_restore '..c.machine,
+		name = 'machine_restore '..c.machine,
 	})
-	check500(task.exit_code == 0, 'mbkp_restore exit code: %d', task.exit_code)
+	check500(task.exit_code == 0, 'machine_restore exit code: %d', task.exit_code)
 
 	query[[
 		#
 	]]
 
 end
-cmd_mbkp('mb-restore COPY', 'Restore a machine', mm.out_mbkp_restore)
+cmd_mbk('mbk-restore COPY', 'Restore a machine', mm.out_machine_restore)
 
 --deploy backups -------------------------------------------------------------
 
-rowset.dbkp = sql_rowset{
+rowset.deploy_backups = sql_rowset{
 	allow = 'admin',
 	select = [[
 		select
-			dbkp        ,
+			dbk        ,
 			deploy     ,
 			start_time ,
 			name       ,
 			size       ,
 			duration   ,
 			checksum
-		from dbkp
+		from dbk
 	]],
 	where_all = 'deploy in (:param:filter)',
-	pk = 'dbkp',
+	pk = 'dbk',
 	update_row = function(self, row)
-		self:update_into('dbkp', row, 'name')
+		self:update_into('dbk', row, 'name')
 	end,
 	delete_row = function(self, row)
-		mm.dbkp_remove(row['dbkp:old'])
+		mm.deploy_backup_remove(row['dbk:old'])
 	end,
 }
 
-rowset.dbkp_copy = sql_rowset{
+rowset.deploy_backup_copies = sql_rowset{
 	allow = 'admin',
 	select = [[
 		select
-			dbkp_copy,
-			dbkp,
+			dbk_copy,
+			dbk,
 			machine,
 			start_time,
 			duration
 		from
-			dbkp_copy
+			dbk_copy
 	]],
-	pk = 'dbkp_copy',
-	where_all = 'dbkp in (:param:filter)',
+	pk = 'dbk_copy',
+	where_all = 'dbk in (:param:filter)',
 	delete_row = function(self, row)
-		mm.dbkp_copy_remove(row['dbkp_copy:old'])
+		mm.deploy_backup_copy_remove(row['dbk_copy:old'])
 	end,
 }
 
-function text_api.dbkp(dm)
-	deploy = checkarg(dm, 'deploy or machine required')
+function text_api.deploy_backups(deploy)
 	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
-			concat('b', b.bkp) bkp,
-			concat('r', r.bkp_repl) bkp_repl,
+			c.dbk_copy,
 			b.deploy,
-			r.machine,
+			b.name,
+			b.deploy `of`,
+			c.machine `in`,
+			b.start_time  `made`,
 			b.app_version app_ver,
 			b.sdk_version sdk_ver,
 			b.app_commit  ,
 			b.sdk_commit  ,
-			b.start_time  bkp_time,
-			r.start_time  repl_time,
-			b.duration    bkp_took,
-			r.duration    repl_took,
-			b.name,
-			b.size
-		from bkp b
-		left join bkp_repl r on r.bkp = b.bkp
+			b.dbk,
+			b.size,
+			b.duration bkp_took,
+			c.duration copy_took
+		from dbk b
+		left join dbk_copy c on c.dbk = b.dbk
+		#if deploy
 		where
-			b.deploy = ? or r.machine = ?
-		order by bkp
-	]], dm, dm)
-	cols.bkp.align = 'right'
-	cols.bkp_repl.align = 'right'
+			b.deploy = :deploy
+		#endif
+		order by c.dbk_copy
+	]], {deploy = deploy})
+	checkfound(not deploy or #rows > 0, 'deploy not found')
 	outpqr(rows, cols, {
 		size = 'sum',
-		bkp_time = 'max',
-		repl_time = 'max',
+		made = 'max',
 		bkp_took = 'max',
-		repl_took = 'max',
+		copy_took = 'max',
 	})
 end
-cmd_dbkp('b|deploy-backups DEPLOY|MACHINE', 'Show backup and their replicas', mm.out_dbkp)
+cmd_dbk('dbk|deploy-backups DEPLOY', 'Show deploy backups', mm.out_deploy_backups)
 
-local function check_bkp_arg(s)
-	return isnum(s) and s or checkarg(id_arg(s and s:match'b(%d+)'), 'invalid bkp')
-end
-local function check_bkp_repl_arg(s)
-	return isnum(s) and s or checkarg(id_arg(s and s:match'r(%d+)'), 'invalid bkp_repl')
-end
-
-function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
-
-	parent_bkp = parent_bkp and check_bkp_arg(parent_bkp)
+function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 
 	local d = checkfound(first_row([[
 		select
 			machine,
-			deployed_app_version , deployed_sdk_version,
-			deployed_app_commit  , deployed_sdk_commit
-		from deploy where deploy = ?
+			deployed_app_version,
+			deployed_sdk_version,
+			deployed_app_commit,
+			deployed_sdk_commit,
+			deployed_at
+		from deploy
+		where deploy = ?
 	]], checkarg(deploy, 'deploy required')), 'deploy not found')
 
-	local task_name = 'backup '..deploy..(parent_bkp and ' '..parent_bkp or '')
+	check500(d.deployed_at, '%s is not deployed.', deploy)
+
+	local task_name = 'deploy_backup '..deploy
 	check500(not mm.running_task(task_name), 'already running: %s', task_name)
 
 	local start_time = time()
 
-	local bkp = insert_row('bkp', {
-		parent_bkp = parent_bkp,
+	local dbk = insert_row('dbk', {
 		deploy = deploy,
 		app_version = d.deployed_app_version,
 		sdk_version = d.deployed_sdk_version,
@@ -2644,36 +2644,27 @@ function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 		start_time = start_time,
 	})
 
-	local bkp_repl = insert_row('bkp_repl', {
-		bkp = bkp,
+	local dbk_copy = insert_row('dbk_copy', {
+		dbk = dbk,
 		machine = d.machine,
 		start_time = start_time,
 	})
 
-	rowset_changed'backups'
-	rowset_changed'backup_replicas'
+	rowset_changed'deploy_backups'
+	rowset_changed'deploy_backup_copy'
 
 	local task = mm.ssh_sh(d.machine, [[
-		#use mysql
-		mbkp_backup "$deploy" "$bkp" "$parent_bkp"
+		#use backup
+		deploy_backup "$deploy" "$dbk"
 	]], {
 		deploy = deploy,
-		bkp = bkp,
-		parent_bkp = parent_bkp,
+		dbk = dbk,
 	}, {
 		name = task_name,
 		capture_stdout = true,
 		out_stdouterr = to_text,
 	})
-
-	if task.exit_code ~= 0 then
-		if to_text then
-			out('Backup script exit code: '..task.exit_code)
-			return
-		else
-			check500(false, 'Backup script exit code: %d', task.exit_code)
-		end
-	end
+	check500(task.exit_code == 0, 'deploy_backup exit code: %d', task.exit_code)
 
 	local s = task:stdout()
 	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
@@ -2684,147 +2675,135 @@ function hybrid_api.backup(to_text, deploy, name, parent_bkp, ...)
 		size = tonumber(size),
 		checksum = checksum,
 	})
+	rowset_changed'deploy_backups'
 
-	update_row('bkp_repl', {
-		bkp_repl,
+	update_row('dbk_copy', {
+		dbk_copy,
 		duration = 0,
 	})
-
-	rowset_changed'backups'
-	rowset_changed'backup_replicas'
+	rowset_changed'deploy_backup_copies'
 
 	for i=1,select('#',...) do
 		local machine = select(i,...)
-		;(to_text and mm.out_backup_copy or mm.backup_copy)(bkp_repl, machine)
+		;(to_text and mm.out_dbk_copy or mm.dbk_copy)(dbk_copy, deploy)
 	end
 
 	return {notify = 'Backup done for '..deploy}
 end
-cmd_dbkp('backup DEPLOY [NAME] [PARENT_BKP] [MACHINE1,...]',
-	'Backup a database', mm.out_backup)
+cmd_dbk('dbk-backup DEPLOY [NAME] [MACHINE1,...]',
+	'Backup a deploy', mm.out_deploy_backup)
 
-local function rsync_vars(machine)
-	return {
-		HOST = mm.ip(machine, true),
-		SSH_KEY = load(mm.keyfile(machine)),
-		SSH_HOSTKEY = mm.ssh_hostkey(machine),
-	}
-end
-
-local function bkp_repl_info(bkp_repl)
+local function dbk_copy_info(dbk_copy)
 	return checkfound(first_row([[
-		select r.bkp_repl, r.bkp, r.machine, b.deploy, r.duration
-		from bkp_repl r
-		inner join bkp b on r.bkp = b.bkp
-		where bkp_repl = ?
-	]], check_bkp_repl_arg(bkp_repl)), 'bkp_repl not found')
+		select c.dbk_copy, c.dbk, c.machine, b.deploy, c.duration
+		from dbk_copy c
+		inner join dbk b on c.dbk = b.dbk
+		where c.dbk_copy = ?
+	]], dbk_copy), 'backup copy not found')
 end
 
-function hybrid_api.backup_copy(to_text, src_bkp_repl, machine)
+function hybrid_api.deploy_backup_copy(to_text, src_dbk_copy, machine)
 
 	machine = checkarg(machine)
-	local r = bkp_repl_info(src_bkp_repl)
+	src_dbk_copy = checkarg(id_arg(src_dbk_copy, 'backup copy required'))
+	local c = dbk_copy_info(src_dbk_copy)
 
-	checkarg(r.duration, _('bkp_repl %d is not complete (didn\'t finish)', r.bkp_repl))
+	checkarg(c.duration, 'Backup copy %d is not complete (didn\'t finish)', c.dbk_copy)
+	checkarg(machine ~= c.machine, 'Choose a different machine to copy the backup to.')
 
-	local bkp_repl = insert_or_update_row('bkp_repl', {
-		bkp = r.bkp,
+	local dbk_copy = insert_or_update_row('dbk_copy', {
+		dbk = c.dbk,
 		machine = machine,
 		start_time = time(),
 	})
 
-	checkarg(machine ~= r.machine, 'Choose a different machine to copy the backup to.')
-
-	local task = mm.ssh_sh(r.machine, [[
-		#use mysql ssh
-		mbkp_copy "$DEPLOY" "$BKP" "$HOST"
+	local task = mm.ssh_sh(c.machine, [[
+		#use ssh backup
+		rsync_to "$HOST" "$(bkp_dir deploy $dbk)"
 	]], update({
-		DEPLOY = r.deploy,
-		BKP = r.bkp,
+		dbk = c.dbk,
 	}, rsync_vars(machine)), {
-		name = 'backup_copy '..src_bkp_repl..' '..machine,
+		name = 'deploy_backup_copy '..src_dbk_copy..' '..machine,
 		out_stdouterr = to_text,
 	})
-	if task.exit_code ~= 0 then
-		if to_text then
-			out('Backup copy script exit code: '..task.exit_code)
-			return
-		else
-			check500(false, 'Backup copy script exit code: %d', task.exit_code)
-		end
-	end
+	check500(task.exit_code == 0, 'deploy_backup_copy exit code: %d', task.exit_code)
 
-	update_row('bkp_repl', {
-		bkp_repl,
+	update_row('dbk_copy', {
+		dbk_copy,
 		duration = task.duration,
 	})
+	rowset_changed'deploy_backup_copies'
 
-	rowset_changed'backup_replicas'
-	return {notify = _('Backup copied: b%d r%d', r.bkp, bkp_repl)}
+	return {notify = _('Backup copied: %d, copy id: %d', c.dbk, dbk_copy)}
 end
-cmd_dbkp('backup-copy BKP_REPL MACHINE', 'Replicate a backup', mm.out_backup_copy)
+cmd_dbk('dbk-copy COPY MACHINE', 'Copy a deploy backup', mm.out_deploy_backup_copy)
 
-function json_api.backup_remove(bkp)
-	local found
-	bkp = check_bkp_arg(bkp)
-	for _,bkp_repl in each_row_vals([[
-		select bkp_repl from bkp_repl where bkp = ?
-	]], bkp) do
-		mm.backup_repl_remove(bkp_repl)
-		found = true
-	end
-	check500(found, 'Backup not found '..bkp)
-	return {notify = 'Backup removed: b'..bkp}
-end
-cmd_dbkp('backup-remove BKP1[-BKP2] ...', 'Remove backup(s) with all copies',
-	function(...)
-		for i=1,select('#',...) do
-			local s = select(i,...)
-			if s:find'%-' then
-				local bkp1, bkp2 = s:match'(.-)%-(.*)'
-				bkp1 = check_bkp_arg(bkp1)
-				bkp2 = check_bkp_arg(bkp2)
-				for bkp = bkp1, bkp2 do
-					callp(mm.backup_remove, bkp)
-				end
-			else
-				local bkp = check_bkp_arg(s)
-				callp(mm.backup_remove, bkp)
-			end
-		end
-	end)
+function json_api.deploy_backup_copy_remove(dbk_copy)
 
-function json_api.backup_repl_remove(bkp_repl)
+	dbk_copy = checkarg(id_arg(dbk_copy, 'backup copy required'))
+	local c = dbk_copy_info(dbk_copy)
 
-	local r = bkp_repl_info(bkp_repl)
-
-	local task = mm.ssh_sh(r.machine, [[
-		#use mysql
-		mbkp_remove "$DEPLOY" "$BKP"
+	local task = mm.ssh_sh(c.machine, [[
+		#use backup
+		deploy_backup_remove "$dbk"
 	]], {
-		DEPLOY = r.deploy,
-		BKP = r.bkp,
+		dbk = c.dbk,
 	}, {
-		name = 'backup_repl_remove '..bkp_repl,
+		name = 'deploy_backup_remove '..dbk_copy,
 	})
-	check500(task.exit_code == 0, 'Backup replica remove script exit code: %d',
-		task.exit_code)
+	check500(task.exit_code == 0, 'deploy_backup_remove exit code: %d', task.exit_code)
 
-	delete_row('bkp_repl', {bkp_repl})
+	delete_row('dbk_copy', {dbk_copy})
+	rowset_changed'deploy_backup_copies'
 
 	local backup_removed
-	if first_row('select count(1) from bkp_repl where bkp = ?', r.bkp) == 0 then
-		delete_row('bkp', {r.bkp})
-		rowset_changed'backups'
+	if first_row('select count(1) from dbk_copy where dbk = ?', c.dbk) == 0 then
+		delete_row('dbk', {c.dbk})
+		rowset_changed'deploy_backups'
 		backup_removed = true
 	end
 
-	rowset_changed'backup_replicas'
-	return {notify = 'Backup replica removed.'
-		..(backup_removed and ' That was the last replica.' or '')}
+	return {notify = 'Backup copy removed: '..dbk_copy..'.'
+		..(backup_removed and ' That was the last copy of the backup.' or '')}
 end
-cmd_dbkp('backup-repl-remove BKP_REPL', 'Remove a backup replica',
-	mm.backup_repl_remove)
+cmd_dbk('dbk-remove COPY1[-COPY2] ...', 'Remove deploy backup copies', function(...)
+	for i=1,select('#',...) do
+		local s = select(i,...)
+		local dbk_copy1, dbk_copy2 = s, s
+		if s:find'%-' then
+			dbk_copy1, dbk_copy2 = s:match'(.-)%-(.*)'
+		elseif s:find'%.%.' then
+			dbk_copy1, dbk_copy2 = s:match'(.-)%.%.(.*)'
+		end
+		dbk_copy1 = checkarg(dbk_copy1, 'invalid backup copy')
+		dbk_copy2 = checkarg(dbk_copy2, 'invalid backup copy')
+		for dbk_copy = max(dbk_copy1, dbk_copy2), min(dbk_copy1, dbk_copy2), -1 do
+			callp(mm.deploy_backup_copy_remove, dbk_copy)
+		end
+	end
+end)
+
+function hybrid_api.deploy_restore(to_text, dbk_copy, deploy)
+
+	local c = dbk_copy_info(dbk_copy)
+
+	local task = mm.ssh_sh(c.machine, [[
+		#use backup
+		deploy_restore "$dbk" "$DEPLOY"
+	]], {
+		dbk = c.dbk,
+		DEPLOY = c.deploy,
+	}, {
+		name = 'deploy_restore '..c.machine,
+	})
+	check500(task.exit_code == 0, 'deploy_restore exit code: %d', task.exit_code)
+
+	query[[
+		#
+	]]
+
+end
+cmd_dbk('dbk-restore COPY [DEPLOY_NAME]', 'Restore a deployment', mm.out_deploy_restore)
 
 --remote access tools --------------------------------------------------------
 

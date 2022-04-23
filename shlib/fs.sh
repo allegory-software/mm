@@ -65,3 +65,22 @@ save() { # S FILE [USER]
 	fi
 	say OK
 }
+
+# TODO: finish this
+: '
+replace_lines() { # REGEX FILE
+	local regex="$1"
+	local file="$2"
+	checkvars regex- file
+	say -n "Removing line containing $regex from file $file ..."
+	local s="$(cat "$file")" || die "cat $file [$?]"
+	local s1="${s//$regex/}"
+	if [ "$s" == "$s1" ]; then
+		say "No match"
+	else
+		say "Match found"
+		save "$s" "$file"
+		say "OK"
+	fi
+}
+'

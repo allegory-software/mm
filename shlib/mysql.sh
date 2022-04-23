@@ -104,23 +104,31 @@ mysql_restore_all() { # BKP_DIR
 
 # mysqldump backups ----------------------------------------------------------
 
-mysql_backup_db() { # DB BKP_DIR
-	local DB="$1"
-	local BKP_DIR="$2"
-	checkvars DB BKP_DIR
-	must mkdir -p "$BKP_DIR"
+mysql_backup_db() { # DB BACKUP_DIR
+	local db="$1"
+	local dir="$2"
+	checkvars db dir
+	must mkdir -p "$dir"
+	say -n "mysqldump'ing $db to $dir ... "
 	must mysqldump -u root \
-		--add-drop-database \
+		--no-create-db \
 		--extended-insert \
 		--order-by-primary \
+		--triggers \
 		--routines \
 		--single-transaction \
 		--quick \
-		"$DB" > "$BKP_DIR/mysqldump.sql"
+		"$db" | qpress -i dump.sql "$dir/dump.qp"
+	say "OK. $(stat --printf="%s" "$dir/dump.qp" | numfmt --to=iec) written."
 }
 
-mysql_restore_db() { # DB BKP_DIR
-	echo NYI
+mysql_restore_db() { # DB BACKUP_DIR
+	local db="$1"
+	local dir="$2"
+	checkvars db dir
+	qpress -d "$dir/dump.qp" ./dir
+	qpress -do database.qp > database.xml
+	cat database.qp | qpress -di .
 }
 
 # mysql queries --------------------------------------------------------------

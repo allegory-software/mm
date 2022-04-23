@@ -5,7 +5,7 @@ machine_set_hostname() { # machine
 	checkvars HOST
 	must hostnamectl set-hostname $HOST
 	must sed -i '/^127.0.0.1/d' /etc/hosts
-	must append "\
+	append "\
 127.0.0.1 $HOST $HOST
 127.0.0.1 localhost
 " /etc/hosts
@@ -27,6 +27,12 @@ machine_prepare() {
 
 	machine_set_hostname $MACHINE
 	machine_set_timezone UTC
+
+	# remount /proc so we can pass in secrets via cmdline without them leaking.
+	must mount -o remount,rw,nosuid,nodev,noexec,relatime,hidepid=2 /proc
+	# make that permanent...
+	must sed -i '/^proc/d' /etc/fstab
+	append "proc  /proc  proc  defaults,nosuid,nodev,noexec,relatime,hidepid=1  0  0" /etc/fstab
 
 	apt_get_install sudo htop mc git gnupg2 lsb-release
 

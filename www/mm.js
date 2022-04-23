@@ -10,7 +10,7 @@ function ssh_key_updates() {
 }
 
 function machine_backup() {
-	this.post(['', 'api.json', 'mbkp_backup', this.val('machine')])
+	this.post(['', 'api.json', 'machine_backup', this.val('machine')])
 }
 
 function deploy_action(btn, action, ...args) {
@@ -156,9 +156,9 @@ on('mm_machine_backup_copies_grid.init', function(e) {
 				text: 'Incremental backup from this backup copy',
 				icon: 'fa fa-compact-disc',
 				action: function() {
-					let parent_mbkp_copy = e.focused_row_cell_val('mbkp_copy')
+					let parent_mbk_copy = e.focused_row_cell_val('mbk_copy')
 					let machine = e.focused_row_cell_val('machine')
-					this.post(['', 'api.json', 'mbkp_backup'], [machine, null, parent_mbkp_copy])
+					this.post(['', 'api.json', 'machine_backup'], [machine, null, parent_mbk_copy])
 				},
 			},
 		])

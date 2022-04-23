@@ -136,7 +136,7 @@ textarea.x-editbox-input[console] {
 						<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
 							<x-grid
 								id=mm_machine_backups_grid
-								rowset_name=mbkp
+								rowset_name=machine_backups
 								param_nav_id=mm_machines_grid params=machine
 							></x-grid>
 							<x-form>
@@ -150,8 +150,8 @@ textarea.x-editbox-input[console] {
 						<x-tabs>
 							<x-grid label="Backup Copies"
 								id=mm_machine_backup_copies_grid
-								rowset_name=mbkp_copy
-								param_nav_id=mm_machine_backups_grid params=mbkp
+								rowset_name=machine_backup_copies
+								param_nav_id=mm_machine_backups_grid params=mbk
 							></x-grid>
 						</x-tabs>
 					</x-vsplit>
@@ -269,35 +269,36 @@ textarea.x-editbox-input[console] {
 						</x-grid>
 						<x-vsplit label="Backups" fixed_side=second>
 							<x-grid
-								id=mm_backups
-								rowset_name=backups
+								id=mm_deploy_backups_grid
+								rowset_name=deploy_backups
 								param_nav_id=mm_deploys_grid params=deploy
 							></x-grid>
 							<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
 								<x-tabs>
-									<x-grid label="Backup Replicas"
-										id=mm_backup_replicas_grid
-										rowset_name=backup_replicas
-										param_nav_id=mm_backups params=bkp
+									<x-grid label="Backup Copies"
+										id=mm_deploy_backup_copies_grid
+										rowset_name=deploy_backup_copies
+										param_nav_id=mm_deploy_backups_grid params=dbk
 									></x-grid>
 								</x-tabs>
 								<x-form>
 									<x-button icon="fa fa-compact-disc"
 										action_name=deploy_backup
 										nav_id=mm_deploys_grid
-										text="Backup"
+										text="Backup {{deploy}}"
 									></x-button>
 								</x-form>
 							</x-vsplit>
 						</x-vsplit>
-						<x-form style="max-width: 400px; padding: 0 1em" label="Ops">
+						<x-form style="max-width: 400px; padding: 1em" label="Ops">
 							<h1>Danger Zone</h1>
 							<h2>Remove Deployment</h2>
 							<p>
-								Remove the deploy from the machine completely.
-								The deploy remains in the database so the app can be
+								Remove the deployment from the machine completely.
+								The deployment remains in the database so the app can be
 								redeployed again on the same machine or on a different one,
-								and the app data can be then restored from a backup.
+								and the app data can be restored from a backup.
+								You do have a backup, right?
 							</p>
 							<x-button icon="fa fa-trash" area=remdep danger
 								action_name=deploy_remove
@@ -313,7 +314,10 @@ textarea.x-editbox-input[console] {
 								None of this is transactional, so if anything breaks
 								in the middle, you're left to pick up the pieces.
 								Also, you need to stop the app first, and restart it
-								after the renaming is done.
+								after the renaming is done. Oh, and you can't mess with
+								the server while the rename is in progress, obviously.
+								The good news is, this should only take a few seconds
+								since all the tables and files are moved, not copied.
 							</p>
 							<x-textedit id=deploy_rename_new_name_edit nav_id=mm_deploys_grid col=deploy></x-textedit>
 							<x-button area=rendep danger action_name=deploy_rename
