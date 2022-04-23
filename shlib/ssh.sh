@@ -1,16 +1,23 @@
 #use die
 
-ssh_hostkey_update() { # host fingerprint
-	say "Updating SSH host fingerprint for host '$1' (/etc/ssh)..."
+ssh_hostkey_update() { # HOST FINGERPRINT
+	local host="$1"
+	local fp="$2"
+	checkvars host fp-
+	say -n "Updating SSH host fingerprint for host $host (/etc/ssh) ... "
 	local kh=/etc/ssh/ssh_known_hosts
-	run ssh-keygen -R "$1" -f $kh # remove host line if found
+	run ssh-keygen -R "$host" -f $kh # remove host line if found
 	local newline=$'\n'
-	must append "$2$newline" $kh
+	append "$fp$newline" $kh
 	must chmod 644 $kh
+	say OK
 }
 
 ssh_host_update() { # host keyname [unstable_ip]
-	say "Assigning SSH key '$2' to host '$1' $HOME $3..."
+	local host="$1"
+	local keyname="$2"
+	checkvars host keyname
+	say -n "Assigning SSH key '$keyname' to host '$host' $HOME $3 ... "
 	must mkdir -p $HOME/.ssh
 	local CONFIG=$HOME/.ssh/config
 	touch "$CONFIG"
@@ -24,15 +31,16 @@ ssh_host_update() { # host keyname [unstable_ip]
 		return 0
 	) > $CONFIG || die "SAVE-TO: $CONFIG [$?]"
 	must chown $USER:$USER -R $HOME/.ssh
+	say OK
 }
 
 ssh_key_update() { # keyname key
-	say "Updating SSH key '$1' ($HOME)..."
+	say -n "Updating SSH key '$1' ($HOME) ... "
 	must mkdir -p $HOME/.ssh
 	local idf=$HOME/.ssh/${1}.id_rsa
-	must save "$2" $idf
-	must chmod 600 $idf
+	save "$2" $idf $USER
 	must chown $USER:$USER -R $HOME/.ssh
+	say OK
 }
 
 ssh_host_key_update() { # host keyname key [unstable_ip]
@@ -41,7 +49,7 @@ ssh_host_key_update() { # host keyname key [unstable_ip]
 }
 
 ssh_update_pubkey() { # keyname key
-	say "Updating SSH public key '$1'..."
+	say -n "Updating SSH public key '$1' ... "
 	local ak=$HOME/.ssh/authorized_keys
 	must mkdir -p $HOME/.ssh
 	[ -f $ak ] && must sed -i "/ $1/d" $ak
@@ -49,15 +57,16 @@ ssh_update_pubkey() { # keyname key
 	must append "$2$newline" $ak
 	must chmod 600 $ak
 	must chown $USER:$USER -R $HOME/.ssh
+	say OK
 }
 
 ssh_pubkey() { # keyname
 	cat $HOME/.ssh/authorized_keys | grep " $1\$"
 }
 
-ssh_git_keys_update_for_user() { # user
+ssh_git_keys_update_for_user() { # USER
 	local USER="$1"
-	checkvars USER GIT_HOSTS
+	checkvars USER GIT_HOSTS-
 	for NAME in $GIT_HOSTS; do
 
 		local HOST=${NAME^^}_HOST
@@ -65,6 +74,7 @@ ssh_git_keys_update_for_user() { # user
 
 		HOST="${!HOST}"
 		KEY="${!SSH_KEY}"
+		checkvars HOST SSH_KEY-
 
 		HOME=/home/$USER USER=$USER ssh_host_key_update \
 			$HOST mm_$NAME "$SSH_KEY" unstable_ip
@@ -72,8 +82,7 @@ ssh_git_keys_update_for_user() { # user
 }
 
 ssh_git_keys_update() {
-	checkvars GIT_HOSTS
-
+	checkvars GIT_HOSTS-
 	for NAME in $GIT_HOSTS; do
 
 		local HOST=${NAME^^}_HOST
@@ -83,6 +92,7 @@ ssh_git_keys_update() {
 		HOST="${!HOST}"
 		SSH_HOSTKEY="${!SSH_HOSTKEY}"
 		SSH_KEY="${!SSH_KEY}"
+		checkvars HOST SSH_HOSTKEY- SSH_KEY-
 
 		ssh_hostkey_update  $HOST "$SSH_HOSTKEY"
 		ssh_host_key_update $HOST mm_$NAME "$SSH_KEY" unstable_ip
@@ -96,23 +106,21 @@ ssh_git_keys_update() {
 		done
 		exit 0 # for some reason, for sets an exit code...
 		) || exit
-
 	done
 }
 
-rsync_to() { # host dir|file
+rsync_to() { # HOST DIR|FILE
 	local HOST="$1"
 	local DIR="$2"
-	checkvars HOST DIR SSH_KEY SSH_HOSTKEY
-	say "Copying $DIR to $HOST..."
+	checkvars HOST DIR SSH_KEY- SSH_HOSTKEY-
+	say "Copying dir '$DIR' to host '$HOST' ... "
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT
-	must save "$SSH_KEY"     $p
-	must save "$SSH_HOSTKEY" $h
+	save "$SSH_KEY"     $p root
+	save "$SSH_HOSTKEY" $h root
 	SSH_KEY=
 	SSH_HOSTKEY=
-	must chmod 400 $p $h
 	must rsync --timeout=5 \
 		-e "ssh -o UserKnownHostsFile=$h -i $p" \
 		-aR "$DIR" "root@$HOST:/"

@@ -18,7 +18,7 @@ git_config_user() { # email name
 	must git config --global user.name "$2"
 }
 
-git_clone_for() { # user repo dir version label
+git_clone_for() { # USER REPO DIR VERSION LABEL
 	local USER="$1"
 	local REPO="$2"
 	local DIR="$3"

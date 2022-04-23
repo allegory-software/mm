@@ -1729,9 +1729,6 @@ function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
 		select 1 from deploy where deploy = ?
 	]], new_deploy), 'deploy already exists: %s', new_deploy)
 
-	local machine_db = db(machine) --secure a mysql connection first.
-	machine_db:use(old_deploy)
-
 	local vars = deploy_vars(old_deploy, new_deploy)
 	local task = mm.ssh_sh(machine, [=[
 		#use deploy
@@ -1744,10 +1741,6 @@ function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
 		out_stdouterr = to_text,
 	})
 	check500(task.exit_code == 0, 'deploy_rename exit code: %d', task.exit_code)
-
-	machine_db:rename_db(old_deploy, new_deploy)
-	machine_db:rename_user(old_deploy, new_deploy)
-	machine_db:grant_user(new_deploy, new_deploy)
 
 	update_row('deploy', {old_deploy, deploy = new_deploy})
 
@@ -2228,6 +2221,7 @@ rowset.mbkp = sql_rowset{
 	where_all = 'b.machine in (:param:filter)',
 	pk = 'mbkp',
 	parent_col = 'parent_mbkp',
+	tree_col = 'machine',
 	update_row = function(self, row)
 		self:update_into('mbkp', row, 'name')
 	end,
@@ -2242,6 +2236,7 @@ rowset.mbkp_copy = sql_rowset{
 		select
 			mbkp_copy,
 			mbkp,
+			parent_mbkp_copy,
 			machine,
 			start_time,
 			duration

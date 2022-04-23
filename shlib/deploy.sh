@@ -36,11 +36,12 @@ machine_prepare() {
 
 	mysql_install
 	mysql_config "\
+# our binlog is row-based, but we still get an error when creating procs.
 log_bin_trust_function_creators = 1
-default-time-zone = '+00:00'
 "
 	must service mysql start
-	mysql_update_root_pass "$MYSQL_ROOT_PASS"
+	mysql_update_pass localhost root $MYSQL_ROOT_PASS
+	mysql_gen_my_cnf  localhost root $MYSQL_ROOT_PASS
 
 	# allow binding to ports < 1024 by any user.
 	must save 'net.ipv4.ip_unprivileged_port_start=0' \
@@ -58,7 +59,7 @@ machine_rename() { # OLD_MACHINE NEW_MACHINE
 }
 
 deploy_setup() {
-	checkvars DEPLOY MYSQL_PASS GIT_HOSTS
+	checkvars DEPLOY MYSQL_PASS GIT_HOSTS-
 
 	[ -d /home/$DEPLOY ] && return
 
@@ -67,9 +68,10 @@ deploy_setup() {
 
 	ssh_git_keys_update_for_user $DEPLOY
 
-	mysql_create_db $DEPLOY
-	mysql_create_user localhost $DEPLOY "$MYSQL_PASS"
-	mysql_grant_user  localhost $DEPLOY $DEPLOY
+	mysql_create_db     $DEPLOY
+	mysql_create_user   localhost $DEPLOY $MYSQL_PASS
+	mysql_grant_user_db localhost $DEPLOY $DEPLOY
+	mysql_gen_my_cnf    localhost $DEPLOY $MYSQL_PASS $DEPLOY
 
 	say "First-time setup done."
 }
@@ -94,7 +96,7 @@ app() {
 }
 
 deploy() {
-	checkvars DEPLOY REPO APP ENV DEPLOY_VARS
+	checkvars DEPLOY REPO APP ENV DEPLOY_VARS-
 	say "Deploying APP=$APP ENV=$ENV VERSION=$VERSION SDK_VERSION=$SDK_VERSION..."
 
 	[ -d /home/$DEPLOY/$APP ] && app running && must app stop
@@ -111,7 +113,7 @@ deploy() {
 		git@github.com:allegory-software/allegory-sdk-bin-debian10 \
 		/home/$DEPLOY/$APP/sdk/bin/linux "$SDK_VERSION"
 
-	deploy_configure
+	deploy_gen_conf
 
 	say "Installing the app..."
 	must app install forealz
@@ -121,14 +123,9 @@ deploy() {
 	say "Deploy done."
 }
 
-deploy_configure() {
-	VARS="DEBUG VERBOSE $DEPLOY_VARS" \
-	FUNCS="say die debug run must deploy_gen_conf" \
-		run_as $DEPLOY app_setup_script
-}
-
 deploy_gen_conf() {
-	echo -n "\
+	local conf=/home/$DEPLOY/$APP/${APP}.conf
+	must save "\
 --deploy vars
 ${DEPLOY:+deploy = '$DEPLOY'}
 ${ENV:+env = '$ENV'}
@@ -153,20 +150,23 @@ ${SESSION_COOKIE_SECURE_FLAG:+session_cookie_secure_flag = $SESSION_COOKIE_SECUR
 log_host = '127.0.0.1'
 log_port = 5555
 https_addr = false
-"
+" $conf $DEPLOY
 }
 
-app_setup_script() {
-	must deploy_gen_conf > /home/$DEPLOY/$APP/${APP}.conf
-}
-
-# NOTE: database rename is a far more complicated operation and so is done in Lua.
-deploy_rename() { # OLD_DEPLOY NEW_DEPLOY
-	local OLD_DEPLOY=$1
-	local NEW_DEPLOY=$2
+deploy_rename() { # OLD_DEPLOY NEW_DEPLOY [nosql]
+	local OLD_DEPLOY="$1"
+	local NEW_DEPLOY="$2"
+	local OPT="$3"
 	checkvars OLD_DEPLOY NEW_DEPLOY
-	user_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
-	deploy_configure
+	checkvars DEPLOY APP
+
+	local MYSQL_PASS="$(mysql_pass $OLD_DEPLOY)"
+	user_rename      $OLD_DEPLOY $NEW_DEPLOY
+	mysql_rename_db  $OLD_DEPLOY $NEW_DEPLOY
+	[ "$MYSQL_PASS" ] && \
+		mysql_gen_my_cnf localhost $NEW_DEPLOY $MYSQL_PASS $NEW_DEPLOY
+
+	deploy_gen_conf
 }
 
 deploy_status() {

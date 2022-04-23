@@ -132,6 +132,29 @@ textarea.x-editbox-input[console] {
 						param_nav_id=mm_machines_grid params=machine
 					>
 					</x-grid>
+					<x-vsplit label="Machine Backups" fixed_side=second>
+						<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
+							<x-grid
+								id=mm_machine_backups_grid
+								rowset_name=mbkp
+								param_nav_id=mm_machines_grid params=machine
+							></x-grid>
+							<x-form>
+								<x-button icon="fa fa-compact-disc"
+									action_name=machine_backup
+									nav_id=mm_machines_grid
+									text="Backup {{machine}}"
+								></x-button>
+							</x-form>
+						</x-vsplit>
+						<x-tabs>
+							<x-grid label="Backup Copies"
+								id=mm_machine_backup_copies_grid
+								rowset_name=mbkp_copy
+								param_nav_id=mm_machine_backups_grid params=mbkp
+							></x-grid>
+						</x-tabs>
+					</x-vsplit>
 				</x-tabs>
 			</x-tabs>
 			</x-split>
@@ -269,6 +292,7 @@ textarea.x-editbox-input[console] {
 						</x-vsplit>
 						<x-form style="max-width: 400px; padding: 0 1em" label="Ops">
 							<h1>Danger Zone</h1>
+							<h2>Remove Deployment</h2>
 							<p>
 								Remove the deploy from the machine completely.
 								The deploy remains in the database so the app can be
@@ -277,8 +301,24 @@ textarea.x-editbox-input[console] {
 							</p>
 							<x-button icon="fa fa-trash" area=remdep danger
 								action_name=deploy_remove
-								text="Remove App"
-								confirm="Are you sure you want to remove the app?"
+								text="Remove Deployment"
+								confirm="Are you sure you want to remove the deployment?"
+							></x-button>
+							<h2>Rename Deployment</h2>
+							<p>
+								Why is this in the danger zone?
+								Mainly because it's a complex operation, involving renaming
+								the Linux user account the deployment is on and also the
+								MySQL database which is itself a complex operation.
+								None of this is transactional, so if anything breaks
+								in the middle, you're left to pick up the pieces.
+								Also, you need to stop the app first, and restart it
+								after the renaming is done.
+							</p>
+							<x-textedit id=deploy_rename_new_name_edit nav_id=mm_deploys_grid col=deploy></x-textedit>
+							<x-button area=rendep danger action_name=deploy_rename
+								text="Rename Deployment"
+								confirm="Are you sure you want to rename the deployment?"
 							></x-button>
 						</x-form>
 					</x-tabs>

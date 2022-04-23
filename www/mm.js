@@ -9,6 +9,10 @@ function ssh_key_updates() {
 	this.post('/api.json/ssh-key-update')
 }
 
+function machine_backup() {
+	this.post(['', 'api.json', 'mbkp_backup', this.val('machine')])
+}
+
 function deploy_action(btn, action, ...args) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
 	btn.post(['', 'api.json', action, deploy, ...args])
@@ -124,6 +128,38 @@ on('mm_machines_grid.init', function(e) {
 					if (machine)
 						post('/api.json/machine-reboot', [machine])
 				}
+			},
+		])
+
+	})
+
+})
+
+on('mm_machine_backups_grid.init', function(e) {
+	e.indent_size = 4
+})
+
+on('mm_machine_backup_copies_grid.init', function(e) {
+
+	e.on('init_context_menu_items', function(items) {
+
+		let grid_items = [].set(items)
+		items.clear()
+
+		items.extend([
+			{
+				text: 'Grid options',
+				icon: 'fa fa-table',
+				items: grid_items,
+			},
+			{
+				text: 'Incremental backup from this backup copy',
+				icon: 'fa fa-compact-disc',
+				action: function() {
+					let parent_mbkp_copy = e.focused_row_cell_val('mbkp_copy')
+					let machine = e.focused_row_cell_val('machine')
+					this.post(['', 'api.json', 'mbkp_backup'], [machine, null, parent_mbkp_copy])
+				},
 			},
 		])
 
