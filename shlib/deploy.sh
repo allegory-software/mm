@@ -82,13 +82,14 @@ deploy_setup() {
 	say "First-time setup done."
 }
 
-deploy_remove() {
+deploy_remove() { # DEPLOY
+	local DEPLOY="$1"
 	checkvars DEPLOY
 
-	deploy_app_stop
+	user_remove $DEPLOY
+
 	mysql_drop_db $DEPLOY
 	mysql_drop_user localhost $DEPLOY
-	user_remove $DEPLOY
 
 	say "Deploy removed."
 }
@@ -183,11 +184,4 @@ deploy_status() {
 	[ -d /home/$DEPLOY/$APP/sdk/bin/linux ] || say "no sdk/bin/linux dir"
 	[ -f /home/$DEPLOY/$APP/${APP}.conf   ] || say "no ${APP}.conf"
 	app status
-}
-
-deploy_backup_file_list() { # deploy app
-	local DEPLOY="$1"
-	local APP="$2"
-	checkvars DEPLOY APP
-	echo /home/$DEPLOY/$APP/var
 }

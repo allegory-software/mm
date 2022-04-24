@@ -113,6 +113,8 @@ local function mm_schema()
 		env              , strid, not_null,
 		secret           , secret_key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
+		restored_from_dbk, id, weak_fk(dbk),
+		restored_from_mbk, id, weak_fk(mbk),
 		ctime            , ctime,
 		mtime            , mtime,
 		pos              , pos,
@@ -1694,10 +1696,9 @@ function hybrid_api.deploy_remove(deploy)
 	local vars = deploy_vars(deploy)
 	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
-		deploy_remove
+		deploy_remove "$DEPLOY"
 	]], {
 		DEPLOY = vars.DEPLOY,
-		APP = vars.APP,
 	}, {
 		name = 'deploy_remove '..deploy,
 	})
@@ -1721,26 +1722,29 @@ function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
 	local err = validate_deploy(new_deploy)
 	checkarg(not err, err)
 
-	local machine = checkfound(first_row([[
-		select machine from deploy where deploy = ?
+	local t = checkfound(first_row([[
+		select deploy, machine from deploy where deploy = ?
 	]], old_deploy), 'unknown deploy: %s', old_deploy)
+	local machine = t.machine
 
 	checkarg(not first_row([[
 		select 1 from deploy where deploy = ?
 	]], new_deploy), 'deploy already exists: %s', new_deploy)
 
-	local vars = deploy_vars(old_deploy, new_deploy)
-	local task = mm.ssh_sh(machine, [=[
-		#use deploy
-		deploy_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
-	]=], update({
-		OLD_DEPLOY = old_deploy,
-		NEW_DEPLOY = new_deploy,
-	}, vars), {
-		name = 'deploy_rename '..old_deploy,
-		out_stdouterr = to_text,
-	})
-	check500(task.exit_code == 0, 'deploy_rename exit code: %d', task.exit_code)
+	if machine then
+		local vars = deploy_vars(old_deploy, new_deploy)
+		local task = mm.ssh_sh(machine, [=[
+			#use deploy
+			deploy_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
+		]=], update({
+			OLD_DEPLOY = old_deploy,
+			NEW_DEPLOY = new_deploy,
+		}, vars), {
+			name = 'deploy_rename '..old_deploy,
+			out_stdouterr = to_text,
+		})
+		check500(task.exit_code == 0, 'deploy_rename exit code: %d', task.exit_code)
+	end
 
 	update_row('deploy', {old_deploy, deploy = new_deploy})
 
@@ -2443,9 +2447,10 @@ function hybrid_api.machine_backup_copy(to_text, src_mbk_copy, machine)
 
 	local task = mm.ssh_sh(c.machine, [[
 		#use ssh backup
-		rsync_to "$HOST" "$(bkp_dir machine $mbk)"
+		rsync_to "$HOST" "$(bkp_dir machine $mbk)" "$(bkp_dir machine $parent_mbk)"
 	]], update({
 		mbk = c.mbk,
+		parent_mbk = c.parent_mbk,
 	}, rsync_vars(machine)), {
 		name = 'machine_backup_copy '..src_mbk_copy..' '..machine,
 		out_stdouterr = to_text,
@@ -2669,8 +2674,8 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 	local s = task:stdout()
 	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
 
-	update_row('bkp', {
-		bkp,
+	update_row('dbk', {
+		dbk,
 		duration = task.duration,
 		size = tonumber(size),
 		checksum = checksum,
@@ -2783,24 +2788,77 @@ cmd_dbk('dbk-remove COPY1[-COPY2] ...', 'Remove deploy backup copies', function(
 	end
 end)
 
-function hybrid_api.deploy_restore(to_text, dbk_copy, deploy)
+function hybrid_api.deploy_restore(to_text, dbk_copy, new_machine, new_deploy)
 
 	local c = dbk_copy_info(dbk_copy)
 
+	if new_deploy and new_deploy ~= c.deploy then
+		checkarg(not first_row('select 1 from deploy where deploy = ?', new_deploy),
+			'deploy already exists: %s', new_deploy)
+	end
+
+	if new_machine and new_machine ~= c.machine then
+		-- ??
+	end
+
+	local vars = deploy_vars(c.deploy, new_deploy)
+
 	local task = mm.ssh_sh(c.machine, [[
 		#use backup
-		deploy_restore "$dbk" "$DEPLOY"
-	]], {
-		dbk = c.dbk,
-		DEPLOY = c.deploy,
-	}, {
+		deploy_restore "$DBK" "$DEPLOY"
+	]], update({
+		DBK = c.dbk,
+	}, vars), {
 		name = 'deploy_restore '..c.machine,
 	})
 	check500(task.exit_code == 0, 'deploy_restore exit code: %d', task.exit_code)
 
-	query[[
-		#
-	]]
+	if new_deploy and new_deploy ~= c.deploy then
+		query([[
+			insert into deploy (
+				deploy,
+				machine,
+				repo,
+				app,
+				wanted_app_version,
+				wanted_sdk_version,
+				deployed_app_version,
+				deployed_sdk_version,
+				deployed_app_commit,
+				deployed_sdk_commit,
+				deployed_at,
+				started_at,
+				env,
+				secret,
+				mysql_pass,
+				restored_from_dbk,
+				restored_from_mbk
+			) select
+				deploy,
+				:machine,
+				repo,
+				app,
+				wanted_app_version,
+				wanted_sdk_version,
+				deployed_app_version,
+				deployed_sdk_version,
+				deployed_app_commit,
+				deployed_sdk_commit,
+				now(), --deployed_at
+				null, --stasrted_at
+				env,
+				secret,
+				mysql_pass,
+				:dbkp,
+				null --restored_from_mbk
+			from deploy
+			where deploy = ?
+		]], {
+			deploy = c.deploy,
+			machine = c.machine,
+			dbkp = c.dbkp,
+		})
+	end
 
 end
 cmd_dbk('dbk-restore COPY [DEPLOY_NAME]', 'Restore a deployment', mm.out_deploy_restore)
@@ -2837,7 +2895,7 @@ cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function
 	local cmd = indir(mm.bindir, 'putty')..' -load mm -t -i '..mm.ppkfile(m)
 		..' root@'..ip..' -m '..cmdfile
 	local script = [[
-	#use deploy
+	#use deploy backup
 	]]
 	local script_env = update({
 		DEBUG   = env'DEBUG' or '',

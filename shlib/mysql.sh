@@ -110,6 +110,7 @@ mysql_backup_db() { # DB BACKUP_DIR
 	checkvars db dir
 	must mkdir -p "$dir"
 	say -n "mysqldump'ing $db to $dir ... "
+
 	must mysqldump -u root \
 		--no-create-db \
 		--extended-insert \
@@ -119,6 +120,7 @@ mysql_backup_db() { # DB BACKUP_DIR
 		--single-transaction \
 		--quick \
 		"$db" | qpress -i dump.sql "$dir/dump.qp"
+
 	say "OK. $(stat --printf="%s" "$dir/dump.qp" | numfmt --to=iec) written."
 }
 
@@ -126,9 +128,9 @@ mysql_restore_db() { # DB BACKUP_DIR
 	local db="$1"
 	local dir="$2"
 	checkvars db dir
-	qpress -d "$dir/dump.qp" ./dir
-	qpress -do database.qp > database.xml
-	cat database.qp | qpress -di .
+	mysql_drop_db $db
+	mysql_create_db $db
+	(set -o pipefail && must qpress -do "$dir/dump.qp" | must mysql $db) || die
 }
 
 # mysql queries --------------------------------------------------------------
@@ -152,12 +154,6 @@ query_on() { # DB SQL
 
 query() { # SQL
 	_must_mysql -e "$1"
-}
-
-query_to() { # VARNAME SQL
-	local -n out="$1"
-	local s="$(_must_mysql -e "$2")" || die "$s"
-	out="$s"
 }
 
 mysql_exec_on() { # DB SQL
@@ -320,12 +316,12 @@ mysql_move_tables() { # DB NEW_DB
 	local new_db="$2"
 	checkvars db new_db
 	say -n "Moving all tables from $db to $new_db ... "
-	local sql; query_to sql "
+	local sql="$(query "
 		select concat('RENAME TABLE \`', table_name, '\` TO \`$new_db\`.\`', table_name, '\`;') s
 		from information_schema.tables
 		where table_schema = '$db' and table_type = 'BASE TABLE'
 		order by table_name
-	"; mysql_exec_on $db "$sql"
+	")" || die; mysql_exec_on $db "$sql"
 	say OK
 }
 
@@ -333,12 +329,12 @@ mysql_drop_views() { # DB
 	local db="$1"
 	checkvars db
 	say -n "Dropping all views from $db ... "
-	local sql; query_to sql "
+	local sql="$(query "
 		select concat('DROP VIEW \`', table_name, '\`;') s
 		from information_schema.views
 		where table_schema = '$db'
 		order by table_name
-	"; mysql_exec_on $db "$sql"
+	")" || die; mysql_exec_on $db "$sql"
 	say OK
 }
 
@@ -346,11 +342,11 @@ mysql_drop_triggers() { # DB
 	local db="$1"
 	checkvars db
 	say -n "Dropping all triggers from $db ... "
-	local sql; query_to sql "
+	local sql="$(query "
 		select concat ('DROP TRIGGER \`', trigger_name, '\`;')
 		from information_schema.triggers
 		where trigger_schema = '$db';
-	"; mysql_exec_on $db "$sql"
+	")" || die; mysql_exec_on $db "$sql"
 	say OK
 }
 
@@ -358,11 +354,11 @@ mysql_drop_procs_funcs() { # DB
 	local db="$1"
 	checkvars db
 	say -n "Dropping all procs & funcs from $db ... "
-	local sql; query_to sql "
+	local sql="$(query "
 		select concat('DROP ', routine_type, ' \`', routine_name, '\`;') s
 		from information_schema.routines
 		where routine_schema = '$db'
-	"; mysql_exec_on $db "$sql"
+	")" || die; mysql_exec_on $db "$sql"
 	say OK
 }
 

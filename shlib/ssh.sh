@@ -109,11 +109,13 @@ ssh_git_keys_update() {
 	done
 }
 
-rsync_to() { # HOST DIR|FILE
+rsync_to() { # HOST DIR|FILE [LINK_DEST_DIR]
 	local HOST="$1"
 	local DIR="$2"
-	checkvars HOST DIR SSH_KEY- SSH_HOSTKEY-
-	say "Copying dir $DIR to host $HOST ... "
+	local link_dest="${3:+--link-dest=$3}"
+	checkvars HOST DIR
+	checkvars SSH_KEY- SSH_HOSTKEY-
+	say "Copying dir $DIR to host $HOST $link_dest ... "
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT
@@ -121,9 +123,11 @@ rsync_to() { # HOST DIR|FILE
 	save "$SSH_HOSTKEY" $h root
 	SSH_KEY=
 	SSH_HOSTKEY=
-	must rsync --timeout=5 \
+
+	must rsync --timeout=5 $link_dest \
 		-e "ssh -o UserKnownHostsFile=$h -i $p" \
 		-aR "$DIR" "root@$HOST:/"
+
 	rm -f $p $h
 	say "Files copied."
 }
