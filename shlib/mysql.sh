@@ -78,7 +78,7 @@ mysql_restore_all() { # BKP_DIR
 	local RESTORE_DIR=/root/mm-machine-restore/mysql
 
 	# prepare base backup and all incrementals in order without doing rollbacks.
-	cp_dir "$BKP_DIR" "$RESTORE_DIR"
+	sync_dir "$BKP_DIR" "$RESTORE_DIR"
 	local PARENT_BKP_DIR=""
 	for BKP_DIR in $BKP_DIRS; do
 		xbkp --prepare --target-dir=$RESTORE_DIR --apply-log-only \
@@ -117,20 +117,37 @@ mysql_backup_db() { # DB BACKUP_DIR
 		--order-by-primary \
 		--triggers \
 		--routines \
-		--single-transaction \
+		--skip_add_locks \
+		--skip-lock-tables \
 		--quick \
 		"$db" | qpress -i dump.sql "$dir/dump.qp"
 
-	say "OK. $(stat --printf="%s" "$dir/dump.qp" | numfmt --to=iec) written."
+	say "OK. $(stat --printf="%s" "$dir/dump.qp" | numfmt --to=iec) bytes written."
+}
+
+# rename user in DEFINER clauses in a mysqldump, in order to be able to
+# restore the dump into a different db name.
+# NOTE: All clauses containing **any user** are renamed!
+mysqldump_fix_user() { # USER
+	local user="$1"
+	checkvars user
+	sed "s/\`[^\`]*\`@\`localhost\`/\`$user\`@\`localhost\`/g"
 }
 
 mysql_restore_db() { # DB BACKUP_DIR
 	local db="$1"
 	local dir="$2"
 	checkvars db dir
-	mysql_drop_db $db
+
+	mysql_drop_db   $db
 	mysql_create_db $db
-	(set -o pipefail && must qpress -do "$dir/dump.qp" | must mysql $db) || die
+	(
+		set -o pipefail
+		must qpress -do "$dir/dump.qp" | mysqldump_fix_user $db | must mysql $db
+	) || exit $?
+
+	mysql_create_user   localhost $db localhost $db
+	mysql_grant_user_db localhost $db $db
 }
 
 # mysql queries --------------------------------------------------------------
@@ -202,22 +219,22 @@ _mysql_create_or_alter_user() { # create|alter HOST USER PASS
 	local host="$2"
 	local user="$3"
 	local pass="$4"
-	checkvars create host user pass
+	checkvars create- host user pass
 	mysql_exec "
-		$create user '$user'@'$host' identified with mysql_native_password by '$pass';
+		$create '$user'@'$host' identified with mysql_native_password by '$pass';
 		flush privileges;
 	"
 }
 
 mysql_create_user() { # HOST USER PASS
 	say -n "Creating MySQL user $2@$1 ... "
-	_mysql_create_or_alter_user create "$@"
+	_mysql_create_or_alter_user "create user if not exists" "$@"
 	say OK
 }
 
 mysql_update_pass() { # HOST USER PASS
 	say -n "Updating password for MySQL user $2@$1 ... "
-	_mysql_create_or_alter_user alter "$@"
+	_mysql_create_or_alter_user "alter user" "$@"
 	say OK
 }
 
@@ -235,7 +252,7 @@ mysql_create_db() { # DB
 	checkvars db
 	say -n "Creating MySQL database $db ... "
 	mysql_exec "
-		create database \`$db\`
+		create database if not exists \`$db\`
 			character set utf8mb4
 			collate utf8mb4_unicode_ci;
 	"
@@ -321,7 +338,7 @@ mysql_move_tables() { # DB NEW_DB
 		from information_schema.tables
 		where table_schema = '$db' and table_type = 'BASE TABLE'
 		order by table_name
-	")" || die; mysql_exec_on $db "$sql"
+	")" || exit $?; mysql_exec_on $db "$sql"
 	say OK
 }
 
@@ -334,7 +351,7 @@ mysql_drop_views() { # DB
 		from information_schema.views
 		where table_schema = '$db'
 		order by table_name
-	")" || die; mysql_exec_on $db "$sql"
+	")" || exit $?; mysql_exec_on $db "$sql"
 	say OK
 }
 
@@ -346,7 +363,7 @@ mysql_drop_triggers() { # DB
 		select concat ('DROP TRIGGER \`', trigger_name, '\`;')
 		from information_schema.triggers
 		where trigger_schema = '$db';
-	")" || die; mysql_exec_on $db "$sql"
+	")" || exit $?; mysql_exec_on $db "$sql"
 	say OK
 }
 
@@ -358,7 +375,7 @@ mysql_drop_procs_funcs() { # DB
 		select concat('DROP ', routine_type, ' \`', routine_name, '\`;') s
 		from information_schema.routines
 		where routine_schema = '$db'
-	")" || die; mysql_exec_on $db "$sql"
+	")" || exit $?; mysql_exec_on $db "$sql"
 	say OK
 }
 
@@ -378,10 +395,10 @@ mysql_rename_db() { # OLD_DB NEW_DB
 
 	mysql_create_db $db1
 
-	local vtpf_sql="
-		$(mysql_dump_views $db0)
-		$(mysql_dump_triggers_procs_funcs $db0)
-	" || die "$sql"
+	local vtpf_sql="$(
+		mysql_dump_views $db0
+		mysql_dump_triggers_procs_funcs $db0
+	)" || exit $?
 
 	mysql_drop_views       $db0
 	mysql_drop_triggers    $db0
@@ -393,7 +410,7 @@ mysql_rename_db() { # OLD_DB NEW_DB
 	mysql_grant_user_db localhost $db1 $db1
 
 	# rename user in DEFINER clauses.
-	vtpf_sql="$(echo "$vtpf_sql" | sed "s/\`$db0\`@\`localhost\`/\`$db1\`@\`localhost\`/g")"
+	vtpf_sql="$(echo "$vtpf_sql" | mysqldump_fix_user $db1)"
 
 	say -n "Adding all views, triggers, procs & funcs from $db0 to $db1 ... "
 	mysql_exec_on $db1 "$vtpf_sql"

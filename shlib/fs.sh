@@ -14,22 +14,10 @@ rm_dir() { # DIR
 	say OK
 }
 
-cp_dir() { # SRC_DIR DST_DIR
-	local src_dir="$1"
-	local dst_dir="$2"
-	checkvars src_dir dst_dir
-	check_abs_filepath "$src_dir"
-	check_abs_filepath "$dst_dir"
-	[ -d "$dst_dir" ] && rm_dir "$dst_dir"
-	say -n "Copying dir $src_dir to $dst_dir ... "
-	[ "$DRY" ] || must cp -rf "$src_dir" "$dst_dir"
-	say OK
-}
-
 sha_dir() { # DIR
 	local dir="$1"
 	checkvars dir
-	find "$dir" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha1sum | sha1sum | cut -d' ' -f1
+	find $dir -type f -print0 | LC_ALL=C sort -z | xargs -0 sha1sum | sha1sum | cut -d' ' -f1
 }
 
 append() { # S FILE
@@ -84,3 +72,20 @@ replace_lines() { # REGEX FILE
 	fi
 }
 '
+
+sync_dir() { # SRC_DIR DST_DIR [LINK_DIR]
+	local src_dir="$1"
+	local dst_dir="$2"
+	local link_dir="$3"
+	[ "$link_dir" ] && {
+		link_dir="$(realpath "$link_dir")" # --link-dest path must be absolute.
+		checkvars link_dir
+	}
+	checkvars src_dir dst_dir
+	say -n "Copying $src_dir to $dst_dir${link_dir:+ link_dir=$link_dir} ... "
+
+	# NOTE: the dot syntax cuts out the path before it as a way to make the path relative.
+	[ "$DRY" ] || must rsync --delete -aR ${link_dir:+--link-dest=$link_dir} $src_dir/./. $dst_dir
+
+	say "OK. $(dir_lean_size $dst_dir | numfmt --to=iec) bytes written."
+}

@@ -67,9 +67,7 @@ machine_rename() { # OLD_MACHINE NEW_MACHINE
 deploy_setup() {
 	checkvars DEPLOY MYSQL_PASS GIT_HOSTS-
 
-	[ -d /home/$DEPLOY ] && return
-
-	user_create $DEPLOY
+	user_create    $DEPLOY
 	user_lock_pass $DEPLOY
 
 	ssh_git_keys_update_for_user $DEPLOY
@@ -96,6 +94,8 @@ deploy_remove() { # DEPLOY
 
 app() {
 	checkvars DEPLOY APP
+	local dir=/home/$DEPLOY/$APP
+	[ -d $dir ] || die "App dir missing. Not deployed?"
 	(
 	must cd /home/$DEPLOY/$APP
 	VARS="DEBUG VERBOSE" run_as $DEPLOY ./$APP "$@"
@@ -103,7 +103,7 @@ app() {
 }
 
 deploy() {
-	checkvars DEPLOY REPO APP ENV DEPLOY_VARS-
+	checkvars DEPLOY REPO APP DEPLOY_VARS-
 	say "Deploying APP=$APP ENV=$ENV VERSION=$VERSION SDK_VERSION=$SDK_VERSION..."
 
 	[ -d /home/$DEPLOY/$APP ] && app running && must app stop
@@ -131,16 +131,17 @@ deploy() {
 }
 
 deploy_gen_conf() {
+	checkvars DEPLOY APP MYSQL_PASS SECRET
 	local conf=/home/$DEPLOY/$APP/${APP}.conf
 	must save "\
 --deploy vars
-${DEPLOY:+deploy = '$DEPLOY'}
+deploy = '$DEPLOY'
 ${ENV:+env = '$ENV'}
 ${VERSION:+version = '$VERSION'}
-${MYSQL_DB:+db_name = '$MYSQL_DB'}
-${MYSQL_USER:+db_user = '$MYSQL_USER'}
-${MYSQL_PASS:+db_pass = '$MYSQL_PASS'}
-${SECRET:+secret = '$SECRET'}
+db_name = '$DEPLOY'
+db_user = '$DEPLOY'
+db_pass = '$MYSQL_PASS'
+secret = '$SECRET'
 
 --custom vars
 ${HTTP_PORT:+http_port = '$HTTP_PORT'}

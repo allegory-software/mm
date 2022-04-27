@@ -99,7 +99,7 @@ local function mm_schema()
 
 	tables.deploy = {
 		deploy           , strpk,
-		machine          , strid, not_null, fk,
+		machine          , strid, fk,
 		repo             , url, not_null,
 		app              , strid, not_null,
 		wanted_app_version   , strid,
@@ -144,7 +144,6 @@ local function mm_schema()
 		parent_mbk  , id, fk(mbk),
 		start_time  , timeago,
 		duration    , duration,
-		size        , filesize,
 		checksum    , hash,
 		name        , name,
 	}
@@ -165,6 +164,7 @@ local function mm_schema()
 		machine     , strid, not_null, fk, uk(mbk, machine),
 		start_time  , timeago,
 		duration    , duration,
+		size        , filesize,
 	}
 
 	--deploy backups: done with mysqldump so they are slow and non-incremental,
@@ -179,7 +179,6 @@ local function mm_schema()
 		sdk_commit  , strid,
 		start_time  , timeago,
 		duration    , duration,
-		size        , filesize,
 		checksum    , hash,
 		name        , name,
 	}
@@ -190,6 +189,7 @@ local function mm_schema()
 		machine     , strid, not_null, fk, uk(dbk, machine),
 		start_time  , timeago,
 		duration    , duration,
+		size        , filesize,
 	}
 
 	tables.action = {
@@ -1365,8 +1365,7 @@ function text_api.update_machine_info(machine)
 		keyed = false, nolog = true,
 		capture_stdout = true,
 	})
-	check500(task.exit_code == 0, 'machine_info exit code: %d',
-		task.exit_code)
+	check500(task.exit_code == 0, 'machine_info exit code: %d', task.exit_code)
 	local stdout = task:stdout()
 	local t = {machine = machine}
 	for s in stdout:trim():lines() do
@@ -1623,6 +1622,7 @@ local function deploy_vars(deploy, new_deploy)
 			d.app,
 			d.wanted_app_version app_version,
 			d.wanted_sdk_version sdk_version,
+			if(d.deployed_app_commit is not null, 1, 0) deployed,
 			coalesce(d.env, 'dev') env,
 			d.mysql_pass,
 			d.secret
@@ -1636,8 +1636,6 @@ local function deploy_vars(deploy, new_deploy)
 
 	new_deploy = new_deploy or deploy
 	vars.DEPLOY = new_deploy
-	vars.MYSQL_DB = new_deploy
-	vars.MYSQL_USER = new_deploy
 
 	for _, name, val in each_row_vals([[
 		select
@@ -1673,6 +1671,8 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 		capture_stdout = true,
 		out_stdouterr = to_text,
 	})
+	check500(task.exit_code == 0, 'deploy exit code: %d', task.exit_code)
+
 	local s = task:stdout()
 	local app_commit = s:match'app_commit=([^%s]+)'
 	local sdk_commit = s:match'sdk_commit=([^%s]+)'
@@ -1687,21 +1687,24 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 		started_at = now,
 	})
 	rowset_changed'deploys'
+
 	return {notify = 'Deployed: '..deploy}
 end
 cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
 	mm.out_deploy)
 
-function hybrid_api.deploy_remove(deploy)
+function hybrid_api.deploy_remove(to_text, deploy)
 	local vars = deploy_vars(deploy)
-	mm.ssh_sh(vars.MACHINE, [[
+	local task = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		deploy_remove "$DEPLOY"
 	]], {
 		DEPLOY = vars.DEPLOY,
 	}, {
 		name = 'deploy_remove '..deploy,
+		out_stdouterr = to_text,
 	})
+	check500(task.exit_code == 0, 'deploy_remove exit code: %d', task.exit_code)
 
 	update_row('deploy', {
 		vars.DEPLOY,
@@ -1710,6 +1713,8 @@ function hybrid_api.deploy_remove(deploy)
 		deployed_app_commit = null,
 		deployed_sdk_commit = null,
 	})
+	rowset_changed'deploys'
+
 	return {notify = 'Deploy removed: '..deploy}
 end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
@@ -1775,6 +1780,7 @@ function hybrid_api.app(to_text, deploy, ...)
 		}, {
 			name = task_name,
 			out_stdouterr = to_text,
+			capture_stderr = true,
 		})
 	local ok = task.exit_code == 0
 	if ok then
@@ -1785,7 +1791,7 @@ function hybrid_api.app(to_text, deploy, ...)
 		end
 	end
 	return {
-		notify = task_name..(ok and ' ok' or ' exit code: '..task.exit_code),
+		notify = task:stderr():gsub('^ABORT: ', ''),
 		notify_kind = not ok and 'error' or nil,
 	}
 end
@@ -2217,7 +2223,6 @@ rowset.machine_backups = sql_rowset{
 			b.parent_mbk,
 			b.start_time ,
 			b.duration   ,
-			b.size       ,
 			b.checksum   ,
 			b.name
 		from mbk b
@@ -2274,7 +2279,7 @@ function text_api.machine_backups(machine)
 				) separator ' '
 			) as contents,
 			b.mbk        mbk,
-			b.size,
+			c.size,
 			b.duration    bkp_took,
 			c.duration    copy_took
 		from mbk b
@@ -2299,13 +2304,21 @@ function text_api.machine_backups(machine)
 end
 cmd_mbk('mbk|machine-backups MACHINE', 'Show machine backups', mm.out_machine_backups)
 
+local function parse_backup_info(s)
+	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
+	size, checksum = tonumber(size), str_arg(checksum)
+	assert(size)
+	assert(checksum)
+	return size, checksum
+end
+
 function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 
 	machine = checkarg(machine, 'machine required')
 
 	if parent_mbk_copy == 'latest' then
+		--find the local copy of the latest backup of the machine that has one.
 		parent_mbk_copy = checkarg(first_row([[
-			--find the local copy of the latest backup of :machine that has one.
 			select c.mbk_copy from mbk_copy c, mbk b
 			where c.mbk = b.mbk and b.machine = :machine and c.machine = :machine
 			order by c.mbk desc limit 1
@@ -2375,13 +2388,11 @@ function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 	})
 	check500(task.exit_code == 0, 'machine_backup exit code: '..task.exit_code)
 
-	local s = task:stdout()
-	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
+	local size, checksum = parse_backup_info(task:stdout())
 
 	update_row('mbk', {
 		mbk,
 		duration = task.duration,
-		size = tonumber(size),
 		checksum = checksum,
 	})
 	rowset_changed'machine_backups'
@@ -2389,6 +2400,7 @@ function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 	update_row('mbk_copy', {
 		mbk_copy,
 		duration = 0,
+		size = size,
 	})
 	rowset_changed'machine_backup_copies'
 
@@ -2414,8 +2426,12 @@ local function mbk_copy_info(mbk_copy)
 	return checkfound(first_row([[
 		select
 			c.mbk_copy,
-			b.mbk, b.parent_mbk,
-			c.machine, c.duration
+			b.mbk,
+			b.parent_mbk,
+			c.machine,
+			c.duration,
+			c.size,
+			b.checksum
 		from mbk_copy c
 		inner join mbk b on c.mbk = b.mbk
 		where c.mbk_copy = ?
@@ -2429,13 +2445,14 @@ function hybrid_api.machine_backup_copy(to_text, src_mbk_copy, machine)
 	local c = mbk_copy_info(src_mbk_copy)
 
 	checkarg(c.duration, 'Backup copy %d is not complete (didn\'t finish)', c.mbk_copy)
-	checkarg(machine ~= c.machine, 'Choose a different machine to copy the backup to.')
+	checkarg(machine ~= c.machine, 'Destination machine same as the source machine.')
 
+	--find the parent_mbk's copy on the destination machine.
 	local parent_mbk_copy = c.parent_mbk and checkarg(first_row([[
 		select mbk_copy from mbk_copy
 		where mbk = ? and machine = ? and duration is not null
 	]], c.parent_mbk, machine),
-		'a copy of the backup\'s parent backup was not found on machine "%s"', machine)
+		'A copy of the backup\'s parent backup was not found on machine "%s"', machine)
 
 	local mbk_copy = insert_or_update_row('mbk_copy', {
 		mbk = c.mbk,
@@ -2447,7 +2464,7 @@ function hybrid_api.machine_backup_copy(to_text, src_mbk_copy, machine)
 
 	local task = mm.ssh_sh(c.machine, [[
 		#use ssh backup
-		rsync_to "$HOST" "$(bkp_dir machine $mbk)" "$(bkp_dir machine $parent_mbk)"
+		machine_backup_copy "$HOST" "$mbk" "$parent_mbk"
 	]], update({
 		mbk = c.mbk,
 		parent_mbk = c.parent_mbk,
@@ -2455,7 +2472,13 @@ function hybrid_api.machine_backup_copy(to_text, src_mbk_copy, machine)
 		name = 'machine_backup_copy '..src_mbk_copy..' '..machine,
 		out_stdouterr = to_text,
 	})
-	check500(task.exit_code == 0, 'rsync_to exit code: %d', task.exit_code)
+	check500(task.exit_code == 0, 'machine_backup_copy exit code: %d', task.exit_code)
+
+	local machine_backup_copy_check = to_text
+		and mm.out_machine_backup_copy_check
+		or mm.machine_backup_copy_check
+
+	machine_backup_copy_check(mbk_copy)
 
 	update_row('mbk_copy', {
 		mbk_copy,
@@ -2466,6 +2489,31 @@ function hybrid_api.machine_backup_copy(to_text, src_mbk_copy, machine)
 	return {notify = _('Backup copied: %d, copy id: %d', c.mbk, mbk_copy)}
 end
 cmd_mbk('mbk-copy COPY MACHINE', 'Copy a machine backup', mm.out_machine_backup_copy)
+
+function hybrid_api.machine_backup_copy_check(to_text, mbk_copy)
+	local c = mbk_copy_info(mbk_copy)
+	local task = mm.ssh_sh(c.machine, [[
+		#use backup
+		machine_backup_info "$mbk"
+	]], {
+		mbk = c.mbk,
+	}, {
+		name = 'machine_backup_info '..c.mbk_copy, keyed = false,
+		capture_stdout = true,
+	})
+	check500(task.exit_code == 0, 'machine_backup_info exit code: %d', task.exit_code)
+	local size, checksum = parse_backup_info(task:stdout())
+	check500(checksum == c.checksum, 'Checksums differ:\n  expected: %s\n  computed: %s',
+		c.checksum, checksum)
+
+	update_row('mbk_copy', {c.mbk_copy, size = size})
+	rowset_changed'machine_backup_copies'
+
+	local msg = _('Backup copy %d OK. Size: %s', c.mbk_copy, kbytes(size))
+	if to_text then out(msg) end
+	return {notify = msg}
+end
+cmd_mbk('mbk-check COPY', 'Check a machine backup\'s integrity', mm.out_machine_backup_copy_check)
 
 function json_api.machine_backup_copy_remove(mbk_copy)
 
@@ -2547,7 +2595,6 @@ rowset.deploy_backups = sql_rowset{
 			deploy     ,
 			start_time ,
 			name       ,
-			size       ,
 			duration   ,
 			checksum
 		from dbk
@@ -2597,7 +2644,7 @@ function text_api.deploy_backups(deploy)
 			b.app_commit  ,
 			b.sdk_commit  ,
 			b.dbk,
-			b.size,
+			c.size,
 			b.duration bkp_took,
 			c.duration copy_took
 		from dbk b
@@ -2632,10 +2679,19 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 		where deploy = ?
 	]], checkarg(deploy, 'deploy required')), 'deploy not found')
 
-	check500(d.deployed_at, '%s is not deployed.', deploy)
+	checkarg(d.deployed_at, '%s is not deployed.', deploy)
 
 	local task_name = 'deploy_backup '..deploy
 	check500(not mm.running_task(task_name), 'already running: %s', task_name)
+
+	--latest dbk of this deploy that has a good copy on this deploy's current machine.
+	local parent_dbk = first_row([[
+		select b.dbk from dbk b, dbk_copy c
+		where c.dbk = b.dbk and b.deploy = ? and c.machine = ?
+			and c.duration is not null
+		order by b.dbk desc
+		limit 1
+	]], deploy, d.machine)
 
 	local start_time = time()
 
@@ -2660,10 +2716,11 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 
 	local task = mm.ssh_sh(d.machine, [[
 		#use backup
-		deploy_backup "$deploy" "$dbk"
+		deploy_backup "$deploy" "$dbk" "$parent_dbk"
 	]], {
 		deploy = deploy,
 		dbk = dbk,
+		parent_dbk = parent_dbk,
 	}, {
 		name = task_name,
 		capture_stdout = true,
@@ -2671,13 +2728,11 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 	})
 	check500(task.exit_code == 0, 'deploy_backup exit code: %d', task.exit_code)
 
-	local s = task:stdout()
-	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
+	local size, checksum = parse_backup_info(task:stdout())
 
 	update_row('dbk', {
 		dbk,
 		duration = task.duration,
-		size = tonumber(size),
 		checksum = checksum,
 	})
 	rowset_changed'deploy_backups'
@@ -2685,6 +2740,7 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 	update_row('dbk_copy', {
 		dbk_copy,
 		duration = 0,
+		size = size,
 	})
 	rowset_changed'deploy_backup_copies'
 
@@ -2700,7 +2756,18 @@ cmd_dbk('dbk-backup DEPLOY [NAME] [MACHINE1,...]',
 
 local function dbk_copy_info(dbk_copy)
 	return checkfound(first_row([[
-		select c.dbk_copy, c.dbk, c.machine, b.deploy, c.duration
+		select
+			c.dbk_copy,
+			c.dbk,
+			c.machine,
+			b.deploy,
+			c.duration,
+			b.app_version,
+			b.sdk_version,
+			b.app_commit,
+			b.sdk_commit,
+			c.size,
+			b.checksum
 		from dbk_copy c
 		inner join dbk b on c.dbk = b.dbk
 		where c.dbk_copy = ?
@@ -2716,6 +2783,19 @@ function hybrid_api.deploy_backup_copy(to_text, src_dbk_copy, machine)
 	checkarg(c.duration, 'Backup copy %d is not complete (didn\'t finish)', c.dbk_copy)
 	checkarg(machine ~= c.machine, 'Choose a different machine to copy the backup to.')
 
+	--latest dbk of this deploy that has a good copy on the destination machine.
+	local parent_dbk = first_row([[
+		select b.dbk from dbk b, dbk_copy c
+		where
+			c.dbk = b.dbk
+			and c.duration is not null
+			and b.deploy = ?
+			and c.machine = ?
+			and b.dbk <> ?
+		order by b.dbk desc
+		limit 1
+	]], c.deploy, machine, c.dbk)
+
 	local dbk_copy = insert_or_update_row('dbk_copy', {
 		dbk = c.dbk,
 		machine = machine,
@@ -2724,14 +2804,21 @@ function hybrid_api.deploy_backup_copy(to_text, src_dbk_copy, machine)
 
 	local task = mm.ssh_sh(c.machine, [[
 		#use ssh backup
-		rsync_to "$HOST" "$(bkp_dir deploy $dbk)"
+		deploy_backup_copy "$HOST" "$dbk" "$parent_dbk"
 	]], update({
 		dbk = c.dbk,
+		parent_dbk = parent_dbk,
 	}, rsync_vars(machine)), {
 		name = 'deploy_backup_copy '..src_dbk_copy..' '..machine,
 		out_stdouterr = to_text,
 	})
 	check500(task.exit_code == 0, 'deploy_backup_copy exit code: %d', task.exit_code)
+
+	local deploy_backup_copy_check = to_text
+		and mm.out_deploy_backup_copy_check
+		or mm.deploy_backup_copy_check
+
+	deploy_backup_copy_check(dbk_copy)
 
 	update_row('dbk_copy', {
 		dbk_copy,
@@ -2742,6 +2829,31 @@ function hybrid_api.deploy_backup_copy(to_text, src_dbk_copy, machine)
 	return {notify = _('Backup copied: %d, copy id: %d', c.dbk, dbk_copy)}
 end
 cmd_dbk('dbk-copy COPY MACHINE', 'Copy a deploy backup', mm.out_deploy_backup_copy)
+
+function hybrid_api.deploy_backup_copy_check(to_text, dbk_copy)
+	local c = dbk_copy_info(dbk_copy)
+	local task = mm.ssh_sh(c.machine, [[
+		#use backup
+		deploy_backup_info "$dbk"
+	]], {
+		dbk = c.dbk,
+	}, {
+		name = 'deploy_backup_info '..c.dbk_copy, keyed = false,
+		capture_stdout = true,
+	})
+	check500(task.exit_code == 0, 'deploy_backup_info exit code: %d', task.exit_code)
+	local size, checksum = parse_backup_info(task:stdout())
+	check500(checksum == c.checksum, 'Checksums differ:\n  expected: %s\n  computed: %s',
+		c.checksum, checksum)
+
+	update_row('dbk_copy', {c.dbk_copy, size = size})
+	rowset_changed'deploy_backup_copies'
+
+	local msg = _('Backup copy %d OK. Size: %s', c.dbk_copy, kbytes(size))
+	if to_text then out(msg) end
+	return {notify = msg}
+end
+cmd_dbk('dbk-check COPY	', 'Check a deploy backup\'s integrity', mm.out_deploy_backup_copy_check)
 
 function json_api.deploy_backup_copy_remove(dbk_copy)
 
@@ -2788,77 +2900,48 @@ cmd_dbk('dbk-remove COPY1[-COPY2] ...', 'Remove deploy backup copies', function(
 	end
 end)
 
-function hybrid_api.deploy_restore(to_text, dbk_copy, new_machine, new_deploy)
+function hybrid_api.deploy_restore(to_text, dbk_copy, dest_deploy)
 
 	local c = dbk_copy_info(dbk_copy)
-
-	if new_deploy and new_deploy ~= c.deploy then
-		checkarg(not first_row('select 1 from deploy where deploy = ?', new_deploy),
-			'deploy already exists: %s', new_deploy)
-	end
-
-	if new_machine and new_machine ~= c.machine then
-		-- ??
-	end
-
-	local vars = deploy_vars(c.deploy, new_deploy)
+	local vars = deploy_vars(c.deploy, dest_deploy)
+	local d = first_row([[
+		select
+			repo,
+			app,
+			env,
+			mysql_pass,
+			secret
+		from deploy
+		where deploy = ?
+	]], c.deploy)
 
 	local task = mm.ssh_sh(c.machine, [[
-		#use backup
-		deploy_restore "$DBK" "$DEPLOY"
+		#use backup user deploy
+		deploy_restore "$dbk"
 	]], update({
-		DBK = c.dbk,
+		dbk = c.dbk,
 	}, vars), {
 		name = 'deploy_restore '..c.machine,
+		out_stdouterr = to_text,
 	})
 	check500(task.exit_code == 0, 'deploy_restore exit code: %d', task.exit_code)
 
-	if new_deploy and new_deploy ~= c.deploy then
-		query([[
-			insert into deploy (
-				deploy,
-				machine,
-				repo,
-				app,
-				wanted_app_version,
-				wanted_sdk_version,
-				deployed_app_version,
-				deployed_sdk_version,
-				deployed_app_commit,
-				deployed_sdk_commit,
-				deployed_at,
-				started_at,
-				env,
-				secret,
-				mysql_pass,
-				restored_from_dbk,
-				restored_from_mbk
-			) select
-				deploy,
-				:machine,
-				repo,
-				app,
-				wanted_app_version,
-				wanted_sdk_version,
-				deployed_app_version,
-				deployed_sdk_version,
-				deployed_app_commit,
-				deployed_sdk_commit,
-				now(), --deployed_at
-				null, --stasrted_at
-				env,
-				secret,
-				mysql_pass,
-				:dbkp,
-				null --restored_from_mbk
-			from deploy
-			where deploy = ?
-		]], {
-			deploy = c.deploy,
-			machine = c.machine,
-			dbkp = c.dbkp,
-		})
-	end
+	insert_or_update_row('deploy', {
+		deploy = dest_deploy,
+		machine = c.machine,
+		repo = d.repo,
+		app = d.app,
+		env = d.env,
+		mysql_pass = d.mysql_pass,
+		secret = d.secret,
+		deployed_app_version = c.app_version,
+		deployed_sdk_version = c.sdk_version,
+		deployed_app_commit = c.app_commit,
+		deployed_sdk_commit = c.sdk_commit,
+		deployed_at = time(),
+		restored_from_dbk = c.dbk,
+		restored_from_mbk = null,
+	})
 
 end
 cmd_dbk('dbk-restore COPY [DEPLOY_NAME]', 'Restore a deployment', mm.out_deploy_restore)
@@ -3301,6 +3384,11 @@ rowset.deploys = sql_rowset{
 		end
 	end,
 	delete_row = function(self, row)
+		local deployed = first_row([[
+				select if(deployed_app_commit, 1, 0)
+				from deploy where deploy = ?
+			]], row['deploy:old']) == 1
+		raise('db', '%s', 'Remove the deploy from the machine first.')
 		self:delete_from('deploy', row)
 	end,
 }

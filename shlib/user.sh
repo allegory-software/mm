@@ -1,10 +1,16 @@
 #use die fs
 
+user_exists() { # USER
+	local user="$1"
+	checkvars user
+	id -u $user &>/dev/null
+}
+
 user_create() { # USER
 	local user="$1"
 	checkvars user
 	say -n "Creating user $user ... "
-	id -u 1>&2 2>/dev/null $user || must useradd -m $user
+	user_exists $user || must useradd -m $user
 	must chsh -s /bin/bash $user
 	must chmod 750 /home/$user
 	say OK
@@ -14,14 +20,8 @@ user_lock_pass() { # USER
 	local user="$1"
 	checkvars user
 	say -n "Locking password for user $user ... "
-	must passwd -l $user >&2
+	must passwd -l $user >/dev/null
 	say OK
-}
-
-user_exists() { # USER
-	local user="$1"
-	checkvars user
-	id -u $user &>/dev/null
 }
 
 user_check_can_remove() {
@@ -31,14 +31,13 @@ user_check_can_remove() {
 user_remove() { # USER
 	local user="$1"
 	checkvars user
-	say -n "Removing user $user ... "
 	user_check_can_remove $user
-	user_exists $user || die "User not found: $user"
 
-	must userdel $user
-	rm_dir /home/$user
-
+	say -n "Removing user $user ... "
+	user_exists $user && must userdel $user
 	say OK
+
+	rm_dir /home/$user
 }
 
 user_rename() { # OLD_USER NEW_USER

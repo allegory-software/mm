@@ -290,41 +290,50 @@ textarea.x-editbox-input[console] {
 								</x-form>
 							</x-vsplit>
 						</x-vsplit>
-						<x-form style="max-width: 400px; padding: 1em" label="Ops">
-							<h1>Danger Zone</h1>
-							<h2>Remove Deployment</h2>
-							<p>
-								Remove the deployment from the machine completely.
-								The deployment remains in the database so the app can be
-								redeployed again on the same machine or on a different one,
-								and the app data can be restored from a backup.
-								You do have a backup, right?
-							</p>
-							<x-button icon="fa fa-trash" area=remdep danger
-								action_name=deploy_remove
-								text="Remove Deployment"
-								confirm="Are you sure you want to remove the deployment?"
-							></x-button>
-							<h2>Rename Deployment</h2>
-							<p>
-								Why is this in the danger zone?
-								Mainly because it's a complex operation, involving renaming
-								the Linux user account the deployment is on and also the
-								MySQL database which is itself a complex operation.
-								None of this is transactional, so if anything breaks
-								in the middle, you're left to pick up the pieces.
-								Also, you need to stop the app first, and restart it
-								after the renaming is done. Oh, and you can't mess with
-								the server while the rename is in progress, obviously.
-								The good news is, this should only take a few seconds
-								since all the tables and files are moved, not copied.
-							</p>
-							<x-textedit id=deploy_rename_new_name_edit nav_id=mm_deploys_grid col=deploy></x-textedit>
-							<x-button area=rendep danger action_name=deploy_rename
-								text="Rename Deployment"
-								confirm="Are you sure you want to rename the deployment?"
-							></x-button>
-						</x-form>
+						<x-split label="Ops" style="max-width: 600px">
+							<x-listbox id=mm_ops_listbox>
+								<div action=remove_deploy>Remove deployment</div>
+								<div action=rename_deploy>Rename deployment</div>
+							</x-listbox>
+							<x-switcher nav_id=mm_ops_listbox>
+								<div action=remove_deploy class="x-container x-form" style="padding: 0 0 1em 1em">
+									<h2>Remove Deployment</h2>
+									<p>
+										Remove the deployment from the machine completely.
+										The deployment remains in the database so the app can be
+										redeployed again on the same machine or on a different one,
+										and the app data can be restored from a backup.
+										You do have a backup, right?
+									</p>
+									<x-button icon="fa fa-trash" area=remdep danger
+										action_name=deploy_remove
+										text="Remove Deployment"
+										confirm="Are you sure you want to remove the deployment?"
+									></x-button>
+								</div>
+								<div action=rename_deploy class="x-container x-form" style="padding: 0 0 1em 1em">
+									<h2>Rename Deployment</h2>
+									<p>
+										Renaming a deployment is a complex operation,
+										involving renaming
+										the Linux user account the deployment is on and also the
+										MySQL database which is itself a complex operation.
+										None of this is transactional, so if anything breaks
+										in the middle, you're left to pick up the pieces.
+										Also, you need to stop the app first, and restart it
+										after the renaming is done. Oh, and you can't mess with
+										the server while the rename is in progress, obviously.
+										The good news is, this should only take a few seconds
+										since all the tables and files are moved, not copied.
+									</p>
+									<x-textedit id=deploy_rename_new_name_edit nav_id=mm_deploys_grid col=deploy></x-textedit>
+									<x-button area=rendep danger action_name=deploy_rename
+										text="Rename Deployment"
+										confirm="Are you sure you want to rename the deployment?"
+									></x-button>
+								</div>
+							</x-switcher>
+						</x-split>
 					</x-tabs>
 				</x-split>
 			</x-split>

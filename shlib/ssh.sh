@@ -68,12 +68,8 @@ ssh_git_keys_update_for_user() { # USER
 	local USER="$1"
 	checkvars USER GIT_HOSTS-
 	for NAME in $GIT_HOSTS; do
-
-		local HOST=${NAME^^}_HOST
-		local SSH_KEY=${NAME^^}_SSH_KEY
-
-		HOST="${!HOST}"
-		KEY="${!SSH_KEY}"
+		local -n HOST=${NAME^^}_HOST
+		local -n SSH_KEY=${NAME^^}_SSH_KEY
 		checkvars HOST SSH_KEY-
 
 		HOME=/home/$USER USER=$USER ssh_host_key_update \
@@ -84,14 +80,9 @@ ssh_git_keys_update_for_user() { # USER
 ssh_git_keys_update() {
 	checkvars GIT_HOSTS-
 	for NAME in $GIT_HOSTS; do
-
-		local HOST=${NAME^^}_HOST
-		local SSH_HOSTKEY=${NAME^^}_SSH_HOSTKEY
-		local SSH_KEY=${NAME^^}_SSH_KEY
-
-		HOST="${!HOST}"
-		SSH_HOSTKEY="${!SSH_HOSTKEY}"
-		SSH_KEY="${!SSH_KEY}"
+		local -n HOST=${NAME^^}_HOST
+		local -n SSH_HOSTKEY=${NAME^^}_SSH_HOSTKEY
+		local -n SSH_KEY=${NAME^^}_SSH_KEY
 		checkvars HOST SSH_HOSTKEY- SSH_KEY-
 
 		ssh_hostkey_update  $HOST "$SSH_HOSTKEY"
@@ -109,13 +100,18 @@ ssh_git_keys_update() {
 	done
 }
 
-rsync_to() { # HOST DIR|FILE [LINK_DEST_DIR]
-	local HOST="$1"
-	local DIR="$2"
-	local link_dest="${3:+--link-dest=$3}"
-	checkvars HOST DIR
+rsync_to() { # HOST DIR|FILE [LINK_DIR]
+	local host="$1"
+	local dir="$2"
+	local link_dir="$3"
+	checkvars host dir
+	[ "$link_dir" ] && {
+		link_dir="$(realpath "$link_dir")" # --link-dest path must be absolute.
+		checkvars link_dir
+	}
 	checkvars SSH_KEY- SSH_HOSTKEY-
-	say "Copying dir $DIR to host $HOST $link_dest ... "
+
+	say "Copying dir $dir to host $host${link_dir:+ link_dir=$link_dir} ... "
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT
@@ -124,9 +120,10 @@ rsync_to() { # HOST DIR|FILE [LINK_DEST_DIR]
 	SSH_KEY=
 	SSH_HOSTKEY=
 
-	must rsync --timeout=5 $link_dest \
+	# NOTE: the dot syntax cuts out the path before it as a way to make the path relative.
+	[ "$DRY" ] || must rsync --delete --timeout=5 ${link_dir:+--link-dest=$link_dir} \
 		-e "ssh -o UserKnownHostsFile=$h -i $p" \
-		-aR "$DIR" "root@$HOST:/"
+		-aR "$dir/./." "root@$host:/$dir"
 
 	rm -f $p $h
 	say "Files copied."
