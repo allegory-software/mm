@@ -33,6 +33,14 @@ textarea.x-editbox-input[console] {
 	;
 }
 
+#mm_machine_backups_scheduling_form.maxcols1 {
+	grid-template-areas:
+		"full_backup_active       full_backup_start_hours  full_backup_run_every"
+		"incr_backup_active       incr_backup_start_hours  incr_backup_run_every"
+		"backup_remove_older_than backup_remove_older_than backup_remove_older_than"
+	;
+}
+
 #mm_deploys_form.maxcols1 {
 	grid-template-areas:
 		"deploy      status               status                 machine"
@@ -51,6 +59,13 @@ textarea.x-editbox-input[console] {
 	grid-template-areas:
 		"restart     restart              start                  stop   "
 		"dep         dep                  dep                    dep"
+	;
+}
+
+#mm_deploy_backups_scheduling_form.maxcols1 {
+	grid-template-areas:
+		"backup_active       backup_start_hours  backup_run_every"
+		"backup_remove_older_than backup_remove_older_than backup_remove_older_than"
 	;
 }
 
@@ -132,29 +147,48 @@ textarea.x-editbox-input[console] {
 						param_nav_id=mm_machines_grid params=machine
 					>
 					</x-grid>
-					<x-vsplit label="Machine Backups" fixed_side=second>
-						<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
-							<x-grid
-								id=mm_machine_backups_grid
-								rowset_name=machine_backups
-								param_nav_id=mm_machines_grid params=machine
-							></x-grid>
-							<x-form>
-								<x-button icon="fa fa-compact-disc"
-									action_name=machine_backup
-									nav_id=mm_machines_grid
-									text="Backup {{machine}}"
-								></x-button>
-							</x-form>
+					<x-tabs label="Machine Backups">
+						<x-vsplit fixed_side=second label="Backups">
+							<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
+								<x-grid
+									id=mm_machine_backups_grid
+									rowset_name=machine_backups
+									param_nav_id=mm_machines_grid params=machine
+								></x-grid>
+								<x-form>
+									<x-button icon="fa fa-compact-disc"
+										action_name=machine_backup
+										nav_id=mm_machines_grid
+										text="Backup {{machine}}"
+									></x-button>
+								</x-form>
+							</x-vsplit>
+							<x-tabs>
+								<x-grid label="Backup Contents"
+									rowset_name=machine_backup_deploys
+									param_nav_id=mm_machine_backups_grid params=mbk
+								></x-grid>
+								<x-grid label="Backup Copies"
+									id=mm_machine_backup_copies_grid
+									rowset_name=machine_backup_copies
+									param_nav_id=mm_machine_backups_grid params=mbk
+								></x-grid>
+							</x-tabs>
 						</x-vsplit>
-						<x-tabs>
-							<x-grid label="Backup Copies"
-								id=mm_machine_backup_copies_grid
-								rowset_name=machine_backup_copies
-								param_nav_id=mm_machine_backups_grid params=mbk
-							></x-grid>
-						</x-tabs>
-					</x-vsplit>
+						<x-form label="Scheduling" id=mm_machine_backups_scheduling_form nav_id=mm_machines_grid grid>
+							<x-input col=full_backup_active       ></x-input>
+							<x-input col=full_backup_start_hours  ></x-input>
+							<x-input col=full_backup_run_every    ></x-input>
+							<x-input col=incr_backup_active       ></x-input>
+							<x-input col=incr_backup_start_hours  ></x-input>
+							<x-input col=incr_backup_run_every    ></x-input>
+							<x-input col=backup_remove_older_than ></x-input>
+						</x-form>
+						<x-grid label="Keeping Copies"
+							rowset_name=machine_backup_copy_machines
+							param_nav_id=mm_machines_grid params=machine
+						></x-grid>
+					</x-tabs>
 				</x-tabs>
 			</x-tabs>
 			</x-split>
@@ -267,13 +301,22 @@ textarea.x-editbox-input[console] {
 							param_nav_id=mm_deploys_grid params=deploy
 						>
 						</x-grid>
-						<x-vsplit label="Backups" fixed_side=second>
-							<x-grid
-								id=mm_deploy_backups_grid
-								rowset_name=deploy_backups
-								param_nav_id=mm_deploys_grid params=deploy
-							></x-grid>
-							<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
+						<x-tabs label="Deploy Backups">
+							<x-vsplit label="Backups" fixed_side=second>
+								<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
+									<x-grid
+										id=mm_deploy_backups_grid
+										rowset_name=deploy_backups
+										param_nav_id=mm_deploys_grid params=deploy
+									></x-grid>
+									<x-form>
+										<x-button icon="fa fa-compact-disc"
+											action_name=deploy_backup
+											nav_id=mm_deploys_grid
+											text="Backup {{deploy}}"
+										></x-button>
+									</x-form>
+								</x-vsplit>
 								<x-tabs>
 									<x-grid label="Backup Copies"
 										id=mm_deploy_backup_copies_grid
@@ -281,15 +324,19 @@ textarea.x-editbox-input[console] {
 										param_nav_id=mm_deploy_backups_grid params=dbk
 									></x-grid>
 								</x-tabs>
-								<x-form>
-									<x-button icon="fa fa-compact-disc"
-										action_name=deploy_backup
-										nav_id=mm_deploys_grid
-										text="Backup {{deploy}}"
-									></x-button>
-								</x-form>
 							</x-vsplit>
-						</x-vsplit>
+							<x-form id=mm_deploy_backups_scheduling_form nav_id=mm_deploys_grid label="Scheduling" grid>
+								<x-input col=backup_active       ></x-input>
+								<x-input col=backup_start_hours  ></x-input>
+								<x-input col=backup_run_every    ></x-input>
+								<x-input col=backup_remove_older_than ></x-input>
+							</x-form>
+							<x-grid
+								label="Keeping Copies"
+								rowset_name=deploy_backup_copy_machines
+								param_nav_id=mm_deploys_grid params=deploy
+							></x-grid>
+						</x-tabs>
 						<x-split label="Ops" style="max-width: 600px">
 							<x-listbox id=mm_ops_listbox>
 								<div action=remove_deploy>Remove deployment</div>
@@ -365,25 +412,7 @@ textarea.x-editbox-input[console] {
 					<x-textarea mono console class=x-stretched label="STDIN" id=mm_task_stdin_textarea nav_id=mm_running_tasks_grid col=stdin></x-textarea>
 				</x-tabs>
 			</x-split>
-			<x-split label="Scheduled Tasks" fixed_side=second fixed_size=600>
-				<x-grid id=mm_scheduled_tasks_grid rowset_name=scheduled_tasks></x-grid>
-				<x-switcher nav_id=mm_scheduled_tasks_grid>
-					<x-vsplit action=backup fixed_size=150>
-						<x-tabs>
-							<x-grid vertical label="Backup Task Deploy"
-								rowset_name=scheduled_tasks_backup
-								param_nav_id=mm_scheduled_tasks_grid params=task
-							></x-grid>
-						</x-tabs>
-						<x-tabs>
-							<x-grid label="Backup Task Copy-to Machines"
-								rowset_name=scheduled_tasks_backup_machines
-								param_nav_id=mm_scheduled_tasks_grid params=task
-							></x-grid>
-						</x-tabs>
-					</x-vsplit>
-				</x-switcher>
-			</x-split>
+			<x-grid label="Scheduled Tasks" rowset_name=scheduled_tasks></x-grid>
 			<x-split label="Task Run Log" fixed_side=second fixed_size=600>
 				<x-grid id=mm_task_runs_grid rowset_name=task_runs></x-grid>
 				<x-tabs>

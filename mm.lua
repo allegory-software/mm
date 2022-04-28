@@ -49,6 +49,8 @@ LIMITATIONS
 
 local function mm_schema()
 
+	types.git_version = {strid, null_text = 'master'}
+
 	tables.config = {
 		config      , idpk,
 		ssh_key     , private_key,
@@ -93,8 +95,23 @@ local function mm_schema()
 		cores       , uint16,
 		ram         , filesize,
 		hdd         , filesize,
+
+		--backup task scheduling
+		full_backup_active      , bool,
+		full_backup_start_hours , timeofday,
+		full_backup_run_every   , duration,
+		incr_backup_active      , bool,
+		incr_backup_start_hours , timeofday,
+		incr_backup_run_every   , duration,
+		backup_remove_older_than, duration,
+
 		pos         , pos,
 		ctime       , ctime,
+	}
+
+	tables.machine_backup_copy_machine = {
+		machine      , strid, not_null, child_fk,
+		dest_machine , strid, not_null, child_fk(machine), pk,
 	}
 
 	tables.deploy = {
@@ -102,10 +119,10 @@ local function mm_schema()
 		machine          , strid, fk,
 		repo             , url, not_null,
 		app              , strid, not_null,
-		wanted_app_version   , strid,
-		wanted_sdk_version   , strid,
-		deployed_app_version , strid,
-		deployed_sdk_version , strid,
+		wanted_app_version   , git_version,
+		wanted_sdk_version   , git_version,
+		deployed_app_version , git_version,
+		deployed_sdk_version , git_version,
 		deployed_app_commit  , strid,
 		deployed_sdk_commit  , strid,
 		deployed_at          , timeago,
@@ -113,11 +130,24 @@ local function mm_schema()
 		env              , strid, not_null,
 		secret           , secret_key, not_null, --multi-purpose
 		mysql_pass       , hash, not_null,
+
 		restored_from_dbk, id, weak_fk(dbk),
 		restored_from_mbk, id, weak_fk(mbk),
+
+		--backup task scheduling
+		backup_active      , bool,
+		backup_start_hours , timeofday,
+		backup_run_every   , duration,
+		backup_remove_older_than, duration,
+
 		ctime            , ctime,
 		mtime            , mtime,
 		pos              , pos,
+	}
+
+	tables.deploy_backup_copy_machine = {
+		deploy       , strid, not_null, child_fk,
+		dest_machine , strid, not_null, child_fk(machine), pk,
 	}
 
 	tables.deploy_vars = {
@@ -151,8 +181,8 @@ local function mm_schema()
 	tables.mbk_deploy = {
 		mbk         , id   , not_null, child_fk,
 		deploy      , strid, not_null, fk, pk,
-		app_version , strid,
-		sdk_version , strid,
+		app_version , git_version,
+		sdk_version , git_version,
 		app_commit  , strid,
 		sdk_commit  , strid,
 	}
@@ -173,8 +203,8 @@ local function mm_schema()
 	tables.dbk = {
 		dbk        , idpk,
 		deploy      , strid, not_null, fk,
-		app_version , strid,
-		sdk_version , strid,
+		app_version , git_version,
+		sdk_version , git_version,
 		app_commit  , strid,
 		sdk_commit  , strid,
 		start_time  , timeago,
@@ -192,49 +222,9 @@ local function mm_schema()
 		size        , filesize,
 	}
 
-	tables.action = {
-		action, strpk,
-	}
-
-	tables.action.rows = {
-		{'backup'},
-	}
-
-	tables.task = {
-		task          , idpk,
-		name          , longstrid, uk,
-		--running
-		action        , strid, not_null, fk,
-		--schedule
-		start_hours   , timeofday, --null means start right away.
-		run_every     , duration, --null means de-arm after start.
-		armed         , bool1,
-		--editing
-		generated_by  , name,
-		editable      , bool1,
-		--log
-		last_run      , timeago,
-		last_duration , duration,
-		last_status   , strid,
-		ctime         , ctime,
-		mtime         , mtime,
-	}
-
-	tables.task_bkp = {
-		task    , id, pk, fk,
-		deploy  , strid, not_null, fk,
-		name    , name,
-	}
-
-	tables.task_bkp_machine = {
-		task    , id, fk,
-		machine , strid, fk, pk,
-	}
-
 	tables.task_run = {
 		task_run   , idpk,
 		start_time , timeago, not_null,
-		task       , id,
 		name       , longstrid,
 		duration   , duration,
 		stdin      , text,
@@ -310,7 +300,10 @@ local function api_action(api)
 		checkarg(post == nil or istab(post))
 		allow(admin())
 		--args are passed as `getarg1, getarg2, ..., postarg1, postarg2, ...`
-		--in any combination, including only get args or only post args.
+		--in any combination, including only GET args or only POST args.
+		--GET args come from strings so they're either strings or null for the
+		--empty strign (i.e. `GET //`). POST args come as a JSON array so they
+		--can be any JSON type (null, string, number, hash map, array).
 		local args = extend(pack_json(...), post)
 		return f(unpack_json(args))
 	end
@@ -382,7 +375,7 @@ local function out_text_api(action, ...)
 	_api('txt', true, action, ...)
 end
 
---Lua/web/cmdline api generator ----------------------------------------------
+--Lua+web+cmdline api generator ----------------------------------------------
 
 local function from_server(from_db)
 	return not from_db and mm.conf.mm_host and not mm.server_running
@@ -447,8 +440,8 @@ local cmd_ssh_mounts  = cmdsection('SSH-FS MOUNTS'     , wrap)
 local cmd_mysql       = cmdsection('MYSQL'             , wrap)
 local cmd_machines    = cmdsection('MACHINES'          , wrap)
 local cmd_deployments = cmdsection('DEPLOYMENTS'       , wrap)
-local cmd_mbk        = cmdsection('MACHINE-LEVEL BACKUP & RESTORE', wrap)
-local cmd_dbk        = cmdsection('DEPLOYMENT-LEVEL BACKUP & RESTORE', wrap)
+local cmd_mbk         = cmdsection('MACHINE-LEVEL BACKUP & RESTORE', wrap)
+local cmd_dbk         = cmdsection('DEPLOYMENT-LEVEL BACKUP & RESTORE', wrap)
 local cmd_tasks       = cmdsection('TASKS'             , wrap)
 
 --task system ----------------------------------------------------------------
@@ -511,7 +504,6 @@ function task:setstatus(s)
 		if not self.task_run then
 			self.task_run = insert_row('task_run', {
 				start_time = self.start_time,
-				task = self.task,
 				name = self.name,
 				duration = self.duration,
 				stdin = self.stdin,
@@ -577,18 +569,18 @@ local function cmp_start_time(t1, t2)
 	return t1.start_time < t2.start_time
 end
 
-rowset.running_tasks = virtual_rowset(function(self, ...)
+rowset.running_tasks = virtual_rowset(function(self)
 
 	self.allow = 'admin'
 	self.fields = {
-		{name = 'id'        , type = 'number'},
+		{name = 'id'        , 'id'},
 		{name = 'pinned'    , 'bool'},
 		{name = 'type'      , },
 		{name = 'name'      , },
-		{name = 'machine'   , hidden = true, hint = 'Machine(s) that this task affects'},
+		{name = 'machine'   , hint = 'Machine(s) that this task affects'},
 		{name = 'status'    , },
-		{name = 'start_time', type = 'timestamp'},
-		{name = 'duration'  , type = 'number', decimals = 2,  w = 20,
+		{name = 'start_time', 'time_timeago'},
+		{name = 'duration'  , 'duration', w = 20,
 			hint = 'Duration till last change in input, output or status'},
 		{name = 'stdin'     , hidden = true, maxlen = 16*1024^2},
 		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
@@ -673,7 +665,6 @@ rowset.task_runs = sql_rowset{
 		select
 			task_run   ,
 			start_time ,
-			task       ,
 			name       ,
 			duration   ,
 			stdin      ,
@@ -688,190 +679,142 @@ rowset.task_runs = sql_rowset{
 
 --scheduled tasks ------------------------------------------------------------
 
-local function update_task_name(task)
-	local action = first_row('select action from task where task = ?', task)
-	if action == 'backup' then
-		local deploy = first_row('select deploy from task_bkp where task = ?', task)
-		if not deploy then return end
-		update_row('task', {task, name = 'backup '..action})
-	end
-end
+mm.scheduled_tasks = {}
 
-local function task_function(task)
-	local action = first_row('select action from task where task = ?', task)
-	if action == 'backup' then
-		local t = first_row('select deploy, name from task_bkp where task = ?', task)
-		local machines = query('select machine from task_bkp_machine where task = ?', task)
-		return function()
-			mm.backup(t.deploy, t.name, nil, unpack(machines))
+function mm.set_scheduled_task(name, opt)
+	if not opt then
+		mm.scheduled_tasks[name] = nil
+	else
+		assert(opt.task_name)
+		assert(opt.action)
+		assert(opt.start_hours or opt.run_every)
+		assert(opt.machine or opt.deploy)
+		local sched = mm.scheduled_tasks[name]
+		if not sched then
+			sched = {sched_name = name, ctime = time(), active = true}
+			mm.scheduled_tasks[name] = sched
 		end
+		update(sched, opt)
 	end
+	rowset_changed'scheduled_tasks'
 end
 
-rowset.scheduled_tasks = sql_rowset{
-	allow = 'admin',
-	select = [[
-		select
-			task,
-			name,
-			action,
-			start_hours,
-			run_every,
-			armed,
-			generated_by,
-			editable,
-			last_run,
-			last_duration,
-			last_status
-		from
-			task
-	]],
-	pk = 'task',
-	ro_cols = 'name',
-	field_attrs = {
-		--
-	},
-	insert_row = function(self, row)
-		local task = self:insert_into('task', row, 'action start_hours run_every armed')
-		update_task_name(task)
-	end,
-	update_row = function(self, row)
-		local task = row['task:old']
-		local editable, action, args = first_row_vals([[
-			select editable, action from task where task = ?
-		]], task)
-		checkarg(editable ~= false, 'task not editable')
-		self:update_into('task', row, 'action start_hours run_every armed')
-		update_task_name(task)
-	end,
-	delete_row = function(self, row)
-		checkarg(row['editable:old'], 'task not editable')
-		self:delete_from('task', row)
-	end,
-}
+rowset.scheduled_tasks = virtual_rowset(function(self)
 
-rowset.scheduled_tasks_backup = sql_rowset{
-	allow = 'admin',
-	select = [[
-		select
-			task,
-			deploy,
-			name
-		from task_bkp
-	]],
-	where = 'task in (:param:filter)',
-	pk = 'task',
-	hide_cols = 'task',
-	insert_row = function(self, row)
-		self:insert_into('task_bkp', row, 'deploy name')
-		update_task_name(row.task)
-	end,
-	update_row = function(self, row)
-		local task = row['task:old']
-		self:update_into('task_bkp', row, 'deploy name')
-		update_task_name(task)
-	end,
-	delete_row = function(self, row)
-		self:delete_from('task_bkp', row)
-	end,
-}
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'sched_name'   , 'longstrid'},
+		{name = 'task_name'    , 'longstrid'},
+		{name = 'ctime'        , 'time_ctime'},
+		--sched
+		{name = 'start_hours'  , 'timeofday_in_seconds'},
+		{name = 'run_every'    , 'duration'},
+		{name = 'active'       , 'bool1'},
+		--stats
+		{name = 'last_run'     , 'time_timeago'},
+		{name = 'last_duration', 'duration'},
+		{name = 'last_status'  , 'strid'},
+		--child fks for cascade removal.
+		{name = 'machine'      , 'strid'},
+		{name = 'deploy'       , 'strid'},
+	}
+	self.pk = 'sched_name'
 
-rowset.scheduled_tasks_backup_machines = sql_rowset{
-	allow = 'admin',
-	select = [[
-		select
-			task,
-			machine
-		from task_bkp_machine
-	]],
-	where = 'task in (:param:filter)',
-	pk = 'task machine',
-	hide_cols = 'task',
-	insert_row = function(self, row)
-		self:insert_into('task_bkp_machine', row, 'machine')
-		update_task_name(row.task)
-	end,
-	update_row = function(self, row)
-		local task = row['task:old']
-		self:update_into('task_bkp_machine', row, 'machine')
-		update_task_name(task)
-	end,
-	delete_row = function(self, row)
-		self:delete_from('task_bkp_machine', row)
-	end,
-}
+	local function sched_row(t)
+		return {
+			t.sched_name,
+			t.task_name,
+			t.ctime,
+			t.start_hours,
+			t.run_every,
+			t.active,
+			t.last_run,
+			t.last_duration,
+			t.last_status,
+			t.machine,
+			t.deploy,
+		}
+	end
 
-function text_api.scheduled_tasks()
-	local rows, fields = query({compact=1}, [[
-		select
-			task,
-			name,
-			action,
-			start_hours,
-			run_every,
-			armed,
-			generated_by,
-			editable,
-			last_run,
-			last_duration,
-			last_status
-		from
-			task
-		order by
-			last_run desc,
-			ctime desc
-	]])
-	outpqr(rows, fields)
-end
-cmd_tasks('st|scheduled-tasks', 'Show scheduled tasks', mm.out_scheduled_tasks)
+	local function load_rows()
+		local rows = {}
+		for name, sched in sortedpairs(mm.scheduled_tasks, cmp_ctime) do
+			add(rows, sched_row(sched))
+		end
+		return rows
+	end
+
+	local function cmp_ctime(t1, t2)
+		return t1.ctime < t2.ctime
+	end
+	function self:load_rows(rs, params)
+		local filter = params['param:filter']
+		rs.rows = load_rows()
+	end
+
+	function self:load_row(row)
+		local name = row['sched_name:old']
+		local t = mm.scheduled_tasks[name]
+		return t and sched_row(t)
+	end
+
+	function self:update_row(row)
+		local name = row['sched_name:old']
+		local t = mm.scheduled_tasks[name]
+		if not t then return end
+		t.active = row.active
+	end
+
+	function self:delete_row(row)
+		local name = row['sched_name:old']
+		local t = mm.scheduled_tasks[name]
+		if not t then return end
+		t.active = false
+	end
+
+	function text_api.scheduled_tasks()
+		outpqr(load_rows(), self.fields)
+	end
+	cmd_tasks('ts|task-schedule', 'Show task schedule', mm.out_scheduled_tasks)
+
+end)
 
 local function run_tasks()
 	local now = time()
 	local today = glue.day(now)
 
-	for _, task, name, action, start_hours, run_every, last_run in each_row_vals[[
-		select
-			task,
-			name,
-			action,
-			time_to_sec(start_hours) start_hours,
-			run_every,
-			unix_timestamp(last_run) last_run
-		from
-			task
-		where
-			armed = 1
-			and name is not null
-		order by
-			last_run
-	]] do
+	for _,t in pairs(mm.scheduled_tasks) do
 
-		local min_time = not start_hours and last_run and run_every
-			and last_run + run_every or -1/0
+		if t.active then
 
-		if start_hours and run_every then
-			local today_at = today + start_hours
-			local seconds_late = (now - today_at) % run_every --always >= 0
-			local last_sched_time = now - seconds_late
-			local already_run = last_run and last_run >= last_sched_time
-			local too_late = seconds_late > run_every / 2
-			if already_run or too_late then
-				min_time = 1/0
+			local start_hours = t.start_hours
+			local last_run = t.last_run
+			local run_every = t.run_every
+			local action = t.action
+
+			local min_time = not start_hours and last_run and run_every
+				and last_run + run_every or -1/0
+
+			if start_hours and run_every then
+				local today_at = today + start_hours
+				local seconds_late = (now - today_at) % run_every --always >= 0
+				local last_sched_time = now - seconds_late
+				local already_run = last_run and last_run >= last_sched_time
+				local too_late = seconds_late > run_every / 2
+				if already_run or too_late then
+					min_time = 1/0
+				end
 			end
-		end
 
-		if now >= min_time and not mm.running_task(name) then
-
-			local task_func = task_function(task)
-			warnif('mm', 'task-func', not task_func, 'invalid task action %s', action)
-			if task_func then
+			if now >= min_time and not mm.running_task(t.task_name) then
 				local rearm = run_every and true or false
-				note('mm', 'run-task', '%s', name)
-				update_row('task', {task, last_run = now, armed = armed})
+				note('mm', 'run-task', '%s', t.task_name)
+				t.last_run = now
 				resume(thread(function()
-					local ok, err = pcall(task_func)
-				end, 'run-task %s', task))
+					local ok, err = pcall(action)
+				end, 'run-task %s', t.task_name))
 			end
+
 		end
 	end
 end
@@ -1295,7 +1238,24 @@ function mm.ssh_sh(machine, script, script_env, opt)
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
 
---machine commands -----------------------------------------------------------
+--machine ssh key gen --------------------------------------------------------
+
+function json_api.ssh_key_gen()
+	rm(mm.keyfile())
+	exec(sshcmd'ssh-keygen'..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
+	rm(mm.keyfile()..'.pub') --we'll compute it every time.
+	mm.ssh_key_fix_perms()
+	mm.ssh_key_gen_ppk()
+	rowset_changed'config'
+	query'update machine set ssh_key_ok = 0'
+	rowset_changed'machines'
+	return {notify = 'SSH key generated'}
+end
+cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', function()
+	call'ssh_key_gen'
+end)
+
+--machine listing ------------------------------------------------------------
 
 function text_api.machines()
 	local rows, cols = query({
@@ -1317,6 +1277,8 @@ function text_api.machines()
 	outpqr(rows, cols)
 end
 cmd_machines('m|machines', 'Show the list of machines', mm.out_machines)
+
+--machine rename -------------------------------------------------------------
 
 function hybrid_api.machine_rename(to_text, old_machine, new_machine)
 
@@ -1395,6 +1357,8 @@ function text_api.update_machine_info(machine)
 end
 cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.out_update_machine_info)
 
+--machine reboot -------------------------------------------------------------
+
 function json_api.machine_reboot(machine)
 	mm.ssh(machine, {
 		'reboot',
@@ -1404,7 +1368,7 @@ function json_api.machine_reboot(machine)
 	return {notify = 'Machine rebooted: '..machine}
 end
 
---command: ssh-hostkey-update ------------------------------------------------
+--machine ssh hostkey update -------------------------------------------------
 
 local function gen_known_hosts_file()
 	local t = {}
@@ -1436,24 +1400,7 @@ end
 cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
 	mm.ssh_hostkey_update)
 
---command: ssh-key-gen -------------------------------------------------------
-
-function json_api.ssh_key_gen()
-	rm(mm.keyfile())
-	exec(sshcmd'ssh-keygen'..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
-	rm(mm.keyfile()..'.pub') --we'll compute it every time.
-	mm.ssh_key_fix_perms()
-	mm.ssh_key_gen_ppk()
-	rowset_changed'config'
-	query'update machine set ssh_key_ok = 0'
-	rowset_changed'machines'
-	return {notify = 'SSH key generated'}
-end
-cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', function()
-	call'ssh_key_gen'
-end)
-
---command: ssh-key-update ----------------------------------------------------
+--machine ssh key update -----------------------------------------------------
 
 function json_api.ssh_key_update(machine)
 	note('mm', 'upd-key', '%s', machine)
@@ -1493,6 +1440,8 @@ cmd_ssh_keys('ssh_key_update [MACHINE]', 'Update SSH key(s)',
 		callm('ssh_key_update', machine)
 	end)
 
+--machine ssh key check ------------------------------------------------------
+
 function json_api.ssh_key_check(machine)
 	local task = mm.ssh_sh(machine, [[
 		#use ssh
@@ -1519,7 +1468,7 @@ cmd_ssh_keys('ssh-key-check [MACHINE]', 'Check that SSH keys are up-to-date',
 		callm('ssh_key_check', machine)
 	end)
 
---git keys update -------------------------------------------------------------
+--machine git keys update ----------------------------------------------------
 
 local function git_hosting_vars()
 	local vars = {}
@@ -1554,7 +1503,7 @@ cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
 		callm('git_keys_update', machine)
 	end)
 
---command: prepare machine ---------------------------------------------------
+--machine prepare ------------------------------------------------------------
 
 function hybrid_api.prepare(to_text, machine)
 	mm.ip(machine)
@@ -1572,7 +1521,7 @@ function hybrid_api.prepare(to_text, machine)
 end
 cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.out_prepare)
 
---deploy commands ------------------------------------------------------------
+--deploy listing -------------------------------------------------------------
 
 function text_api.deploys()
 	local rows, cols = query({
@@ -1599,16 +1548,7 @@ function text_api.deploys()
 end
 cmd_deployments('d|deploys', 'Show the list of deployments', mm.out_deploys)
 
-local function validate_deploy(d)
-	if not d then return end
-	d = d:trim()
-	if d == '' then return 'cannot be empty' end
-	if d:find'^[^a-z]' then return 'must start with a small letter' end
-	if d:find'[_%-]$' then return 'cannot end in a hyphen or underscore' end
-	if d:find'[^a-z0-9_%-]' then return 'can only contain small letters, digits, hyphens and underscores' end
-	if d:find'%-%-' then return 'cannot contain double-hyphens' end
-	if d:find'__' then return 'cannot contain double-underscores' end
-end
+--deploy deploy --------------------------------------------------------------
 
 local function deploy_vars(deploy, new_deploy)
 
@@ -1693,6 +1633,8 @@ end
 cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
 	mm.out_deploy)
 
+--deploy remove --------------------------------------------------------------
+
 function hybrid_api.deploy_remove(to_text, deploy)
 	local vars = deploy_vars(deploy)
 	local task = mm.ssh_sh(vars.MACHINE, [[
@@ -1719,6 +1661,19 @@ function hybrid_api.deploy_remove(to_text, deploy)
 end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
 	mm.out_deploy_remove)
+
+--deploy rename --------------------------------------------------------------
+
+local function validate_deploy(d)
+	if not d then return end
+	d = d:trim()
+	if d == '' then return 'cannot be empty' end
+	if d:find'^[^a-z]' then return 'must start with a small letter' end
+	if d:find'[_%-]$' then return 'cannot end in a hyphen or underscore' end
+	if d:find'[^a-z0-9_%-]' then return 'can only contain small letters, digits, hyphens and underscores' end
+	if d:find'%-%-' then return 'cannot contain double-hyphens' end
+	if d:find'__' then return 'cannot contain double-underscores' end
+end
 
 function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
 
@@ -1758,6 +1713,8 @@ end
 cmd_deployments('deploy-rename OLD_DEPLOY NEW_DEPLOY',
 	'Rename a deployment (requires app restart)',
 	mm.out_deploy_rename)
+
+--deploy app run -------------------------------------------------------------
 
 local function find_cmd(...)
 	for i=1,select('#',...) do
@@ -2156,6 +2113,8 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 	end
 end)
 
+--mysql monitoring -----------------------------------------------------------
+
 local mysql_stats_rowset = {
 	allow = 'admin',
 	select = [[
@@ -2239,6 +2198,23 @@ rowset.machine_backups = sql_rowset{
 	end,
 }
 
+rowset.machine_backup_deploys = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			mbk,
+			deploy,
+			app_version,
+			sdk_version,
+			app_commit,
+			sdk_commit
+		from
+			mbk_deploy
+	]],
+	where_all = 'mbk in (:param:filter)',
+	pk = 'mbk deploy',
+}
+
 rowset.machine_backup_copies = sql_rowset{
 	allow = 'admin',
 	select = [[
@@ -2252,7 +2228,6 @@ rowset.machine_backup_copies = sql_rowset{
 		from
 			mbk_copy
 	]],
-	pk = 'mbk_copy',
 	where_all = 'mbk in (:param:filter)',
 	pk = 'mbk_copy',
 	delete_row = function(self, row)
@@ -2332,7 +2307,7 @@ function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 		where c.mbk = b.mbk and c.mbk_copy = ? and b.machine = ?
 	]], parent_mbk_copy, machine), 'parent backup copy not of the same machine')
 
-	local task_name = 'mbk_backup '..machine
+	local task_name = 'machine_backup '..machine
 	check500(not mm.running_task(task_name), 'already running: %s', task_name)
 
 	local start_time = time()
@@ -2946,6 +2921,69 @@ function hybrid_api.deploy_restore(to_text, dbk_copy, dest_deploy)
 end
 cmd_dbk('dbk-restore COPY [DEPLOY_NAME]', 'Restore a deployment', mm.out_deploy_restore)
 
+--schedule backup tasks ------------------------------------------------------
+
+local function machine_set_scheduled_backup_tasks(machine, enable)
+
+	if not enable then
+		mm.set_scheduled_task('machine_full_backup '..machine, nil)
+		mm.set_scheduled_task('machine_incr_backup '..machine, nil)
+		return
+	end
+
+	local row = first_row([[
+		select
+			active,
+			full_backup_active,
+			incr_backup_active,
+			time_to_sec(full_backup_start_hours) full_backup_start_hours,
+			time_to_sec(incr_backup_start_hours) incr_backup_start_hours,
+			full_backup_run_every,
+			incr_backup_run_every
+		from machine
+		where machine = ?
+	]], machine)
+
+	local copy_machines = query([[
+		select dest_machine from machine_backup_copy_machine
+		where machine = ?
+	]], machine)
+
+	mm.set_scheduled_task('machine_full_backup '..machine, row.active and row.full_backup_active and {
+		action = function()
+			mm.machine_backup(machine,
+				'scheduled full backup',
+				nil, unpack(copy_machines))
+		end,
+		task_name   = 'backup '..machine,
+		machine     = machine,
+		start_hours = row.full_backup_start_hours,
+		run_every   = row.full_backup_run_every,
+	} or nil)
+
+	mm.set_scheduled_task('machine_incr_backup '..machine, row.active and row.incr_backup_active and {
+		action = function()
+			mm.machine_backup(machine,
+				'scheduled incremental backup',
+				'latest', unpack(copy_machines))
+		end,
+		task_name   = 'backup '..machine,
+		machine     = machine,
+		start_hours = row.incr_backup_start_hours,
+		run_every   = row.incr_backup_run_every,
+	} or nil)
+
+end
+
+function machine_schedule_backup_tasks()
+	for _,machine in each_row_vals([[
+		select machine from machine
+		where active = 1 and (full_backup_active = 1 or incr_backup_active = 1)
+	]]) do
+		machine_set_scheduled_backup_tasks(machine, true)
+	end
+end
+
 --remote access tools --------------------------------------------------------
 
 cmd_ssh('ssh -|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(md, cmd, ...)
@@ -3091,13 +3129,11 @@ function mm.mount(machine, rem_path, drive, bg)
 		NYI'mount'
 	end
 end
-cmd_ssh_mounts('mount MACHINE PATH [DRIVE]', 'Mount remote path to drive', mm.mount)
-
+cmd_ssh_mounts('mount MACHINE PATH [DRIVE]'   , 'Mount remote path to drive', mm.mount)
 cmd_ssh_mounts('mount-bg MACHINE PATH [DRIVE]', 'Mount remote path to drive in background',
-function(machine, drive, rem_path)
-	return mm.mount(machine, drive, rem_path, true)
-end)
-
+	function(machine, drive, rem_path)
+		return mm.mount(machine, drive, rem_path, true)
+	end)
 cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	if win then
 		exec'taskkill /f /im sshfs.exe'
@@ -3118,7 +3154,6 @@ function text_api.rsync(dir, machine1, machine2)
 	)
 	check500(task.exit_code == 0, 'rsync_to exit code: %d', task.exit_code)
 end
-
 cmd_ssh_mounts('rsync DIR MACHINE1 MACHINE2', 'Copy files between machines', mm.out_rsync)
 
 function text_api.sha(machine, dir)
@@ -3133,7 +3168,6 @@ function text_api.sha(machine, dir)
 	)
 	check500(task.exit_code == 0, 'sha_dir exit code: %d', task.exit_code)
 end
-
 cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', mm.out_sha)
 
 --admin web UI ---------------------------------------------------------------
@@ -3254,6 +3288,13 @@ rowset.machines = sql_rowset{
 			hdd,
 			os_ver,
 			mysql_ver,
+			full_backup_active      ,
+			full_backup_start_hours ,
+			full_backup_run_every   ,
+			incr_backup_active      ,
+			incr_backup_start_hours ,
+			incr_backup_run_every   ,
+			backup_remove_older_than,
 			ctime,
 			0 as uptime
 		from
@@ -3295,15 +3336,35 @@ rowset.machines = sql_rowset{
 		self:insert_into('machine', row, [[
 			machine provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
+
+			full_backup_active
+			full_backup_start_hours
+			full_backup_run_every
+			incr_backup_active
+			incr_backup_start_hours
+			incr_backup_run_every
+			backup_remove_older_than
+
 			admin_page pos
 		]])
-		cp(mm.keyfile(), mm.keyfile(row.machine))
-		cp(mm.ppkfile(), mm.ppkfile(row.machine))
+		local m1 = row.machine
+		cp(mm.keyfile(), mm.keyfile(m1))
+		cp(mm.ppkfile(), mm.ppkfile(m1))
+		machine_set_scheduled_backup_tasks(m1, true)
 	end,
 	update_row = function(self, row)
 		self:update_into('machine', row, [[
 			machine provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
+
+			full_backup_active
+			full_backup_start_hours
+			full_backup_run_every
+			incr_backup_active
+			incr_backup_start_hours
+			incr_backup_run_every
+			backup_remove_older_than
+
 			admin_page pos
 		]])
 		local m1 = row.machine
@@ -3311,6 +3372,8 @@ rowset.machines = sql_rowset{
 		if m1 and m1 ~= m0 then
 			if exists(mm.keyfile(m0)) then mv(mm.keyfile(m0), mm.keyfile(m1)) end
 			if exists(mm.ppkfile(m0)) then mv(mm.ppkfile(m0), mm.ppkfile(m1)) end
+			machine_set_scheduled_backup_tasks(m0, false)
+			machine_set_scheduled_backup_tasks(m1, true)
 		end
 	end,
 	delete_row = function(self, row)
@@ -3318,6 +3381,29 @@ rowset.machines = sql_rowset{
 		local m0 = row['machine:old']
 		rm(mm.keyfile(m0))
 		rm(mm.ppkfile(m0))
+		machine_set_scheduled_backup_tasks(m0, false)
+	end,
+}
+
+rowset.machine_backup_copy_machines = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			machine,
+			dest_machine
+		from machine_backup_copy_machine
+	]],
+	pk = 'machine dest_machine',
+	hide_cols = 'machine',
+	where_all = 'machine in (:param:filter)',
+	insert_row = function(self, row)
+		self:insert_into('machine_backup_copy_machine', row, 'machine dest_machine')
+	end,
+	update_row = function(self, row)
+		self:update_into('machine_backup_copy_machine', row, 'machine dest_machine')
+	end,
+	delete_row = function(self, row)
+		self:delete_from('machine_backup_copy_machine', row)
 	end,
 }
 
@@ -3338,6 +3424,10 @@ rowset.deploys = sql_rowset{
 			repo,
 			secret,
 			mysql_pass,
+			backup_active      ,
+			backup_start_hours ,
+			backup_run_every   ,
+			backup_remove_older_than,
 			ctime,
 			mtime
 		from
@@ -3372,11 +3462,19 @@ rowset.deploys = sql_rowset{
  		self:insert_into('deploy', row, [[
 			deploy machine repo app wanted_app_version wanted_sdk_version
 			env secret mysql_pass pos
+			backup_active
+			backup_start_hours
+			backup_run_every
+			backup_remove_older_than
 		]])
 	end,
 	update_row = function(self, row)
 		self:update_into('deploy', row, [[
 			machine repo app wanted_app_version wanted_sdk_version
+			backup_active
+			backup_start_hours
+			backup_run_every
+			backup_remove_older_than
 			env pos
 		]])
 		if row.deploy then
@@ -3414,6 +3512,28 @@ rowset.deploy_vars = sql_rowset{
 	end,
 	delete_row = function(self, row)
 		self:delete_from('deploy_vars', row)
+	end,
+}
+
+rowset.deploy_backup_copy_machines = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			deploy,
+			dest_machine
+		from deploy_backup_copy_machine
+	]],
+	pk = 'deploy dest_machine',
+	hide_cols = 'deploy',
+	where_all = 'deploy in (:param:filter)',
+	insert_row = function(self, row)
+		self:insert_into('deploy_backup_copy_machine', row, 'deploy dest_machine')
+	end,
+	update_row = function(self, row)
+		self:update_into('deploy_backup_copy_machine', row, 'deploy dest_machine')
+	end,
+	delete_row = function(self, row)
+		self:delete_from('deploy_backup_copy_machine', row)
 	end,
 }
 
@@ -3475,6 +3595,7 @@ local run_server = mm.run_server
 function mm:run_server()
 
 	if true then
+
 		runevery(1, function()
 			if update_deploys_live_state() then
 				rowset_changed'deploys'
@@ -3484,9 +3605,10 @@ function mm:run_server()
 
 		runafter(0, function()
 			start_tunnels_and_log_servers()
-		end, 'start-log-servers')
+			machine_schedule_backup_tasks()
+			runagainevery(60, run_tasks, 'run-tasks-every-60s')
+		end, 'startup')
 
-		runagainevery(60, run_tasks, 'run-tasks-every-60s')
 	end
 
 	run_server(self)
