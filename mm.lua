@@ -507,6 +507,7 @@ function mm.task(opt)
 		_out = {},
 		_err = {},
 		_outerr = {}, --interleaved as they come
+		visible = opt.visible ~= false,
 	})
 	mm.tasks[self] = true
 	mm.tasks_by_id[self.id] = self
@@ -523,11 +524,15 @@ function task:free()
 	if self.name then
 		mm.tasks_by_name[self.name] = nil
 	end
-	rowset_changed'running_tasks'
+	if task.visible then
+		rowset_changed'running_tasks'
+	end
 end
 
 function task:changed()
-	rowset_changed'running_tasks'
+	if task.visible then
+		rowset_changed'running_tasks'
+	end
 end
 
 function task:setstatus(s)
@@ -644,7 +649,9 @@ rowset.running_tasks = virtual_rowset(function(self)
 		local filter = params['param:filter']
 		rs.rows = {}
 		for task in sortedpairs(mm.tasks, cmp_start_time) do
-			add(rs.rows, task_row(task))
+			if task.visible then
+				add(rs.rows, task_row(task))
+			end
 		end
 	end
 
@@ -889,12 +896,12 @@ function sshcmd(cmd)
 	return win and indir(mm.sshdir, cmd) or cmd
 end
 
-function api.machines()
-	return (query'select machine from machine')
+function api.active_machines()
+	return (query'select machine from machine where active = 1')
 end
 
 function mm.each_machine(f, fmt, ...)
-	local machines = mm.machines()
+	local machines = mm.active_machines()
 	local threads = sock.threadset()
 	for _,machine in ipairs(machines) do
 		resume(threads:thread(f, fmt, machine, ...), machine)
@@ -956,12 +963,14 @@ local function keyfile(machine, ext)
 	return indir(mm.vardir, 'mm'..(machine and '-'..machine or '')..'.'..(ext or 'key'))
 end
 function api.keyfile_contents(opt, machine, ext)
-	return load(keyfile(machine, ext))
+	return load(keyfile(machine, ext), false)
 end
 function mm.keyfile(machine, ext) --`mm ssh ...` gets it from the server
 	local file = keyfile(machine, ext)
 	if from_server() then
-		save(file, mm.keyfile_contents(machine, ext))
+		local s = checkfound(mm.keyfile_contents(nil, machine, ext),
+			'SSH key file not found for: %s', machine)
+		save(file, s)
 	end
 	return file
 end
@@ -971,7 +980,12 @@ end
 
 function api.ssh_pubkey(opt, machine)
 	--NOTE: Windows ssh-keygen puts the key name at the end, but the Linux one doesn't.
-	local s = readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine)..'"'):trim()
+	local s = mm.exec({
+		sshcmd'ssh-keygen', '-y', '-f', mm.keyfile(machine),
+	}, {
+		name = catargs(' ', 'ssh_pubkey ', machine), keyed = false, visible = false,
+		out_stdout = false,
+	}):stdout():trim()
 	return (s:match('^[^%s]+%s+[^%s]+')..' mm')
 end
 cmd_ssh_keys('ssh-pubkey [MACHINE]', 'Show a/the SSH public key', function(...)
@@ -1012,7 +1026,7 @@ cmd_ssh_keys('ssh-hostkey-sha MACHINE', 'Show a SSH host key SHA', function(...)
 end)
 
 --run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
-function mm.ssh_key_fix_perms(machine)
+function mm.ssh_key_fix_perms(opt, machine)
 	if not win then return end
 	local s = mm.keyfile(machine)
 	readpipe('icacls %s /c /t /Inheritance:d', s)
@@ -1021,6 +1035,7 @@ function mm.ssh_key_fix_perms(machine)
 	readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
 	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
 	readpipe('icacls %s', s)
+	say'Perms fixed.'
 end
 cmd_ssh_keys('ssh-key-fix-perms [MACHINE]', 'Fix SSH key perms for VBOX',
 	mm.ssh_key_fix_perms)
@@ -1198,9 +1213,9 @@ function mm.exec(cmd, opt)
 		end
 	end
 
-	if not opt.allow_fail then
-		check500(not task.exit_code or task.exit_code == 0,
-			'command `%s` exit code: %d', proc.quote_args_unix(cmd), task.exit_code)
+	if not opt.allow_fail and task.exit_code and task.exit_code ~= 0 then
+		local s = isstr(cmd) and cmd or proc.quote_args_unix(unpack(cmd))
+		check500(false, 'command `%s` exit code: %d', s, task.exit_code)
 	end
 
 	return task
@@ -1378,7 +1393,7 @@ function api.machine_rename(opt, old_machine, new_machine)
 
 	update_row('machine', {old_machine, machine = new_machine})
 
-	notify('Machine renamed from %s to %s', old_machine, new_machine)
+	notify('Machine renamed from %s to %s.', old_machine, new_machine)
 end
 local machine_rename = mm.machine_rename
 function mm.machine_rename(opt, old_machine, new_machine)
@@ -1439,7 +1454,7 @@ function api.machine_reboot(opt, machine)
 	}, {
 		name = 'machine_reboot '..(machine or ''),
 	})
-	notify('Machine rebooted: %s', machine)
+	notify('Machine rebooted: %s.', machine)
 end
 
 --machine ssh hostkey update -------------------------------------------------
@@ -1468,7 +1483,7 @@ function api.ssh_hostkey_update(opt, machine)
 	}):stdout()
 	assert(update_row('machine', {machine, ssh_hostkey = s}).affected_rows == 1)
 	gen_known_hosts_file()
-	notify('Host key updated for %s', machine)
+	notify('Host key updated for %s.', machine)
 end
 cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
 	mm.ssh_hostkey_update)
@@ -1494,7 +1509,7 @@ function api.ssh_key_update(opt, machine)
 		name = 'ssh_key_update '..machine,
 		out_stdout = false,
 	}):stdout():trim()
-	check500(stored_pubkey == pubkey, 'SSH public key NOT updated for '..machine)
+	check500(stored_pubkey == pubkey, 'SSH public key NOT updated for: %s.', machine)
 
 	cp(mm.keyfile(), mm.keyfile(machine))
 	cp(mm.ppkfile(), mm.ppkfile(machine))
@@ -1503,9 +1518,11 @@ function api.ssh_key_update(opt, machine)
 	update_row('machine', {machine, ssh_key_ok = true})
 	rowset_changed'machines'
 
-	notify('SSH key updated for %s', machine)
+	notify('SSH key updated for %s.', machine)
 end
-cmd_ssh_keys('ssh_key_update [MACHINE]', 'Update SSH key(s)', mm.ssh_key_update)
+cmd_ssh_keys('ssh-key-update [MACHINE]', 'Update SSH key(s)', function(opt, machine)
+	callm('ssh_key_update', machine)
+end)
 
 --machine ssh key check ------------------------------------------------------
 
@@ -1555,7 +1572,7 @@ function api.git_keys_update(opt, machine)
 	]=], vars, {
 		name = 'git_keys_update '..(machine or ''),
 	})
-	notify('Git keys updated for %s', machine)
+	notify('Git keys updated for: %s.', machine)
 end
 cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
 	function(opt, machine)
@@ -1575,7 +1592,7 @@ function api.prepare(opt, machine)
 	]=], vars, {
 		name = 'prepare '..machine,
 	})
-	notify('Machine prepared: %s', machine)
+	notify('Machine prepared: %s.', machine)
 end
 cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare)
 
@@ -1675,7 +1692,7 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 	})
 	rowset_changed'deploys'
 
-	notify('Deployed: %s', deploy)
+	notify('Deployed: %s.', deploy)
 end
 cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
 	mm.deploy)
@@ -1704,7 +1721,7 @@ function api.deploy_remove(opt, deploy)
 	})
 	rowset_changed'deploys'
 
-	notify('Deploy removed: %s', deploy)
+	notify('Deploy removed: %s.', deploy)
 end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
 	mm.deploy_remove)
@@ -1753,7 +1770,7 @@ function api.deploy_rename(opt, old_deploy, new_deploy)
 
 	update_row('deploy', {old_deploy, deploy = new_deploy})
 
-	notify('Deploy renamed from %s to %s', old_deploy, new_deploy)
+	notify('Deploy renamed from %s to %s.', old_deploy, new_deploy)
 end
 cmd_deployments('deploy-rename OLD_DEPLOY NEW_DEPLOY',
 	'Rename a deployment (requires app restart)',
@@ -2420,7 +2437,7 @@ function api.machine_backup(opt, machine, note, parent_mbk_copy, dest_machines)
 
 	mm.machine_backup_copy(opt, mbk_copy, dest_machines)
 
-	notify('Machine backup done for %s', machine)
+	notify('Machine backup done for %s.', machine)
 end
 cmd_mbk('mbk-backup MACHINE [NOTE] [UP_COPY] [MACHINE1,...]',
 	'Backup a machine', mm.machine_backup)
@@ -2618,7 +2635,7 @@ function api.machine_backup_copy_remove(opt, mbk_copy)
 
 	local backup_removed = remove(mbk_copy)
 
-	notify('Backup copy removed: %s.%s', mbk_copy,
+	notify('Backup copy removed: %s.%s.', mbk_copy,
 		backup_removed and ' That was the last copy of the backup.' or '')
 end
 cmd_mbk('mbk-remove COPY1[-COPY2],...', 'Remove machine backup copies', function(copies)
@@ -2822,7 +2839,7 @@ function api.deploy_backup(opt, deploy, note, ...)
 		mm.dbk_copy(opt, dbk_copy, deploy)
 	end
 
-	notify('Backup completed for %s', deploy)
+	notify('Backup completed for: %s.', deploy)
 end
 cmd_dbk('dbk-backup DEPLOY [NOTE] [MACHINE1,...]',
 	'Backup a deploy', mm.deploy_backup)
@@ -2915,7 +2932,7 @@ function api.deploy_backup_copy(opt, src_dbk_copy, machine)
 	})
 	rowset_changed'deploy_backup_copies'
 
-	notify('Backup %d copied. copy id: %d', c.dbk, dbk_copy)
+	notify('Backup %d copied. Copy id: %d.', c.dbk, dbk_copy)
 end
 cmd_dbk('dbk-copy COPY|DEPLOY [MACHINE]', 'Copy a deploy backup', mm.deploy_backup_copy)
 
@@ -2939,7 +2956,7 @@ function api.deploy_backup_copy_check(opt, dbk_copy)
 	update_row('dbk_copy', {c.dbk_copy, size = size})
 	rowset_changed'deploy_backup_copies'
 
-	notify('Backup copy %d OK. Size: %s', c.dbk_copy, kbytes(size))
+	notify('Backup copy %d OK. Size: %s.', c.dbk_copy, kbytes(size))
 end
 cmd_dbk('dbk-check COPY	', 'Check a deploy backup\'s integrity', mm.deploy_backup_copy_check)
 
@@ -2967,7 +2984,7 @@ function api.deploy_backup_copy_remove(opt, dbk_copy)
 		backup_removed = true
 	end
 
-	notify('Backup copy removed: %s.%s', dbk_copy,
+	notify('Backup copy removed: %s.%s.', dbk_copy,
 		backup_removed and ' That was the last copy of the backup.' or '')
 end
 cmd_dbk('dbk-remove COPY1[-COPY2],...', 'Remove deploy backup copies', function(copies)
@@ -3136,22 +3153,24 @@ end
 
 --remote access tools --------------------------------------------------------
 
-cmd_ssh('ssh -|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(md, cmd, ...)
-	checkarg(md, 'machine or deploy required')
-	local machines =
-		md == '-' and mm.machines()
-		or words(md:gsub(',', ' '))
+cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(opt, mds, cmd, ...)
+	if mds == 'ALL' then
+		mds = mm.active_machines()
+		cmd = checkarg(cmd, 'command required')
+	else
+		mds = words(checkarg(mds, 'machine or deploy required'):gsub(',', ' '))
+	end
 	local last_exit_code
-	for _,md in ipairs(machines) do
+	local cmd = cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"}
+	for _,md in ipairs(mds) do
 		local ip, m = mm.ip(md)
 		say('SSH to %s:', m)
-		local task = mm.ssh(md,
-			cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"},
-			{
-				allow_fail = true,
-				allocate_tty = not cmd or nil,
-			}
-		)
+		local task = mm.ssh(md, cmd, {
+			capture_stdout = false,
+			capture_stderr = false,
+			allow_fail = true,
+			allocate_tty = not cmd or nil,
+		})
 		if task.exit_code ~= 0 then
 			say('SSH to %s: exit code: %d', m, task.exit_code)
 		end
@@ -3163,7 +3182,7 @@ end)
 --TIP: make a putty session called `mm` where you set the window size,
 --uncheck "warn on close" and whatever else you need to make worrking
 --with putty comfortable for you.
-cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function(md)
+cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function(opt, md)
 	local ip, m = mm.ip(md)
 	local deploy = m ~= md and md or nil
 	local cmdfile = tmppath'puttycmd.txt'
@@ -3755,7 +3774,7 @@ end
 local run_server = mm.run_server
 function mm:run_server()
 
-	if true then
+	if false then
 
 		runevery(1, function()
 			if update_deploys_live_state() then
