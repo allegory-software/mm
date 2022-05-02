@@ -17,7 +17,11 @@ rm_dir() { # DIR
 sha_dir() { # DIR
 	local dir="$1"
 	checkvars dir
+	[ -d $dir ] || die "dir not found: $dir"
+	(
+	set -o pipefail
 	find $dir -type f -print0 | LC_ALL=C sort -z | xargs -0 sha1sum | sha1sum | cut -d' ' -f1
+	) || exit $?
 }
 
 append() { # S FILE

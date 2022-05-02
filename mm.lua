@@ -969,7 +969,7 @@ function mm.keyfile(machine, ext) --`mm ssh ...` gets it from the server
 	local file = keyfile(machine, ext)
 	if from_server() then
 		local s = checkfound(mm.keyfile_contents(nil, machine, ext),
-			'SSH key file not found for: %s', machine)
+			'SSH key file not found: %s', file)
 		save(file, s)
 	end
 	return file
@@ -1055,7 +1055,8 @@ function mm.ssh_key_gen_ppk(machine)
 end
 
 function api.mysql_root_pass(opt, machine) --last line of the private key
-	local s = load(mm.keyfile(machine))
+	local file = mm.keyfile(machine)
+	local s = checkfound(load(file, false), 'SSH key file not found: %s', file)
 		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
 	assert(#s == 32)
 	return s
@@ -1238,8 +1239,8 @@ function mm.ssh(md, args, opt)
 		'-i', mm.keyfile(machine),
 		'root@'..ip,
 	}, args), update({
-		capture_stdout = not opt.allocate_tty or nil,
-		capture_stderr = not opt.allocate_tty or nil,
+		capture_stdout = not opt.allocate_tty,
+		capture_stderr = not opt.allocate_tty,
 	}, opt))
 end
 
@@ -1316,7 +1317,11 @@ function mm.ssh_sh(machine, script, script_env, opt)
 	local script_s = script:outdent()
 	local s = mm.sh_script(script_s, script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
-	note('mm', 'ssh-sh', '%s %s', machine, script_s:sub(1, 50))
+	if logging.verbose then
+		local first_line = script_s:gsub('^%s*#use.-\r?\n', '')
+			:gsub('^%s*', ''):gsub('\n.*', '')..' [...]'
+		note('mm', 'ssh-sh', '%s %s', machine, first_line)
+	end
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
 
@@ -3166,10 +3171,10 @@ cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(op
 		local ip, m = mm.ip(md)
 		say('SSH to %s:', m)
 		local task = mm.ssh(md, cmd, {
+			allow_fail = true,
+			allocate_tty = not cmd,
 			capture_stdout = false,
 			capture_stderr = false,
-			allow_fail = true,
-			allocate_tty = not cmd or nil,
 		})
 		if task.exit_code ~= 0 then
 			say('SSH to %s: exit code: %d', m, task.exit_code)
@@ -3252,33 +3257,39 @@ end
 
 cmd_ssh_tunnels('tunnel MACHINE [LPORT1:]RPORT1,...',
 	'Create SSH tunnel(s) to machine',
-	function(machine, ports)
+	function(opt, machine, ports)
 		mm.tunnel(machine, ports, {allocate_tty = true})
 	end)
 
 cmd_ssh_tunnels('rtunnel MACHINE [LPORT1:]RPORT1,...',
 	'Create reverse SSH tunnel(s) to machine',
-	function(machine, ports)
+	function(opt, machine, ports)
 		return mm.rtunnel(machine, ports, {allocate_tty = true})
 	end)
 
-cmd_mysql('mysql DEPLOY|MACHINE [SQL]', 'Execute MySQL command or remote REPL', function(md, sql)
-	local ip, machine = mm.ip(md)
-	local deploy = machine ~= md and md
-	local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
-	if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
-	return mm.ssh(machine, args, not sql and {allocate_tty = true} or nil)
-end)
+cmd_mysql('mysql DEPLOY|MACHINE [SQL]',
+	'Execute MySQL command or remote REPL',
+	function(opt, md, sql)
+		local ip, machine = mm.ip(md)
+		local deploy = machine ~= md and md
+		local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
+		if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
+		return mm.ssh(machine, args, {
+			allocate_tty = not sql,
+			capture_stdout = false,
+			capture_stderr = false,
+		})
+	end)
 
 --TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
-function mm.mount(machine, rem_path, drive, bg)
+function mm.mount(opt, machine, rem_path, drive)
 	if win then
 		drive = drive or 'S'
 		rem_path = rem_path or '/'
 		local cmd =
 			'"'..indir(mm.sshfsdir, 'sshfs.exe')..'"'..
 			' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
-			(bg and '' or ' -f')..
+			(opt.bg and '' or ' -f')..
 			--' -odebug'.. --good stuff (implies -f)
 			--these were copy-pasted from sshfs-win manager.
 			' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
@@ -3290,7 +3301,7 @@ function mm.mount(machine, rem_path, drive, bg)
 			' -oPreferredAuthentications=publickey'..
 			' -oUserKnownHostsFile='..path.sep(mm.known_hosts_file(), nil, '/')..
 			' -oIdentityFile='..path.sep(mm.keyfile(machine), nil, '/')
-		if bg then
+		if opt.bg then
 			exec(cmd)
 		else
 			mm.exec(cmd, {
@@ -3301,11 +3312,7 @@ function mm.mount(machine, rem_path, drive, bg)
 		NYI'mount'
 	end
 end
-cmd_ssh_mounts('mount MACHINE PATH [DRIVE]'   , 'Mount remote path to drive', mm.mount)
-cmd_ssh_mounts('mount-bg MACHINE PATH [DRIVE]', 'Mount remote path to drive in background',
-	function(machine, drive, rem_path)
-		return mm.mount(machine, drive, rem_path, true)
-	end)
+cmd_ssh_mounts('mount [-bg] MACHINE PATH [DRIVE]', 'Mount remote path to drive', mm.mount)
 cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	if win then
 		exec'taskkill /f /im sshfs.exe'
@@ -3328,17 +3335,20 @@ end
 cmd_ssh_mounts('rsync DIR MACHINE1 MACHINE2', 'Copy files between machines', mm.rsync)
 
 function api.sha(opt, machine, dir)
-	mm.ssh_sh(machine, [[
+	return mm.ssh_sh(machine, [[
 		#use fs
 		sha_dir "$DIR"
 		]], {
 			DIR = dir
 		}, {
 			name = 'sha '..machine, keyed = false,
+			out_stdout = false,
 		}
-	)
+	):stdout():trim()
 end
-cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', mm.sha)
+cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', function(...)
+	print(mm.sha(...))
+end)
 
 --admin web UI ---------------------------------------------------------------
 
