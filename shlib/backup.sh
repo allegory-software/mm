@@ -84,7 +84,7 @@ machine_backup_copy() { # HOST MBK [PARENT_MBK]
 	local parent_mbk="$3"
 	checkvars host mbk
 
-	rsync_to $host $(bkp_dir machine $mbk) $(bkp_dir machine $parent_mbk)
+	rsync_to $host $(bkp_dir machine $mbk) "" $(bkp_dir machine $parent_mbk)
 }
 
 machine_restore() { # MBK
@@ -124,7 +124,7 @@ deploy_backup_copy() { # HOST DBK [PARENT_DBK]
 	local parent_dbk="$3"
 	checkvars host dbk
 
-	rsync_to $host $(bkp_dir deploy $dbk) $(bkp_dir deploy $parent_dbk)
+	rsync_to $host $(bkp_dir deploy $dbk) "" $(bkp_dir deploy $parent_dbk)
 }
 
 deploy_restore() { # DBK

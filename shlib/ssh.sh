@@ -99,18 +99,19 @@ ssh_git_keys_update() {
 	done
 }
 
-rsync_to() { # HOST DIR|FILE [LINK_DIR]
+rsync_to() { # HOST SRC_DIR DST_DIR [LINK_DIR]
 	local host="$1"
-	local dir="$2"
-	local link_dir="$3"
-	checkvars host dir
+	local src_dir="$2"
+	local dst_dir="$3"; [ "$dst_dir" ] || dst_dir=$src_dir
+	local link_dir="$4"
+	checkvars host src_dir dst_dir
 	[ "$link_dir" ] && {
 		link_dir="$(realpath "$link_dir")" # --link-dest path must be absolute.
 		checkvars link_dir
 	}
 	checkvars SSH_KEY- SSH_HOSTKEY-
 
-	say -n "Copying dir $dir to host $host ${link_dir:+link_dir $link_dir }... "
+	say -n "Copying dir $src_dir to $host:$dst_dir ${link_dir:+link_dir $link_dir }... "
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT
@@ -124,7 +125,7 @@ rsync_to() { # HOST DIR|FILE [LINK_DIR]
 	# NOTE: the dot syntax cuts out the path before it as a way to make the path relative.
 	[ "$DRY" ] || must rsync --delete --timeout=5 ${link_dir:+--link-dest=$link_dir} \
 		-e "ssh -o UserKnownHostsFile=$h -i $p" \
-		-aR "$dir/./." "root@$host:/$dir"
+		-aHR "$src_dir/./." "root@$host:/$dst_dir"
 
 	rm -f $p $h
 	say "OK"

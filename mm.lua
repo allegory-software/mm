@@ -475,6 +475,7 @@ local cmd_ssh_keys    = cmdsection('SSH KEY MANAGEMENT', wrap)
 local cmd_ssh         = cmdsection('SSH TERMINALS'     , wrap)
 local cmd_ssh_tunnels = cmdsection('SSH TUNNELS'       , wrap)
 local cmd_ssh_mounts  = cmdsection('SSH-FS MOUNTS'     , wrap)
+local cmd_files       = cmdsection('FILES'             , wrap)
 local cmd_mysql       = cmdsection('MYSQL'             , wrap)
 local cmd_machines    = cmdsection('MACHINES'          , wrap)
 local cmd_deployments = cmdsection('DEPLOYMENTS'       , wrap)
@@ -3158,7 +3159,10 @@ end
 
 --remote access tools --------------------------------------------------------
 
-function mm.ssh_command(mds, cmd, ...)
+function mm.ssh_command(opt, mds, cmd, ...)
+	if isstr(opt) then
+		return mm.ssh_command(empty, mds, cmd, ...)
+	end
 	if mds == 'ALL' then
 		mds = mm.active_machines()
 		cmd = checkarg(cmd, 'command required')
@@ -3172,7 +3176,7 @@ function mm.ssh_command(mds, cmd, ...)
 		if #mds > 1 then say('SSH to %s:', m) end
 		local task = mm.ssh(md, cmd, {
 			allow_fail = true,
-			allocate_tty = not cmd,
+			allocate_tty = not cmd or opt.tty,
 			capture_stdout = false,
 			capture_stderr = false,
 		})
@@ -3222,7 +3226,7 @@ cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function
 	proc.exec(cmd):forget()
 end)
 
-cmd_ssh('ls [-l] [-a] MACHINE:DIR'  , 'Run `ls` on machine',
+cmd_files('ls [-l] [-a] MACHINE:DIR'  , 'Run `ls` on machine',
 	function(opt, md_dir)
 		local md, dir = md_dir:match'^(.-):(.*)'
 		local args = {'ls', dir}
@@ -3231,11 +3235,25 @@ cmd_ssh('ls [-l] [-a] MACHINE:DIR'  , 'Run `ls` on machine',
 		end
 		mm.ssh_command(md, unpack(args))
 	end)
-cmd_ssh('cat MACHINE:FILE', 'Run `cat` on machine',
+
+cmd_files('cat MACHINE:FILE', 'Run `cat` on machine',
 	function(opt, md_file)
 		local md, file = md_file:match'^(.-):(.*)'
 		mm.ssh_command(md, 'cat', file)
 	end)
+
+cmd_files('mc MACHINE:DIR', 'Run `mc` on machine',
+	function(opt, md_file)
+		local md, dir = md_file:match'^(.-):(.*)'
+		mm.ssh_command({tty = true}, md, 'mc', dir)
+	end)
+
+cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
+	function(opt, md_file)
+		local md, file = md_file:match'^(.-):(.*)'
+		mm.ssh_command({tty = true}, md, 'mcedit', file)
+	end)
+
 
 --TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
 function mm.tunnel(machine, ports, opt, rev)
@@ -3339,18 +3357,23 @@ cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	end
 end)
 
-function api.rsync(opt, dir, machine1, machine2)
-	mm.ssh_sh(machine1, [[
+function api.rsync(opt, md1, md2)
+	local m1, d1 = md1:match'^(.-):(.*)'
+	local m2, d2 = md2:match'^(.-):(.*)'
+	checkarg(m1, 'syntax error: %s', md1)
+	if not d2 then m2, d2 = md2, d1 end
+	mm.ssh_sh(m1, [[
 		#use ssh
-		rsync_to "$HOST" "$DIR"
+		rsync_to "$HOST" "$SRC_DIR" "$DST_DIR"
 		]], update({
-			DIR = dir
-		}, rsync_vars(machine2)), {
-			name = 'rsync '..machine1..' '..machine2, keyed = false,
+			SRC_DIR = d1,
+			DST_DIR = d2,
+		}, rsync_vars(m2)), {
+			name = 'rsync '..m1..' '..m2, keyed = false,
 		}
 	)
 end
-cmd_ssh_mounts('rsync DIR MACHINE1 MACHINE2', 'Copy files between machines', mm.rsync)
+cmd_files('rsync MACHINE1:DIR MACHINE2[:DIR]', 'Sync directories between machines', mm.rsync)
 
 function api.sha(opt, machine, dir)
 	return mm.ssh_sh(machine, [[
