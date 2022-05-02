@@ -14,11 +14,11 @@ FEATURES
 	- Windows-native sysadmin tools (sshfs, putty, etc.).
 	- agentless: all relevant bash scripts are uploaded with each command.
 	- keeps all data in a relational database (machines, deployments, etc.).
-	- all processes are tracked by task system with output capturing and autokill.
+	- all processes are tracked by a task system with output capturing and autokill.
 	- maintains secure access to all services via bulk updating of:
-		- ssh root keys.
+		- SSH root keys.
 		- MySQL root password.
-		- ssh git hosting (github, etc.) keys.
+		- SSH git hosting (github, etc.) keys.
 	- quick-launch of ssh, putty and mysql shells.
 	- quick remote commands: ssh, mysql, rsync, deployed app commands.
 	- remote fs mounts via sshfs (Windows & Linux).
@@ -29,23 +29,24 @@ FEATURES
 		- log capturing,
 		- live objects list,
 		- CPU/RAM monitoring.
-	- MySQL backups:
-		- incremental, per-server, with xtrabackup.
-		- non-incremental, per-db, with mysqldump.
-		- replicated, with rsync.
-		- TODO: per-table.
-		- TODO: restore.
-	- file replication:
-		- incremental, via rsync.
+	- db & file backups:
+		- MySQL: incremental, per-server, with xtrabackup.
+		- MySQL: non-incremental, per-db, with mysqldump.
+		- files: always incremental, with hardlinking via rsync.
+		- backup copies kept on multiple machines.
+		- machine restore: create new deploys and/or override existing.
+		- deployment restore: create new or override existing.
 
 LIMITATIONS
 	- the machines need to run Linux (Debian 10) and have a public IP.
-	- all deployments connect to the same MySQL server instance.
-	- each deployment is given a single MySQL db.
-	- single ssh key for root access.
-	- single ssh key for git access.
+	- single shared MySQL server instance for all deployments on a machine.
+	- one MySQL DB per deployment.
+	- one global SSH key for root access on all machines.
+	- one global SSH key for git access.
 
 ]]
+
+--db schema ------------------------------------------------------------------
 
 local function mm_schema()
 
@@ -81,7 +82,7 @@ local function mm_schema()
 		local_ip    , strid,
 		cost_per_month, money,
 		cost_per_year , money,
-		active      , bool1,
+		active      , bool1, --enable/disable all automation
 		ssh_hostkey , public_key,
 		ssh_key     , private_key,
 		ssh_pubkey  , public_key,
@@ -99,11 +100,11 @@ local function mm_schema()
 		--backup task scheduling
 		full_backup_active      , bool,
 		full_backup_start_hours , timeofday,
-		full_backup_run_every   , duration,
+		full_backup_run_every   , duration, {duration_format = 'long'},
 		incr_backup_active      , bool,
 		incr_backup_start_hours , timeofday,
-		incr_backup_run_every   , duration,
-		backup_remove_older_than, duration,
+		incr_backup_run_every   , duration, {duration_format = 'long'},
+		backup_remove_older_than, duration, {duration_format = 'long'},
 
 		pos         , pos,
 		ctime       , ctime,
@@ -134,11 +135,13 @@ local function mm_schema()
 		restored_from_dbk, id, weak_fk(dbk),
 		restored_from_mbk, id, weak_fk(mbk),
 
+		active, bool1, --enable/disable all automation
+
 		--backup task scheduling
 		backup_active      , bool,
 		backup_start_hours , timeofday,
-		backup_run_every   , duration,
-		backup_remove_older_than, duration,
+		backup_run_every   , duration, {duration_format = 'long'},
+		backup_remove_older_than, duration, {duration_format = 'long'},
 
 		ctime            , ctime,
 		mtime            , mtime,
@@ -175,7 +178,8 @@ local function mm_schema()
 		start_time  , timeago,
 		duration    , duration,
 		checksum    , hash,
-		name        , name,
+		note        , text, aka'name',
+		stdouterr   , text,
 	}
 
 	tables.mbk_deploy = {
@@ -210,7 +214,8 @@ local function mm_schema()
 		start_time  , timeago,
 		duration    , duration,
 		checksum    , hash,
-		name        , name,
+		note        , text, aka'name',
+		stdouterr   , text,
 	}
 
 	tables.dbk_copy = {
@@ -220,6 +225,11 @@ local function mm_schema()
 		start_time  , timeago,
 		duration    , duration,
 		size        , filesize,
+	}
+
+	tables.task_last_run = {
+		sched_name  , longstrpk,
+		last_run    , time,
 	}
 
 	tables.task_run = {
@@ -278,7 +288,7 @@ end
 
 --install --------------------------------------------------------------------
 
-cmd('install [forealz]', 'Install or migrate mm', function(doit)
+cmd('install [forealz]', 'Install or migrate mm', function(opt, doit)
 	create_db()
 	local dry = doit ~= 'forealz'
 	db():sync_schema(mm.schema, {dry = dry})
@@ -290,147 +300,172 @@ end)
 
 --web api / server -----------------------------------------------------------
 
-mm.json_api = {} --{action->fn}
-mm.text_api = {} --{action->fn}
-local function api_action(api)
-	return function(action, ...)
-		local f = checkfound(api[action:gsub('-', '_')])
-		checkarg(method'post', 'try POST')
-		local post = repl(post(), '')
-		checkarg(post == nil or istab(post))
-		allow(admin())
-		--args are passed as `getarg1, getarg2, ..., postarg1, postarg2, ...`
-		--in any combination, including only GET args or only POST args.
-		--GET args come from strings so they're either strings or null for the
-		--empty strign (i.e. `GET //`). POST args come as a JSON array so they
-		--can be any JSON type (null, string, number, hash map, array).
-		local args = extend(pack_json(...), post)
-		return f(unpack_json(args))
+--simple text stream multiplexing protocol over HTTP.
+local function out_on(chan, s)
+	if cx().fake then
+		out(s)
+	else
+		assert(#chan == 1)
+		out(format('%s%08x\n%s', chan, #s, s))
 	end
 end
-action['api.json'] = api_action(mm.json_api)
-action['api.txt' ] = api_action(mm.text_api)
+
+local outprint = glue.printer(function(s)
+	out_on('1', s)
+end)
+
+local _pqr = pqr
+local function outpqr(rows, fields)
+	local opt = rows.rows and update({}, rows) or {rows = rows, fields = fields}
+	opt.print = outprint
+	_pqr(opt)
+end
+
+local function notify_kind(kind, fmt, ...)
+	local s = select('#', ...) > 0 and format(fmt, ...) or fmt
+	kind = kind or 'NOTE'
+	out_on('N', kind:upper()..': '..s..'\n')
+end
+local function notify       (...) notify_kind(nil    , ...) end
+local function notify_warn  (...) notify_kind('warn' , ...) end
+local function notify_error (...) notify_kind('error', ...) end
+
+local mm_api = {} --{action->fn}
+
+action['api.txt' ] = function(action, ...)
+	setcompress(false)
+	--^^required so that each out() call is a HTTP chunk and there's no buffering.
+	setheader('content-type', 'application/octet-stream')
+	--^^the only way to make chrome fire onreadystatechange() for each chunk.
+	checkarg(method'post', 'try POST')
+	local handler = checkfound(mm_api[action:gsub('-', '_')], 'action not found: %s', action)
+	local post = repl(post(), '')
+	checkarg(post == nil or istab(post))
+	allow(admin())
+	--Args are passed to the API handler as `getarg1, ..., postarg1, ...`
+	--so you can pass args as GET or POST or a combination, the API won't know.
+	--GET args come from the URI path so they're all strings. POST args come
+	--as a JSON array so you can pass in structured data in them. That said,
+	--args from cmdline can only be strings so better assume all args untyped.
+	--String args and options coming from the command line are trimmed and
+	--empty strings are passed as `nil`. Empty GET args (as in `/foo//bar`)
+	--are also passed as `nil` but not trimmed. POST args and options are
+	--JSON-decoded with all `null` values transformed into `nil`.
+	--To make the API scriptable, errors are caught and sent to the client to
+	--be re-raised in the Lua client (the JS client calls notify() for them).
+	--Because the API is for both JS and Lua, we don't support multiple return
+	--values (you have to return arrays).
+	local args = extend(pack(...), post and unpack(post.args))
+	local opt = post and post.options or empty
+	local ok, ret = errors.pcall(handler, opt, unpack(args))
+	if not ok then
+		out_on('E', tostring(ret))
+	elseif ret ~= nil then
+		out_on('R', json(ret))
+	end
+end
 
 --web api / client -----------------------------------------------------------
 
-local function unpack_ret(ret)
-	if istab(ret) and ret.unpack then
-		return unpack_json(ret.unpack)
-	end
-	return ret
-end
+local function call_api(action, opt, ...)
 
-local function _api(ext, out_it, action, ...)
-
-	local out_buf, out_content
-	if out_it then
-		out_buf = {}
-		function out_content(req, buf, sz)
-			local res = req.response
-			if res.status == 200 then
-				out(buf, sz)
-			else
-				add(out_buf, ffi.string(buf, sz))
+	local retval
+	local buffer = require'string.buffer'
+	local buf = buffer.new()
+	local chan, size
+	local function out_content(req, in_buf, sz)
+		check500(req.response.status == 200, 'http error: %d %s',
+			req.response.status, req.response.status_message) --bug?
+		buf:putcdata(in_buf, sz)
+		::again::
+		if not size and #buf >= 10 then
+			chan = buf:get(1)
+			size = assert(tonumber(buf:get(9), 16))
+		end
+		if size and #buf >= size then
+			local s = buf:get(size)
+			if chan == '1' then
+				io.stdout:write(s)
+				io.stdout:flush()
+			elseif chan == '2' or chan == 'N' then
+				io.stderr:write(s)
+				io.stderr:flush()
+			elseif chan == 'E' then
+				raise('mm_api', s)
+			elseif chan == 'R' then
+				retval = json_arg(s)
 			end
+			chan, size = nil
+			goto again
 		end
 	end
-	local uri = url{segments = {'', 'api.'..ext, action}}
+
 	local ret, res = getpage{
 		host = config'mm_host',
-		uri = uri,
+		uri = url{segments = {'', 'api.txt', action}},
 		headers = {
 			cookie = {
 				session = config'session_cookie',
 			},
 		},
 		method = 'POST',
-		upload = pack_json(...),
+		upload = {options = opt, args = pack_json(...)},
 		receive_content = out_content,
-		compress = not out_it,
-			--^^let text come in chunked so we can see each line as soom as it comes.
 	}
-
 	check500(ret ~= nil, '%s', res)
+	check500(res.status == 200, 'http error: %d %s', res.status, res.status_message)
 
-	if out_buf then
-		ret = concat(out_buf)
+	return retval
+end
+
+local function call_json_api(opt, action, ...)
+
+	if isstr(opt) then --action, ...
+		return call_json_api(empty, opt, action, ...)
 	end
 
-	ret = repl(ret, '') --json action that returned nil.
-
-	if res.status ~= 200 then --check*(), http_error(), error(), or bug.
-		local err = istab(ret) and ret.error or ret or res.status_message
-		checkfound (res.status ~= 404, '%s', err)
-		checkarg   (res.status ~= 400, '%s', err)
-		allow      (res.status ~= 403, '%s', err)
-		check500   (res.status ~= 500, '%s', err)
-	end
+	local ret, res = getpage{
+		host = config'mm_host',
+		uri = url{
+			segments = {n = select('#', ...) + 2, '', action, ...},
+			args = opt.args,
+		},
+		headers = {
+			cookie = {
+				session = config'session_cookie',
+			},
+		},
+		upload = opt.upload,
+	}
+	check500(ret ~= nil, '%s', res)
+	check500(res.status == 200, 'http error: %d %s', res.status, res.status_message)
+	check500(istab(ret), 'invalid JSON rsponse: %s', res.rawcontent)
 
 	return ret
-end
-local function call_json_api(action, ...)
-	return unpack_ret(_api('json', false, action, ...))
-end
-local function out_text_api(action, ...)
-	_api('txt', true, action, ...)
 end
 
 --Lua+web+cmdline api generator ----------------------------------------------
 
-local function from_server(from_db)
-	return not from_db and mm.conf.mm_host and not mm.server_running
+local function from_server()
+	return mm.conf.mm_host and not mm.server_running
 end
 
-local json_api = setmetatable({}, {__newindex = function(_, name, fn)
-	local ext_name = name:gsub('_', '-')
-	mm[name] = function(...)
+local api = setmetatable({}, {__newindex = function(_, name, fn)
+	local api_name = name:gsub('_', '-')
+	mm[name] = function(opt, ...)
 		if from_server() then
-			return call_json_api(ext_name, ...)
+			return call_api(api_name, opt, ...)
 		end
-		return unpack_ret(fn(...))
+		return fn(opt or empty, ...)
 	end
-	mm.json_api[name] = fn
+	mm_api[name] = fn
 end})
-
-local text_api = setmetatable({}, {__newindex = function(_, name, fn)
-	local ext_name = name:gsub('_', '-')
-	mm['out_'..name] = function(...)
-		if from_server() then
-			out_text_api(ext_name, ...)
-			return
-		end
-		fn(...)
-	end
-	mm.text_api[name] = fn
-end})
-
-local hybrid_api = setmetatable({}, {__newindex = function(_, name, fn)
-	text_api[name] = function(...) return fn(true , ...) end
-	json_api[name] = function(...) return fn(false, ...) end
-end})
-
-local function _call(die_on_error, fn, ...)
-	local ok, ret = errors.pcall(fn, ...)
-	if not ok then
-		local err = ret
-		if die_on_error then
-			die('%s', err)
-		else
-			say('ERROR: %s', err)
-		end
-	end
-	if istab(ret) and ret.notify then
-		local kind = ret.notify_kind
-		say('%s%s', kind and kind:upper()..': ' or '', ret.notify)
-	end
-	return ret
-end
-local call = function(...) return _call(true, ...) end
-local callp = function(...) return _call(false, ...) end
 
 local function wrap(fn)
 	return function(...)
-		call(fn, ...)
+		local ok, ret = errors.pcall(fn, ...)
+		if ok then return ret end --handlers can return an explicit exit code.
+		die('%s', ret)
 	end
 end
 local cmd_ssh_keys    = cmdsection('SSH KEY MANAGEMENT', wrap)
@@ -467,7 +502,6 @@ function mm.task(opt)
 	local self = object(task, opt, {
 		id = last_task_id,
 		start_time = time(),
-		duration = 0,
 		status = 'new',
 		errors = {},
 		_out = {},
@@ -493,7 +527,6 @@ function task:free()
 end
 
 function task:changed()
-	self.duration = (self.end_time or time()) - self.start_time
 	rowset_changed'running_tasks'
 end
 
@@ -522,8 +555,8 @@ function task:setstatus(s)
 end
 
 function task:finish(exit_code)
-	if self.end_time then return end --already called.
-	self.end_time = time()
+	if self.duration then return end --already called.
+	self.duration = time() - self.start_time
 	self.exit_code = exit_code
 	self:setstatus(exit_code and 'finished' or 'killed')
 	local s = self:stdouterr()
@@ -584,7 +617,7 @@ rowset.running_tasks = virtual_rowset(function(self)
 			hint = 'Duration till last change in input, output or status'},
 		{name = 'stdin'     , hidden = true, maxlen = 16*1024^2},
 		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
-		{name = 'exit_code' , type = 'number', w = 20},
+		{name = 'exit_code' , 'double', w = 20},
 		{name = 'errors'    , },
 	}
 	self.pk = 'id'
@@ -633,15 +666,15 @@ rowset.running_tasks = virtual_rowset(function(self)
 
 end)
 
-function text_api.running_tasks()
-	local fields = {
-		{name = 'id'},
-		{name = 'name'},
-		{name = 'machine'},
-		{name = 'status'},
-		{name = 'start_time', type = 'timeago'},
-		{name = 'duration', type = 'duration'},
-		{name = 'exit_code', type = 'number'},
+function api.print_running_tasks()
+	local fields = mm.schema:resolve_types{
+		{name = 'id'        },
+		{name = 'name'      },
+		{name = 'machine'   },
+		{name = 'status'    },
+		{name = 'start_time', 'time_timeago'},
+		{name = 'duration'  , 'duration'},
+		{name = 'exit_code' , 'double'},
 	}
 	local rows = {}
 	for task in sortedpairs(mm.tasks, cmp_start_time) do
@@ -657,7 +690,7 @@ function text_api.running_tasks()
 	end
 	outpqr(rows, fields)
 end
-cmd_tasks('t|tasks', 'Show running tasks', mm.out_running_tasks)
+cmd_tasks('t|tasks', 'Show running tasks', mm.print_running_tasks)
 
 rowset.task_runs = sql_rowset{
 	allow = 'admin',
@@ -708,7 +741,7 @@ rowset.scheduled_tasks = virtual_rowset(function(self)
 		{name = 'ctime'        , 'time_ctime'},
 		--sched
 		{name = 'start_hours'  , 'timeofday_in_seconds'},
-		{name = 'run_every'    , 'duration'},
+		{name = 'run_every'    , 'duration', duration_format = 'long'},
 		{name = 'active'       , 'bool1'},
 		--stats
 		{name = 'last_run'     , 'time_timeago'},
@@ -772,18 +805,27 @@ rowset.scheduled_tasks = virtual_rowset(function(self)
 		t.active = false
 	end
 
-	function text_api.scheduled_tasks()
+	function api.print_scheduled_tasks()
 		outpqr(load_rows(), self.fields)
 	end
-	cmd_tasks('ts|task-schedule', 'Show task schedule', mm.out_scheduled_tasks)
+	cmd_tasks('ts|task-schedule', 'Show task schedule', mm.print_scheduled_tasks)
 
 end)
+
+local function load_tasks_last_run()
+	for _, sched_name, last_run in each_row_vals[[
+		select sched_name, last_run from task_last_run
+	]] do
+		local t = mm.scheduled_tasks[sched_name]
+		if t then t.last_run = last_run end
+	end
+end
 
 local function run_tasks()
 	local now = time()
 	local today = glue.day(now)
 
-	for _,t in pairs(mm.scheduled_tasks) do
+	for sched_name,t in pairs(mm.scheduled_tasks) do
 
 		if t.active then
 
@@ -810,8 +852,15 @@ local function run_tasks()
 				local rearm = run_every and true or false
 				note('mm', 'run-task', '%s', t.task_name)
 				t.last_run = now
+				insert_or_update_row('task_last_run', {
+					sched_name = sched_name,
+					last_run = now,
+				})
 				resume(thread(function()
-					local ok, err = pcall(action)
+					local ok, err = errors.pcall(action)
+					if not ok then
+						logerror('mm', 'runtask', '%s: %s', sched_name, err)
+					end
 				end, 'run-task %s', t.task_name))
 			end
 
@@ -819,13 +868,28 @@ local function run_tasks()
 	end
 end
 
---Lua/web/cmdline info api ---------------------------------------------------
+--Lua+web+cmdline info api ---------------------------------------------------
+
+function mm.print_rowset(opt, name, cols)
+	name = name or 'rowsets'
+	if from_server() then
+		t = call_json_api('rowset.json', name)
+	else
+		NYI()
+	end
+	mm.schema:resolve_types(t.fields)
+	outpqr{
+		rows = t.rows, fields = t.fields,
+		showcols = cols and cols:gsub(',', ' '),
+	}
+end
+cmd('r|rowset [NAME] [COL1,...]', 'Show a rowset', mm.print_rowset)
 
 function sshcmd(cmd)
 	return win and indir(mm.sshdir, cmd) or cmd
 end
 
-function json_api.machines()
+function api.machines()
 	return (query'select machine from machine')
 end
 
@@ -838,26 +902,18 @@ function mm.each_machine(f, fmt, ...)
 	threads:wait()
 end
 
+--for each machine run a Lua API on the client-side.
 local function callm(cmd, machine)
 	if not machine then
-		call(mm.each_machine, function(m)
-			callp(mm[cmd], m)
+		mm.each_machine(function(m)
+			mm[cmd](nil, m)
 		end, cmd..' %s')
 		return
 	end
-	mm[cmd](machine)
+	mm[cmd](nil, machine)
 end
 
-function json_api.machine_info(machine)
-	return checkfound(first_row([[
-		select
-			machine,
-			mysql_local_port
-		from machine where machine = ?
-	]], checkarg(machine, 'machine required')), 'machine not found')
-end
-
-function json_api.deploy_info(deploy)
+function api.deploy_info(opt, deploy)
 	return checkfound(first_row([[
 		select
 			deploy,
@@ -866,21 +922,26 @@ function json_api.deploy_info(deploy)
 	]], checkarg(deploy, 'deploy required')), 'deploy not found')
 end
 
-function json_api.ip(md)
+function api.ip_and_machine(opt, md)
 	local md = checkarg(md, 'machine or deploy required')
 	local m = first_row('select machine from deploy where deploy = ?', md) or md
-	local ip = first_row('select public_ip from machine where machine = ?', m)
-	return {unpack = pack_json(checkfound(ip, 'machine not found'), m)}
+	local t = first_row('select machine, public_ip from machine where machine = ?', m)
+	checkfound(t, 'machine not found: %s', m)
+	checkfound(t.public_ip, 'machine does not have a public ip: %s', m)
+	return {t.public_ip, m}
+end
+function mm.ip(md)
+	return unpack(mm.ip_and_machine(nil, md))
 end
 cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
-	function(machine)
-		print((mm.ip(machine)))
+	function(opt, md)
+		print((mm.ip(md)))
 	end)
 
 local function known_hosts_file()
 	return indir(mm.vardir, 'known_hosts')
 end
-function json_api.known_hosts_file_contents()
+function api.known_hosts_file_contents()
 	return load(known_hosts_file())
 end
 function mm.known_hosts_file()
@@ -894,7 +955,7 @@ end
 local function keyfile(machine, ext)
 	return indir(mm.vardir, 'mm'..(machine and '-'..machine or '')..'.'..(ext or 'key'))
 end
-function json_api.keyfile_contents(machine, ext)
+function api.keyfile_contents(opt, machine, ext)
 	return load(keyfile(machine, ext))
 end
 function mm.keyfile(machine, ext) --`mm ssh ...` gets it from the server
@@ -908,13 +969,13 @@ function mm.ppkfile(machine) --`mm putty ...` gets it from the server
 	return mm.keyfile(machine, 'ppk')
 end
 
-function json_api.ssh_pubkey(machine)
+function api.ssh_pubkey(opt, machine)
 	--NOTE: Windows ssh-keygen puts the key name at the end, but the Linux one doesn't.
 	local s = readpipe(sshcmd'ssh-keygen'..' -y -f "'..mm.keyfile(machine)..'"'):trim()
 	return (s:match('^[^%s]+%s+[^%s]+')..' mm')
 end
-cmd_ssh_keys('ssh-pubkey [MACHINE]', 'Show a/the SSH public key', function(machine)
-	print(mm.ssh_pubkey(machine))
+cmd_ssh_keys('ssh-pubkey [MACHINE]', 'Show a/the SSH public key', function(...)
+	print(mm.ssh_pubkey(...))
 end)
 
 --for manual updating via `curl mm.allegory.ro/pubkey/MACHINE >> authroized_keys`.
@@ -923,34 +984,31 @@ function action.pubkey(machine)
 	outall(mm.ssh_pubkey(machine))
 end
 
-function json_api.ssh_hostkey(machine)
+function api.ssh_hostkey(opt, machine)
 	return checkfound(first_row([[
 		select ssh_hostkey from machine where machine = ?
-	]], checkarg(machine, 'machine required')), 'machine not found'):trim()
+	]], checkarg(machine, 'machine required')), 'hostkey not found for machine: %s', machine):trim()
 end
-cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(machine)
-	print(mm.ssh_hostkey(machine))
+cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(...)
+	print(mm.ssh_hostkey(...))
 end)
 
-function json_api.ssh_hostkey_sha(machine)
+function api.ssh_hostkey_sha(opt, machine)
 	machine = checkarg(machine, 'machine required')
 	local key = first_row([[
 		select ssh_hostkey from machine where machine = ?
 	]], machine)
-	local key = checkfound(key, 'machine not found'):trim()
-	local task = mm.exec({
-		sshcmd'ssh-keygen', '-E', 'sha256', '-lf', '-'
-	}, {
+	local key = checkfound(key, 'hostkey not found for machine: %s', machine):trim()
+	local task = mm.exec(sshcmd'ssh-keygen'..' -E sha256 -lf -', {
 		stdin = key,
-		capture_stdout = true,
+		out_stdout = false,
 		name = 'ssh_hostkey_sha '..machine,
 		keyed = false, nolog = true,
 	})
-	check500(task.exit_code == 0, 'ssh-keygen exit code: %d', task.exit_code)
 	return (task:stdout():trim():match'%s([^%s]+)')
 end
-cmd_ssh_keys('ssh-hostkey-sha MACHINE', 'Show a SSH host key SHA', function(machine)
-	print(mm.ssh_hostkey_sha(machine))
+cmd_ssh_keys('ssh-hostkey-sha MACHINE', 'Show a SSH host key SHA', function(...)
+	print(mm.ssh_hostkey_sha(...))
 end)
 
 --run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
@@ -975,28 +1033,27 @@ function mm.ssh_key_gen_ppk(machine)
 	local cmd = win
 		and fmt('%s /keygen %s /output=%s', indir(mm.bindir, 'winscp.com'), key, ppk)
 		or fmt('%s %s -O private -o %s%s', indir(mm.bindir, 'puttygen'), key, ppk, p76)
-	local task = mm.exec(cmd, {
+	mm.exec(cmd, {
 		name = 'ssh_key_gen_ppk'..(machine and ' '..machine or ''),
 	})
-	check500(task.exit_code == 0, 'winscp/puttygen exit code: %d', task.exit_code)
-	return {notify = 'PPK file generated'}
+	notify'PPK file generated.'
 end
 
-function json_api.mysql_root_pass(machine) --last line of the private key
+function api.mysql_root_pass(opt, machine) --last line of the private key
 	local s = load(mm.keyfile(machine))
 		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
 	assert(#s == 32)
 	return s
 end
-cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(machine)
-	print(mm.mysql_root_pass(machine))
+cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(...)
+	print(mm.mysql_root_pass(...))
 end)
 
-function mm.mysql_pass(deploy)
-	return mm.deploy_info(deploy).mysql_pass
+function mm.mysql_pass(opt, deploy)
+	return mm.deploy_info(opt, deploy).mysql_pass
 end
-cmd_mysql('mysql-pass DEPLOY', 'Show the MySQL password for an app', function(deploy)
-	print(mm.mysql_pass(deploy))
+cmd_mysql('mysql-pass DEPLOY', 'Show the MySQL password for an app', function(...)
+	print(mm.mysql_pass(...))
 end)
 
 --async exec -----------------------------------------------------------------
@@ -1007,8 +1064,10 @@ function mm.exec(cmd, opt)
 
 	local task = mm.task(update({cmd = cmd}, opt))
 
-	local capture_stdout = opt.capture_stdout or mm.server_running or opt.out_stdouterr
-	local capture_stderr = opt.capture_stderr or mm.server_running or opt.out_stdouterr
+	local out_stdout = opt.out_stdout ~= false
+	local out_stderr = opt.out_stderr ~= false
+	local capture_stdout = opt.capture_stdout ~= false
+	local capture_stderr = opt.capture_stderr ~= false
 
 	local p, err = proc.exec{
 		cmd = cmd,
@@ -1053,8 +1112,8 @@ function mm.exec(cmd, opt)
 					end
 					local s = ffi.string(buf, len)
 					task:out(s)
-					if opt.out_stdouterr then
-						out(s)
+					if out_stdout then
+						out_on('1', s)
 					end
 				end
 				p.stdout:close()
@@ -1074,8 +1133,8 @@ function mm.exec(cmd, opt)
 					end
 					local s = ffi.string(buf, len)
 					task:err(s)
-					if opt.out_stdouterr then
-						out(s)
+					if out_stderr then
+						out_on('2', s)
 					end
 				end
 				p.stderr:close()
@@ -1139,6 +1198,11 @@ function mm.exec(cmd, opt)
 		end
 	end
 
+	if not opt.allow_fail then
+		check500(not task.exit_code or task.exit_code == 0,
+			'command `%s` exit code: %d', proc.quote_args_unix(cmd), task.exit_code)
+	end
+
 	return task
 end
 
@@ -1158,7 +1222,10 @@ function mm.ssh(md, args, opt)
 		'-o', 'UserKnownHostsFile='..mm.known_hosts_file(),
 		'-i', mm.keyfile(machine),
 		'root@'..ip,
-	}, args), opt)
+	}, args), update({
+		capture_stdout = not opt.allocate_tty or nil,
+		capture_stderr = not opt.allocate_tty or nil,
+	}, opt))
 end
 
 --shell scripts with preprocessor --------------------------------------------
@@ -1187,14 +1254,14 @@ function mm.sh_script(s, env, pp_env, included)
 	end
 	local function include(s)
 		local t = {}
-		for _,s in ipairs(names(s)) do
+		for _,s in ipairs(words(s)) do
 			include_one(s)
 		end
 		return cat(t, '\n')
 	end
 	local function use(s)
 		local t = {}
-		for _,s in ipairs(names(s)) do
+		for _,s in ipairs(words(s)) do
 			if not included[s] then
 				included[s] = true
 				add(t, include_one(s))
@@ -1240,47 +1307,51 @@ end
 
 --machine ssh key gen --------------------------------------------------------
 
-function json_api.ssh_key_gen()
+function api.ssh_key_gen()
 	rm(mm.keyfile())
-	exec(sshcmd'ssh-keygen'..' -f %s -t rsa -b 2048 -C "mm" -q -N ""', mm.keyfile())
+	mm.exec({
+		sshcmd'ssh-keygen', '-f', mm.keyfile(),
+		'-t', 'rsa',
+		'-b', '2048',
+		'-C', 'mm',
+		'-q',
+		'-N', '',
+	}, {
+		name = 'ssh_key_gen',
+	})
 	rm(mm.keyfile()..'.pub') --we'll compute it every time.
 	mm.ssh_key_fix_perms()
 	mm.ssh_key_gen_ppk()
 	rowset_changed'config'
 	query'update machine set ssh_key_ok = 0'
 	rowset_changed'machines'
-	return {notify = 'SSH key generated'}
+	notify'SSH key generated.'
 end
-cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', function()
-	call'ssh_key_gen'
-end)
+cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', mm.ssh_key_gen)
 
 --machine listing ------------------------------------------------------------
 
-function text_api.machines()
-	local rows, cols = query({
-		compact=1,
-	}, [[
-		select
-			machine,
-			public_ip,
-			cores,
-			ram,
-			hdd,
-			cpu,
-			os_ver,
-			mysql_ver,
-			ctime
-		from machine
-		order by pos, ctime
-	]])
-	outpqr(rows, cols)
-end
-cmd_machines('m|machines', 'Show the list of machines', mm.out_machines)
+cmd_machines('m|machines', 'Show the list of machines', function(opt)
+	mm.print_rowset(opt, 'machines', ([[
+		machine
+		active
+		public_ip
+		cpu_max
+		ram_free
+		hdd_free
+		cores
+		ram
+		hdd
+		cpu
+		os_ver
+		mysql_ver
+		ctime
+	]]):gsub('%s+', ','))
+end)
 
 --machine rename -------------------------------------------------------------
 
-function hybrid_api.machine_rename(to_text, old_machine, new_machine)
+function api.machine_rename(opt, old_machine, new_machine)
 
 	checkarg(new_machine, 'new_machine required')
 
@@ -1288,7 +1359,7 @@ function hybrid_api.machine_rename(to_text, old_machine, new_machine)
 		select 1 from machine where machine = ?
 	]], new_machine), 'machine already exists: %s', new_machine)
 
-	local task = mm.ssh_sh(old_machine, [=[
+	mm.ssh_sh(old_machine, [=[
 		#use deploy
 		machine_rename "$OLD_MACHINE" "$NEW_MACHINE"
 	]=], {
@@ -1296,13 +1367,7 @@ function hybrid_api.machine_rename(to_text, old_machine, new_machine)
 		NEW_MACHINE = new_machine,
 	}, {
 		name = 'machine_rename '..old_machine,
-		out_stdouterr = to_text,
 	})
-	check500(task.exit_code == 0, 'machine_rename exit code: %d', task.exit_code)
-
-	update_row('machine', {old_machine, machine = new_machine})
-
-	--TODO: !!!!
 
 	if exists(mm.keyfile(old_machine)) then
 		mv(mm.keyfile(old_machine), mm.keyfile(new_machine))
@@ -1311,23 +1376,31 @@ function hybrid_api.machine_rename(to_text, old_machine, new_machine)
 		mv(mm.ppkfile(old_machine), mm.ppkfile(new_machine))
 	end
 
-	return {notify = 'Machine renamed from '..old_machine..' to '..new_machine}
-end
+	update_row('machine', {old_machine, machine = new_machine})
 
+	notify('Machine renamed from %s to %s', old_machine, new_machine)
+end
+local machine_rename = mm.machine_rename
+function mm.machine_rename(opt, old_machine, new_machine)
+	machine_rename(opt, old_machine, new_machine)
+	if from_server() then --remove old key files from the client.
+		rm(keyfile(old_machine))
+		rm(keyfile(old_machine, 'ppk'))
+	end
+end
 cmd_machines('machine-rename OLD_MACHINE NEW_MACHINE',
 	'Rename a machine',
-	mm.out_machine_rename)
+	mm.machine_rename)
 
-function text_api.update_machine_info(machine)
+function api.update_machine_info(opt, machine)
 	local task = mm.ssh_sh(machine, [=[
 		#use machine
 		machine_info
 	]=], nil, {
 		name = 'update_machine_info '..(machine or ''),
 		keyed = false, nolog = true,
-		capture_stdout = true,
+		out_stdout = false,
 	})
-	check500(task.exit_code == 0, 'machine_info exit code: %d', task.exit_code)
 	local stdout = task:stdout()
 	local t = {machine = machine}
 	for s in stdout:trim():lines() do
@@ -1337,16 +1410,16 @@ function text_api.update_machine_info(machine)
 	end
 
 	assert(query([[
-	update machine set
-		os_ver    = :os_ver,
-		mysql_ver = :mysql_ver,
-		cpu       = :cpu,
-		cores     = :cores,
-		ram       = :ram,
-		hdd       = :hdd
-	where
-		machine = :machine
-	]], t).affected_rows == 1)
+		update machine set
+			os_ver    = :os_ver,
+			mysql_ver = :mysql_ver,
+			cpu       = :cpu,
+			cores     = :cores,
+			ram       = :ram,
+			hdd       = :hdd
+		where
+			machine = :machine
+		]], t).affected_rows == 1)
 	rowset_changed'machines'
 
 	t.ram = kbytes(t.ram, 1)
@@ -1354,18 +1427,19 @@ function text_api.update_machine_info(machine)
 	for i,k in ipairs(t) do
 		outprint(_('%20s %s', k, t[k]))
 	end
+	notify('Machine info updated for %s.', machine)
 end
-cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.out_update_machine_info)
+cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.update_machine_info)
 
 --machine reboot -------------------------------------------------------------
 
-function json_api.machine_reboot(machine)
+function api.machine_reboot(opt, machine)
 	mm.ssh(machine, {
 		'reboot',
 	}, {
 		name = 'machine_reboot '..(machine or ''),
 	})
-	return {notify = 'Machine rebooted: '..machine}
+	notify('Machine rebooted: %s', machine)
 end
 
 --machine ssh hostkey update -------------------------------------------------
@@ -1383,29 +1457,28 @@ local function gen_known_hosts_file()
 	save(mm.known_hosts_file(), concat(t, '\n'))
 end
 
-function json_api.ssh_hostkey_update(machine)
+function api.ssh_hostkey_update(opt, machine)
 	local ip, machine = mm.ip(machine)
-	local task = mm.exec({
+	local s = mm.exec({
 		sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', ip
 	}, {
 		name = 'ssh_hostkey_update '..machine,
-		capture_stdout = true,
-	})
-	check500(task.exit_code == 0, 'ssh-keyscan exit code: %d', task.exit_code)
-	local s = task:stdout()
+		out_stdout = false,
+		out_stderr = false,
+	}):stdout()
 	assert(update_row('machine', {machine, ssh_hostkey = s}).affected_rows == 1)
 	gen_known_hosts_file()
-	return {notify = 'Host key updated for '..machine}
+	notify('Host key updated for %s', machine)
 end
 cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
 	mm.ssh_hostkey_update)
 
 --machine ssh key update -----------------------------------------------------
 
-function json_api.ssh_key_update(machine)
+function api.ssh_key_update(opt, machine)
 	note('mm', 'upd-key', '%s', machine)
 	local pubkey = mm.ssh_pubkey()
-	local task = mm.ssh_sh(machine, [=[
+	stored_pubkey = mm.ssh_sh(machine, [=[
 		#use ssh mysql user
 		has_mysql && {
 			mysql_update_pass localhost root "$MYSQL_ROOT_PASS"
@@ -1419,11 +1492,8 @@ function json_api.ssh_key_update(machine)
 		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
 	}, {
 		name = 'ssh_key_update '..machine,
-		capture_stdout = true,
-	})
-	check500(task.exit_code == 0, 'SSH key update script exit code %d for %s',
-		task.exit_code, machine)
-	local stored_pubkey = task:stdout():trim()
+		out_stdout = false,
+	}):stdout():trim()
 	check500(stored_pubkey == pubkey, 'SSH public key NOT updated for '..machine)
 
 	cp(mm.keyfile(), mm.keyfile(machine))
@@ -1433,38 +1503,29 @@ function json_api.ssh_key_update(machine)
 	update_row('machine', {machine, ssh_key_ok = true})
 	rowset_changed'machines'
 
-	return {notify = 'SSH key updated for '..machine}
+	notify('SSH key updated for %s', machine)
 end
-cmd_ssh_keys('ssh_key_update [MACHINE]', 'Update SSH key(s)',
-	function(machine)
-		callm('ssh_key_update', machine)
-	end)
+cmd_ssh_keys('ssh_key_update [MACHINE]', 'Update SSH key(s)', mm.ssh_key_update)
 
 --machine ssh key check ------------------------------------------------------
 
-function json_api.ssh_key_check(machine)
-	local task = mm.ssh_sh(machine, [[
+function api.ssh_key_check(opt, machine)
+	local host_pubkey = mm.ssh_sh(machine, [[
 		#use ssh
 		ssh_pubkey mm
 	]], nil, {
 		name = 'ssh_key_check '..(machine or ''),
 		keyed = false, nolog = true,
-		capture_stdout = true,
-	})
-	check500(task.exit_code == 0, 'SSH key check script exit code %d for %s',
-		task.exit_code, machine)
-	local host_pubkey = task:stdout():trim()
+		out_stdout = false,
+	}):stdout():trim()
 	local ok = host_pubkey == mm.ssh_pubkey()
 	update_row('machine', {machine, ssh_key_ok = ok})
 	rowset_changed'machines'
-	return {
-		notify = 'SSH key is'..(ok and '' or ' NOT')..' up-to-date for '..machine,
-		notify_kind = not ok and 'warn' or nil,
-		ssh_key_ok = ok,
-	}
+	notify_kind(not ok and 'warn' or nil,
+		'SSH key is%s up-to-date for %s', ok and '' or ' NOT', ''..machine)
 end
 cmd_ssh_keys('ssh-key-check [MACHINE]', 'Check that SSH keys are up-to-date',
-	function(machine)
+	function(opt, machine)
 		callm('ssh_key_check', machine)
 	end)
 
@@ -1486,26 +1547,24 @@ local function git_hosting_vars()
 	return vars
 end
 
-function json_api.git_keys_update(machine)
+function api.git_keys_update(opt, machine)
 	local vars = git_hosting_vars()
-	local task = mm.ssh_sh(machine, [=[
+	mm.ssh_sh(machine, [=[
 		#use ssh
 		ssh_git_keys_update
 	]=], vars, {
-		task = 'git_keys_update '..(machine or ''),
+		name = 'git_keys_update '..(machine or ''),
 	})
-	check500(task.exit_code == 0, 'Git keys update script exit code %d for %s',
-		task.exit_code, machine)
-	return {notify = 'Git keys updated for '..machine}
+	notify('Git keys updated for %s', machine)
 end
 cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
-	function(machine)
+	function(opt, machine)
 		callm('git_keys_update', machine)
 	end)
 
 --machine prepare ------------------------------------------------------------
 
-function hybrid_api.prepare(to_text, machine)
+function api.prepare(opt, machine)
 	mm.ip(machine)
 	local vars = git_hosting_vars()
 	vars.MYSQL_ROOT_PASS = mm.mysql_root_pass(machine)
@@ -1515,38 +1574,30 @@ function hybrid_api.prepare(to_text, machine)
 		machine_prepare
 	]=], vars, {
 		name = 'prepare '..machine,
-		out_stdouterr = to_text,
 	})
-	return {notify = 'Machine prepared: '..machine}
+	notify('Machine prepared: %s', machine)
 end
-cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.out_prepare)
+cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare)
 
 --deploy listing -------------------------------------------------------------
 
-function text_api.deploys()
-	local rows, cols = query({
-		compact=1,
-	}, [[
-		select
-			deploy,
-			machine,
-			app,
-			env,
-			deployed_at,
-			started_at,
-			wanted_app_version   app_want,
-			deployed_app_version app_depl,
-			deployed_app_commit  app_comm,
-			wanted_sdk_version   sdk_want,
-			deployed_sdk_version sdk_depl,
-			deployed_sdk_commit  sdk_comm,
-			repo
-		from deploy
-		order by pos, ctime
-	]])
-	outpqr(rows, cols)
-end
-cmd_deployments('d|deploys', 'Show the list of deployments', mm.out_deploys)
+cmd_deployments('d|deploys', 'Show the list of deployments', function()
+	mm.print_rowset(opt, 'deploys', ([[
+		deploy
+		machine
+		active
+		app
+		env
+		deployed_at
+		started_at
+		wanted_app_version
+		deployed_app_version
+		deployed_app_commit
+		wanted_sdk_version
+		deployed_sdk_version
+		deployed_sdk_commit
+	]]):gsub('%s+', ','))
+end)
 
 --deploy deploy --------------------------------------------------------------
 
@@ -1593,7 +1644,7 @@ local function deploy_vars(deploy, new_deploy)
 	return vars, d
 end
 
-function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
+function api.deploy(opt, deploy, app_ver, sdk_ver)
 	if app_ver or sdk_ver then
 		update_row('deploy', {
 			deploy,
@@ -1603,17 +1654,13 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 	end
 	local vars = deploy_vars(deploy)
 	update(vars, git_hosting_vars())
-	local task = mm.ssh_sh(vars.MACHINE, [[
+	local s = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		deploy
 	]], vars, {
 		name = 'deploy '..deploy,
-		capture_stdout = true,
-		out_stdouterr = to_text,
-	})
-	check500(task.exit_code == 0, 'deploy exit code: %d', task.exit_code)
-
-	local s = task:stdout()
+		out_stdout = false,
+	}):stdout()
 	local app_commit = s:match'app_commit=([^%s]+)'
 	local sdk_commit = s:match'sdk_commit=([^%s]+)'
 	local now = time()
@@ -1628,39 +1675,39 @@ function hybrid_api.deploy(to_text, deploy, app_ver, sdk_ver)
 	})
 	rowset_changed'deploys'
 
-	return {notify = 'Deployed: '..deploy}
+	notify('Deployed: %s', deploy)
 end
 cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
-	mm.out_deploy)
+	mm.deploy)
 
 --deploy remove --------------------------------------------------------------
 
-function hybrid_api.deploy_remove(to_text, deploy)
+function api.deploy_remove(opt, deploy)
 	local vars = deploy_vars(deploy)
-	local task = mm.ssh_sh(vars.MACHINE, [[
+	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		deploy_remove "$DEPLOY"
 	]], {
 		DEPLOY = vars.DEPLOY,
 	}, {
 		name = 'deploy_remove '..deploy,
-		out_stdouterr = to_text,
 	})
-	check500(task.exit_code == 0, 'deploy_remove exit code: %d', task.exit_code)
 
 	update_row('deploy', {
 		vars.DEPLOY,
 		deployed_app_version = null,
 		deployed_sdk_version = null,
-		deployed_app_commit = null,
-		deployed_sdk_commit = null,
+		deployed_app_commit  = null,
+		deployed_sdk_commit  = null,
+		deployed_at = null,
+		started_at  = null,
 	})
 	rowset_changed'deploys'
 
-	return {notify = 'Deploy removed: '..deploy}
+	notify('Deploy removed: %s', deploy)
 end
 cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
-	mm.out_deploy_remove)
+	mm.deploy_remove)
 
 --deploy rename --------------------------------------------------------------
 
@@ -1675,7 +1722,7 @@ local function validate_deploy(d)
 	if d:find'__' then return 'cannot contain double-underscores' end
 end
 
-function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
+function api.deploy_rename(opt, old_deploy, new_deploy)
 
 	checkarg(new_deploy, 'new_deploy required')
 	if new_deploy == old_deploy then return end
@@ -1693,7 +1740,7 @@ function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
 
 	if machine then
 		local vars = deploy_vars(old_deploy, new_deploy)
-		local task = mm.ssh_sh(machine, [=[
+		mm.ssh_sh(machine, [=[
 			#use deploy
 			deploy_rename "$OLD_DEPLOY" "$NEW_DEPLOY"
 		]=], update({
@@ -1701,18 +1748,16 @@ function hybrid_api.deploy_rename(to_text, old_deploy, new_deploy)
 			NEW_DEPLOY = new_deploy,
 		}, vars), {
 			name = 'deploy_rename '..old_deploy,
-			out_stdouterr = to_text,
 		})
-		check500(task.exit_code == 0, 'deploy_rename exit code: %d', task.exit_code)
 	end
 
 	update_row('deploy', {old_deploy, deploy = new_deploy})
 
-	return {notify = 'Deploy renamed from '..old_deploy..' to '..new_deploy}
+	notify('Deploy renamed from %s to %s', old_deploy, new_deploy)
 end
 cmd_deployments('deploy-rename OLD_DEPLOY NEW_DEPLOY',
 	'Rename a deployment (requires app restart)',
-	mm.out_deploy_rename)
+	mm.deploy_rename)
 
 --deploy app run -------------------------------------------------------------
 
@@ -1723,7 +1768,7 @@ local function find_cmd(...)
 	end
 end
 
-function hybrid_api.app(to_text, deploy, ...)
+function api.app(opt, deploy, ...)
 	local vars = deploy_vars(deploy)
 	local args = proc.quote_args_unix(...)
 	local task_name = 'app '..deploy..' '..args
@@ -1736,8 +1781,7 @@ function hybrid_api.app(to_text, deploy, ...)
 			args = args,
 		}, {
 			name = task_name,
-			out_stdouterr = to_text,
-			capture_stderr = true,
+			allow_fail = true,
 		})
 	local ok = task.exit_code == 0
 	if ok then
@@ -1747,12 +1791,9 @@ function hybrid_api.app(to_text, deploy, ...)
 			rowset_changed'deploys'
 		end
 	end
-	return {
-		notify = task:stderr():gsub('^ABORT: ', ''),
-		notify_kind = not ok and 'error' or nil,
-	}
+	notify_kind(not ok and 'error' or nil, (task:stderr():gsub('^ABORT: ', '')))
 end
-cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.out_app)
+cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app)
 
 --remote logging -------------------------------------------------------------
 
@@ -1855,10 +1896,6 @@ function mm.log_server(machine)
 	task:setstatus'running'
 	return task
 end
-function mm.json_api.log_server(machine)
-	mm.log_server(machine)
-	return {notify = 'Log server started'}
-end
 
 function mm.log_server_rpc(deploy, cmd, ...)
 	local chan = log_server_chan[deploy]
@@ -1875,7 +1912,7 @@ rowset.deploy_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'id'      , hidden = true},
-		{name = 'time'    , max_w = 100, type = 'timestamp'},
+		{name = 'time'    , 'time', max_w = 100},
 		{name = 'deploy'  , max_w =  80},
 		{name = 'severity', max_w =  60},
 		{name = 'module'  , max_w =  60},
@@ -1952,12 +1989,12 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'deploy'},
-		{name = 'clock'    , type = 'number'   , },
-		{name = 'cpu'      , type = 'number'   , text = 'CPU'},
-		{name = 'cpu_sys'  , type = 'number'   , text = 'CPU (kernel)'},
-		{name = 'rss'      , type = 'filesize' , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
-		{name = 'ram_free' , type = 'filesize' , text = 'RAM free (total)', filesize_magnitude = 'M'},
-		{name = 'ram_size' , type = 'filesize' , text = 'RAM size', hidden = true},
+		{name = 'clock'    , 'double'     , },
+		{name = 'cpu'      , 'percent_int', text = 'CPU'},
+		{name = 'cpu_sys'  , 'percent_int', text = 'CPU (kernel)'},
+		{name = 'rss'      , 'filesize'   , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
+		{name = 'ram_free' , 'filesize'   , text = 'RAM free (total)', filesize_magnitude = 'M'},
+		{name = 'ram_size' , 'filesize'   , text = 'RAM size', hidden = true},
 	}
 	self.pk = ''
 	function self:load_rows(rs, params)
@@ -1977,8 +2014,8 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 							local clock = t.time - now
 							if clock0 then
 								local dt = (clock - clock0)
-								local up = (t.utime - utime0) / dt * 100
-								local sp = (t.stime - stime0) / dt * 100
+								local up = (t.utime - utime0) / dt
+								local sp = (t.stime - stime0) / dt
 								add(rs.rows, {
 									deploy,
 									clock,
@@ -2004,15 +2041,15 @@ rowset.machine_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'machine'},
-		{name = 'clock'        , type = 'number'   , },
-		{name = 'max_cpu'      , type = 'number'   , text = 'Max CPU'},
-		{name = 'max_cpu_sys'  , type = 'number'   , text = 'Max CPU (kernel)'},
-		{name = 'avg_cpu'      , type = 'number'   , text = 'Avg CPU'},
-		{name = 'avg_cpu_sys'  , type = 'number'   , text = 'Avg CPU (kernel)'},
-		{name = 'ram_used'     , type = 'filesize' , filesize_magnitude = 'M', text = 'RAM Used'},
-		{name = 'hdd_used'     , type = 'filesize' , filesize_magnitude = 'M', text = 'Disk Used'},
-		{name = 'ram_size'     , type = 'filesize' , filesize_magnitude = 'M', text = 'RAM Size'},
-		{name = 'hdd_size'     , type = 'filesize' , filesize_magnitude = 'M', text = 'Disk Size'},
+		{name = 'clock'        , 'double'     , },
+		{name = 'max_cpu'      , 'percent_int', text = 'Max CPU'},
+		{name = 'max_cpu_sys'  , 'percent_int', text = 'Max CPU (kernel)'},
+		{name = 'avg_cpu'      , 'percent_int', text = 'Avg CPU'},
+		{name = 'avg_cpu_sys'  , 'percent_int', text = 'Avg CPU (kernel)'},
+		{name = 'ram_used'     , 'filesize'   , filesize_magnitude = 'M', text = 'RAM Used'},
+		{name = 'hdd_used'     , 'filesize'   , filesize_magnitude = 'M', text = 'Disk Used'},
+		{name = 'ram_size'     , 'filesize'   , filesize_magnitude = 'M', text = 'RAM Size'},
+		{name = 'hdd_size'     , 'filesize'   , filesize_magnitude = 'M', text = 'Disk Size'},
 	}
 	self.pk = ''
 	function self:load_rows(rs, params)
@@ -2046,10 +2083,10 @@ rowset.machine_procinfo_log = virtual_rowset(function(self)
 							avg_stime = sum_stime / #t.cputimes
 							if clock0 then
 								local dt = (t.clock - clock0)
-								local max_tp = (max_ttime - max_ttime0) / dt * 100
-								local max_sp = (max_stime - max_stime0) / dt * 100
-								local avg_tp = (avg_ttime - avg_ttime0) / dt * 100
-								local avg_sp = (avg_stime - avg_stime0) / dt * 100
+								local max_tp = (max_ttime - max_ttime0) / dt
+								local max_sp = (max_stime - max_stime0) / dt
+								local avg_tp = (avg_ttime - avg_ttime0) / dt
+								local avg_sp = (avg_stime - avg_stime0) / dt
 								add(rs.rows, {
 									machine,
 									i,
@@ -2097,8 +2134,8 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 						local t = log_queue:item_at(log_queue:count() + i)
 						if t then
 							local dt = (t.clock - clock0)
-							local up = (t.utime - utime0) / dt * 100
-							local sp = (t.stime - stime0) / dt * 100
+							local up = (t.utime - utime0) / dt
+							local sp = (t.stime - stime0) / dt
 							add(rs.rows, {machine, i, up + sp, up, t.rss})
 							utime0 = t.utime
 							stime0 = t.stime
@@ -2183,7 +2220,7 @@ rowset.machine_backups = sql_rowset{
 			b.start_time ,
 			b.duration   ,
 			b.checksum   ,
-			b.name
+			b.note
 		from mbk b
 	]],
 	where_all = 'b.machine in (:param:filter)',
@@ -2191,7 +2228,7 @@ rowset.machine_backups = sql_rowset{
 	parent_col = 'parent_mbk',
 	tree_col = 'machine',
 	update_row = function(self, row)
-		self:update_into('mbk', row, 'name')
+		self:update_into('mbk', row, 'note')
 	end,
 	delete_row = function(self, row)
 		mm.machine_backup_remove(row['mbk:old'])
@@ -2213,6 +2250,9 @@ rowset.machine_backup_deploys = sql_rowset{
 	]],
 	where_all = 'mbk in (:param:filter)',
 	pk = 'mbk deploy',
+	delete_row = function(self, row)
+		mm.machine_backup_remove(row['mbk:old'])
+	end,
 }
 
 rowset.machine_backup_copies = sql_rowset{
@@ -2224,6 +2264,7 @@ rowset.machine_backup_copies = sql_rowset{
 			parent_mbk_copy,
 			machine,
 			start_time,
+			size,
 			duration
 		from
 			mbk_copy
@@ -2235,14 +2276,14 @@ rowset.machine_backup_copies = sql_rowset{
 	end,
 }
 
-function text_api.machine_backups(machine)
+function api.print_machine_backups(opt, machine)
 	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
 			c.mbk_copy  copy,
 			c.parent_mbk_copy `from`,
-			b.name,
+			b.note,
 			b.machine    `of`,
 			c.machine    `in`,
 			b.start_time `made`,
@@ -2269,7 +2310,7 @@ function text_api.machine_backups(machine)
 		order by
 			c.mbk_copy
 	]], {machine = machine})
-	checkfound(not machine or #rows > 0, 'machine not found')
+	checkfound(not machine or #rows > 0, 'machine not found: %s', machine)
 	outpqr(rows, cols, {
 		size = 'sum',
 		made = 'max',
@@ -2277,7 +2318,7 @@ function text_api.machine_backups(machine)
 		copy_took = 'max',
 	})
 end
-cmd_mbk('mbk|machine-backups MACHINE', 'Show machine backups', mm.out_machine_backups)
+cmd_mbk('mbk|machine-backups MACHINE', 'Show machine backups', mm.print_machine_backups)
 
 local function parse_backup_info(s)
 	local size, checksum = s:match'^([^%s]+)%s+([^%s]+)'
@@ -2287,7 +2328,7 @@ local function parse_backup_info(s)
 	return size, checksum
 end
 
-function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
+function api.machine_backup(opt, machine, note, parent_mbk_copy, dest_machines)
 
 	machine = checkarg(machine, 'machine required')
 
@@ -2297,9 +2338,9 @@ function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 			select c.mbk_copy from mbk_copy c, mbk b
 			where c.mbk = b.mbk and b.machine = :machine and c.machine = :machine
 			order by c.mbk desc limit 1
-		]], {machine = machine}), 'no local backup of machine "%s" found for "latest"', nachine)
+		]], {machine = machine}), 'no local backup of machine "%s" found for "latest"', machine)
 	elseif parent_mbk_copy then
-		parent_mbk_copy = checkarg(parent_mbk_copy, 'invalid backup copy')
+		parent_mbk_copy = checkarg(id_arg(parent_mbk_copy), 'invalid backup copy')
 	end
 
 	local parent_mbk = parent_mbk_copy and checkarg(first_row([[
@@ -2315,7 +2356,7 @@ function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 	local mbk = insert_row('mbk', {
 		parent_mbk = parent_mbk,
 		machine = machine,
-		name = name,
+		note = note,
 		start_time = start_time,
 	})
 	rowset_changed'machine_backups'
@@ -2358,10 +2399,8 @@ function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 		PARENT_mbk = parent_mbk,
 	}, {
 		name = task_name,
-		capture_stdout = true,
-		out_stdouterr = to_text,
+		out_stdout = false,
 	})
-	check500(task.exit_code == 0, 'machine_backup exit code: '..task.exit_code)
 
 	local size, checksum = parse_backup_info(task:stdout())
 
@@ -2379,15 +2418,12 @@ function hybrid_api.machine_backup(to_text, machine, name, parent_mbk_copy, ...)
 	})
 	rowset_changed'machine_backup_copies'
 
-	for i=1,select('#',...) do
-		local machine = select(i,...)
-		;(to_text and mm.out_machine_backup_copy or mm.machine_backup_copy)(mbk_copy, machine)
-	end
+	mm.machine_backup_copy(opt, mbk_copy, dest_machines)
 
-	return {notify = 'Machine backup done for '..machine}
+	notify('Machine backup done for %s', machine)
 end
-cmd_mbk('mbk-backup MACHINE [NAME] [UP_COPY] [MACHINE1,...]',
-	'Backup a machine', mm.out_machine_backup)
+cmd_mbk('mbk-backup MACHINE [NOTE] [UP_COPY] [MACHINE1,...]',
+	'Backup a machine', mm.machine_backup)
 
 local function rsync_vars(machine)
 	return {
@@ -2413,59 +2449,112 @@ local function mbk_copy_info(mbk_copy)
 	]], mbk_copy), 'backup copy not found')
 end
 
-function hybrid_api.machine_backup_copy(to_text, src_mbk_copy, machine)
+function api.machine_backup_copy(opt, src_mbk_copy, dest_machines)
 
-	machine = checkarg(machine)
-	src_mbk_copy = checkarg(id_arg(src_mbk_copy, 'backup copy required'))
-	local c = mbk_copy_info(src_mbk_copy)
+	src_mbk_copy = checkarg(id_arg(src_mbk_copy), 'backup copy required')
 
-	checkarg(c.duration, 'Backup copy %d is not complete (didn\'t finish)', c.mbk_copy)
-	checkarg(machine ~= c.machine, 'Destination machine same as the source machine.')
+	local function copy(src_mbk_copy, dest_machine)
 
-	--find the parent_mbk's copy on the destination machine.
-	local parent_mbk_copy = c.parent_mbk and checkarg(first_row([[
-		select mbk_copy from mbk_copy
-		where mbk = ? and machine = ? and duration is not null
-	]], c.parent_mbk, machine),
-		'A copy of the backup\'s parent backup was not found on machine "%s"', machine)
+		local c = mbk_copy_info(src_mbk_copy)
 
-	local mbk_copy = insert_or_update_row('mbk_copy', {
-		mbk = c.mbk,
-		parent_mbk_copy = parent_mbk_copy,
-		machine = machine,
-		start_time = time(),
-	})
-	rowset_changed'machine_backup_copies'
+		checkarg(dest_machine ~= c.machine,
+			'Cannot copy backup copy %d from machine %s to the same machine.',
+				src_mbk_copy, c.machine)
 
-	local task = mm.ssh_sh(c.machine, [[
-		#use ssh backup
-		machine_backup_copy "$HOST" "$mbk" "$parent_mbk"
-	]], update({
-		mbk = c.mbk,
-		parent_mbk = c.parent_mbk,
-	}, rsync_vars(machine)), {
-		name = 'machine_backup_copy '..src_mbk_copy..' '..machine,
-		out_stdouterr = to_text,
-	})
-	check500(task.exit_code == 0, 'machine_backup_copy exit code: %d', task.exit_code)
+		checkarg(c.duration,
+			'Backup copy %d is not complete (didn\'t finish)',
+				src_mbk_copy)
 
-	local machine_backup_copy_check = to_text
-		and mm.out_machine_backup_copy_check
-		or mm.machine_backup_copy_check
+		checkarg(first_row([[
+			select machine from machine
+			where active = 1 and machine = ?
+		]], dest_machine), 'invalid destination machine: %s', dest_machine)
 
-	machine_backup_copy_check(mbk_copy)
+		local parent_mbk_copy
 
-	update_row('mbk_copy', {
-		mbk_copy,
-		duration = task.duration,
-	})
-	rowset_changed'machine_backup_copies'
+		if c.parent_mbk then
 
-	return {notify = _('Backup copied: %d, copy id: %d', c.mbk, mbk_copy)}
+			--find the parent_mbk's copy on the destination machine.
+			parent_mbk_copy = first_row([[
+				select mbk_copy from mbk_copy
+				where mbk = ? and machine = ? and duration is not null
+			]], c.parent_mbk, dest_machine)
+
+			if not parent_mbk_copy then
+
+				--copy the parent_mbk to the destination machine.
+				local src_parent_mbk_copy = first_row([[
+					select mbk_copy from mbk_copy
+					where mbk = ? and machine = ?
+				]], c.parent_mbk, c.machine)
+
+				parent_mbk_copy = copy(src_parent_mbk_copy, dest_machine)
+			end
+		end
+
+		local mbk_copy = insert_or_update_row('mbk_copy', {
+			mbk = c.mbk,
+			parent_mbk_copy = parent_mbk_copy,
+			machine = dest_machine,
+			start_time = time(),
+		})
+		rowset_changed'machine_backup_copies'
+
+		local task = mm.ssh_sh(c.machine, [[
+			#use ssh backup
+			machine_backup_copy "$HOST" "$mbk" "$parent_mbk"
+		]], update({
+			mbk = c.mbk,
+			parent_mbk = c.parent_mbk,
+		}, rsync_vars(dest_machine)), {
+			name = 'machine_backup_copy '..src_mbk_copy..' '..dest_machine,
+			out_stdour = false,
+		})
+
+		mm.machine_backup_copy_check(opt, mbk_copy)
+
+		update_row('mbk_copy', {
+			mbk_copy,
+			duration = task.duration,
+		})
+		rowset_changed'machine_backup_copies'
+
+		notify('Machine backup copy %d copied to %s as backup copy %d.',
+			src_mbk_copy, dest_machine, mbk_copy)
+	end
+
+	local dm
+	if not dest_machines then
+
+		local machine = checkarg(first_row([[
+			select machine from mbk_copy where mbk_copy = ?
+		]], src_mbk_copy), 'backup copy not found: %d', src_mbk_copy)
+
+		dm = query([[
+			select dest_machine
+			from machine_backup_copy_machine
+			where machine = ?
+		]], machine)
+
+		checkfound(#dm > 0, 'no copy machines for backups of machine: %s', machine)
+	else
+		dm = words(dest_machines:gsub(',', ' '))
+	end
+
+	if #dm == 1 then
+		copy(src_mbk_copy, dm[1])
+	else
+		local errs = {}
+		for _,dest_machine in ipairs(dm) do
+			local ok, err = errors.pcall(copy, src_mbk_copy, dest_machine)
+			if not ok then add(errs, tostring(err)) end
+		end
+		check500(#errs == 0, cat(errs, '\n'))
+	end
 end
-cmd_mbk('mbk-copy COPY MACHINE', 'Copy a machine backup', mm.out_machine_backup_copy)
+cmd_mbk('mbk-copy COPY [MACHINE1,...]', 'Copy a machine backup', mm.machine_backup_copy)
 
-function hybrid_api.machine_backup_copy_check(to_text, mbk_copy)
+function api.machine_backup_copy_check(opt, mbk_copy)
 	local c = mbk_copy_info(mbk_copy)
 	local task = mm.ssh_sh(c.machine, [[
 		#use backup
@@ -2474,76 +2563,86 @@ function hybrid_api.machine_backup_copy_check(to_text, mbk_copy)
 		mbk = c.mbk,
 	}, {
 		name = 'machine_backup_info '..c.mbk_copy, keyed = false,
-		capture_stdout = true,
+		out_stdout = false,
 	})
-	check500(task.exit_code == 0, 'machine_backup_info exit code: %d', task.exit_code)
 	local size, checksum = parse_backup_info(task:stdout())
-	check500(checksum == c.checksum, 'Checksums differ:\n  expected: %s\n  computed: %s',
+	check500(checksum == c.checksum, 'Machine backup copy %d from %s BAD CHECKSUM:'
+		..'\n  expected: %s\n  computed: %s',
+		c.mbk_copy, c.machine,
 		c.checksum, checksum)
 
 	update_row('mbk_copy', {c.mbk_copy, size = size})
 	rowset_changed'machine_backup_copies'
 
-	local msg = _('Backup copy %d OK. Size: %s', c.mbk_copy, kbytes(size))
-	if to_text then out(msg) end
-	return {notify = msg}
+	notify('Machine backup copy %d from %s checksum OK. Backup copy size: %s.',
+		c.mbk_copy, c.machine, kbytes(size))
 end
-cmd_mbk('mbk-check COPY', 'Check a machine backup\'s integrity', mm.out_machine_backup_copy_check)
+cmd_mbk('mbk-check COPY', 'Check a machine backup\'s integrity', mm.machine_backup_copy_check)
 
-function json_api.machine_backup_copy_remove(mbk_copy)
+function api.machine_backup_copy_remove(opt, mbk_copy)
 
-	mbk_copy = checkarg(id_arg(mbk_copy, 'backup copy required'))
-	local c = mbk_copy_info(mbk_copy)
+	mbk_copy = checkarg(id_arg(mbk_copy), 'backup copy required')
 
-	checkarg(not first_row([[
-		select 1 from mbk_copy where parent_mbk_copy = ? limit 1
-	]], mbk_copy), 'Backup has derived incremental backups. Remove those first.')
+	local function remove(mbk_copy)
 
-	local task = mm.ssh_sh(c.machine, [[
-		#use backup
-		machine_backup_remove "$mbk"
-	]], {
-		mbk = c.mbk,
-	}, {
-		name = 'machine_backup_remove '..mbk_copy,
-	})
-	check500(task.exit_code == 0, 'machine_backup_remove exit code: %d', task.exit_code)
+		local c = mbk_copy_info(mbk_copy)
 
-	delete_row('mbk_copy', {mbk_copy})
-	rowset_changed'machine_backup_copies'
+		--remove this backup copy's children recursively first.
+		for _,mbk_copy in each_row_vals([[
+			select mbk_copy from mbk_copy where parent_mbk_copy = ?
+		]], mbk_copy) do
+			remove(mbk_copy)
+		end
 
-	local backup_removed
-	if first_row('select count(1) from mbk_copy where mbk = ?', c.mbk) == 0 then
-		delete_row('mbk', {c.mbk})
-		rowset_changed'machine_backups'
-		backup_removed = true
+		mm.ssh_sh(c.machine, [[
+			#use backup
+			machine_backup_remove "$mbk"
+		]], {
+			mbk = c.mbk,
+		}, {
+			name = 'machine_backup_remove '..mbk_copy,
+		})
+
+		delete_row('mbk_copy', {mbk_copy})
+		rowset_changed'machine_backup_copies'
+
+		local backup_removed
+		if first_row('select count(1) from mbk_copy where mbk = ?', c.mbk) == 0 then
+			delete_row('mbk', {c.mbk})
+			rowset_changed'machine_backups'
+			backup_removed = true
+		end
+
+		return backup_removed
 	end
 
-	return {notify = 'Backup copy removed: '..mbk_copy..'.'
-		..(backup_removed and ' That was the last copy of the backup.' or '')}
+	local backup_removed = remove(mbk_copy)
+
+	notify('Backup copy removed: %s.%s', mbk_copy,
+		backup_removed and ' That was the last copy of the backup.' or '')
 end
-cmd_mbk('mbk-remove COPY1[-COPY2] ...', 'Remove machine backup copies', function(...)
-	for i=1,select('#',...) do
-		local s = select(i,...)
+cmd_mbk('mbk-remove COPY1[-COPY2],...', 'Remove machine backup copies', function(copies)
+	checkarg(copies, 'backup copy required')
+	for i,s in ipairs(words(copies:gsub(',', ' '))) do
 		local mbk_copy1, mbk_copy2 = s, s
-		if s:find'%-' then
+		if s:find'%-' then --COPY1-COPY2
 			mbk_copy1, mbk_copy2 = s:match'(.-)%-(.*)'
-		elseif s:find'%.%.' then
+		elseif s:find'%.%.' then --COPY1..COPY2
 			mbk_copy1, mbk_copy2 = s:match'(.-)%.%.(.*)'
 		end
-		mbk_copy1 = checkarg(mbk_copy1, 'invalid backup copy')
-		mbk_copy2 = checkarg(mbk_copy2, 'invalid backup copy')
-		for mbk_copy = max(mbk_copy1, mbk_copy2), min(mbk_copy1, mbk_copy2), -1 do
-			callp(mm.machine_backup_copy_remove, mbk_copy)
+		mbk_copy1 = checkarg(id_arg(mbk_copy1), 'invalid backup copy')
+		mbk_copy2 = checkarg(id_arg(mbk_copy2), 'invalid backup copy')
+		for mbk_copy = min(mbk_copy1, mbk_copy2), max(mbk_copy1, mbk_copy2), 1 do
+			mm.machine_backup_copy_remove(opt, mbk_copy)
 		end
 	end
 end)
 
-function hybrid_api.machine_restore(to_text, mbk_copy)
+function api.machine_restore(opt, mbk_copy)
 
 	local c = mbk_copy_info(mbk_copy)
 
-	local task = mm.ssh_sh(c.machine, [[
+	mm.ssh_sh(c.machine, [[
 		#use backup
 		machine_restore "$mbk"
 	]], {
@@ -2551,14 +2650,13 @@ function hybrid_api.machine_restore(to_text, mbk_copy)
 	}, {
 		name = 'machine_restore '..c.machine,
 	})
-	check500(task.exit_code == 0, 'machine_restore exit code: %d', task.exit_code)
 
 	query[[
 		#
 	]]
 
 end
-cmd_mbk('mbk-restore COPY', 'Restore a machine', mm.out_machine_restore)
+cmd_mbk('mbk-restore COPY', 'Restore a machine', mm.machine_restore)
 
 --deploy backups -------------------------------------------------------------
 
@@ -2569,7 +2667,7 @@ rowset.deploy_backups = sql_rowset{
 			dbk        ,
 			deploy     ,
 			start_time ,
-			name       ,
+			note       ,
 			duration   ,
 			checksum
 		from dbk
@@ -2577,7 +2675,7 @@ rowset.deploy_backups = sql_rowset{
 	where_all = 'deploy in (:param:filter)',
 	pk = 'dbk',
 	update_row = function(self, row)
-		self:update_into('dbk', row, 'name')
+		self:update_into('dbk', row, 'note')
 	end,
 	delete_row = function(self, row)
 		mm.deploy_backup_remove(row['dbk:old'])
@@ -2603,14 +2701,14 @@ rowset.deploy_backup_copies = sql_rowset{
 	end,
 }
 
-function text_api.deploy_backups(deploy)
+function api.print_deploy_backups(opt, deploy)
 	local rows, cols = query({
 		compact=1,
 	}, [[
 		select
 			c.dbk_copy,
 			b.deploy,
-			b.name,
+			b.note,
 			b.deploy `of`,
 			c.machine `in`,
 			b.start_time  `made`,
@@ -2638,9 +2736,11 @@ function text_api.deploy_backups(deploy)
 		copy_took = 'max',
 	})
 end
-cmd_dbk('dbk|deploy-backups DEPLOY', 'Show deploy backups', mm.out_deploy_backups)
+cmd_dbk('dbk|deploy-backups DEPLOY', 'Show deploy backups', mm.print_deploy_backups)
 
-function hybrid_api.deploy_backup(to_text, deploy, name, ...)
+function api.deploy_backup(opt, deploy, note, ...)
+
+	deploy = checkarg(deploy, 'deploy required')
 
 	local d = checkfound(first_row([[
 		select
@@ -2652,7 +2752,7 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 			deployed_at
 		from deploy
 		where deploy = ?
-	]], checkarg(deploy, 'deploy required')), 'deploy not found')
+	]], deploy), 'deploy not found')
 
 	checkarg(d.deployed_at, '%s is not deployed.', deploy)
 
@@ -2676,7 +2776,7 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 		sdk_version = d.deployed_sdk_version,
 		app_commit  = d.deployed_app_commit,
 		sdk_commit  = d.deployed_sdk_commit,
-		name = name,
+		note = note,
 		start_time = start_time,
 	})
 
@@ -2698,10 +2798,8 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 		parent_dbk = parent_dbk,
 	}, {
 		name = task_name,
-		capture_stdout = true,
-		out_stdouterr = to_text,
+		out_stdout = false,
 	})
-	check500(task.exit_code == 0, 'deploy_backup exit code: %d', task.exit_code)
 
 	local size, checksum = parse_backup_info(task:stdout())
 
@@ -2721,13 +2819,13 @@ function hybrid_api.deploy_backup(to_text, deploy, name, ...)
 
 	for i=1,select('#',...) do
 		local machine = select(i,...)
-		;(to_text and mm.out_dbk_copy or mm.dbk_copy)(dbk_copy, deploy)
+		mm.dbk_copy(opt, dbk_copy, deploy)
 	end
 
-	return {notify = 'Backup done for '..deploy}
+	notify('Backup completed for %s', deploy)
 end
-cmd_dbk('dbk-backup DEPLOY [NAME] [MACHINE1,...]',
-	'Backup a deploy', mm.out_deploy_backup)
+cmd_dbk('dbk-backup DEPLOY [NOTE] [MACHINE1,...]',
+	'Backup a deploy', mm.deploy_backup)
 
 local function dbk_copy_info(dbk_copy)
 	return checkfound(first_row([[
@@ -2749,14 +2847,36 @@ local function dbk_copy_info(dbk_copy)
 	]], dbk_copy), 'backup copy not found')
 end
 
-function hybrid_api.deploy_backup_copy(to_text, src_dbk_copy, machine)
+local function deploy_arg(s, required)
+	local deploy = str_arg(s)
+	local t = deploy and first_row('select * from deploy where deploy = ?', deploy)
+	checkfound(t or not required, 'deploy not found: %s', s)
+	return t
+end
 
-	machine = checkarg(machine)
+local function machine_arg(s, required)
+	local machine = str_arg(s)
+	local t = machine and first_row('select * from machine where machine = ?', machine)
+	checkfound(t or not required, 'machine not found: %s', s)
+	return t
+end
+
+local function dbk_copy_arg(s, required)
+	local dbk_copy = id_arg(s)
+	local t = dbk_copy and first_row('select * from dbk_copy where dbk_copy = ?', dbk_copy)
+	checkfound(t or not required, 'deploy backup copy not found: %s', s)
+	return t
+end
+
+--src     : `S,...` S: `COPY1[-COPY2]|DEPLOY`
+--machine :
+function api.deploy_backup_copy(opt, src_dbk_copy, machine)
+
 	src_dbk_copy = checkarg(id_arg(src_dbk_copy, 'backup copy required'))
 	local c = dbk_copy_info(src_dbk_copy)
 
-	checkarg(c.duration, 'Backup copy %d is not complete (didn\'t finish)', c.dbk_copy)
-	checkarg(machine ~= c.machine, 'Choose a different machine to copy the backup to.')
+	checkarg(c.duration, 'backup copy %d is not complete (didn\'t finish)', c.dbk_copy)
+	checkarg(machine ~= c.machine, 'attempt to copy the backup to the same machine')
 
 	--latest dbk of this deploy that has a good copy on the destination machine.
 	local parent_dbk = first_row([[
@@ -2785,15 +2905,9 @@ function hybrid_api.deploy_backup_copy(to_text, src_dbk_copy, machine)
 		parent_dbk = parent_dbk,
 	}, rsync_vars(machine)), {
 		name = 'deploy_backup_copy '..src_dbk_copy..' '..machine,
-		out_stdouterr = to_text,
 	})
-	check500(task.exit_code == 0, 'deploy_backup_copy exit code: %d', task.exit_code)
 
-	local deploy_backup_copy_check = to_text
-		and mm.out_deploy_backup_copy_check
-		or mm.deploy_backup_copy_check
-
-	deploy_backup_copy_check(dbk_copy)
+	mm.deploy_backup_copy_check(opt, dbk_copy)
 
 	update_row('dbk_copy', {
 		dbk_copy,
@@ -2801,12 +2915,13 @@ function hybrid_api.deploy_backup_copy(to_text, src_dbk_copy, machine)
 	})
 	rowset_changed'deploy_backup_copies'
 
-	return {notify = _('Backup copied: %d, copy id: %d', c.dbk, dbk_copy)}
+	notify('Backup %d copied. copy id: %d', c.dbk, dbk_copy)
 end
-cmd_dbk('dbk-copy COPY MACHINE', 'Copy a deploy backup', mm.out_deploy_backup_copy)
+cmd_dbk('dbk-copy COPY|DEPLOY [MACHINE]', 'Copy a deploy backup', mm.deploy_backup_copy)
 
-function hybrid_api.deploy_backup_copy_check(to_text, dbk_copy)
+function api.deploy_backup_copy_check(opt, dbk_copy)
 	local c = dbk_copy_info(dbk_copy)
+	checkarg(c.checksum, 'Deploy backup copy %d does not have a checksum (not completed).', c.dbk_copy)
 	local task = mm.ssh_sh(c.machine, [[
 		#use backup
 		deploy_backup_info "$dbk"
@@ -2814,28 +2929,26 @@ function hybrid_api.deploy_backup_copy_check(to_text, dbk_copy)
 		dbk = c.dbk,
 	}, {
 		name = 'deploy_backup_info '..c.dbk_copy, keyed = false,
-		capture_stdout = true,
+		out_stdout = false,
 	})
-	check500(task.exit_code == 0, 'deploy_backup_info exit code: %d', task.exit_code)
 	local size, checksum = parse_backup_info(task:stdout())
-	check500(checksum == c.checksum, 'Checksums differ:\n  expected: %s\n  computed: %s',
-		c.checksum, checksum)
+	check500(checksum == c.checksum, 'Deploy backup copy %d from %s BAD CHECKSUM:'
+		..'\n  expected: %s\n  computed: %s',
+			c.dbk_copy, c.machine, c.checksum, checksum)
 
 	update_row('dbk_copy', {c.dbk_copy, size = size})
 	rowset_changed'deploy_backup_copies'
 
-	local msg = _('Backup copy %d OK. Size: %s', c.dbk_copy, kbytes(size))
-	if to_text then out(msg) end
-	return {notify = msg}
+	notify('Backup copy %d OK. Size: %s', c.dbk_copy, kbytes(size))
 end
-cmd_dbk('dbk-check COPY	', 'Check a deploy backup\'s integrity', mm.out_deploy_backup_copy_check)
+cmd_dbk('dbk-check COPY	', 'Check a deploy backup\'s integrity', mm.deploy_backup_copy_check)
 
-function json_api.deploy_backup_copy_remove(dbk_copy)
+function api.deploy_backup_copy_remove(opt, dbk_copy)
 
-	dbk_copy = checkarg(id_arg(dbk_copy, 'backup copy required'))
+	dbk_copy = checkarg(id_arg(dbk_copy), 'backup copy required')
 	local c = dbk_copy_info(dbk_copy)
 
-	local task = mm.ssh_sh(c.machine, [[
+	mm.ssh_sh(c.machine, [[
 		#use backup
 		deploy_backup_remove "$dbk"
 	]], {
@@ -2843,7 +2956,6 @@ function json_api.deploy_backup_copy_remove(dbk_copy)
 	}, {
 		name = 'deploy_backup_remove '..dbk_copy,
 	})
-	check500(task.exit_code == 0, 'deploy_backup_remove exit code: %d', task.exit_code)
 
 	delete_row('dbk_copy', {dbk_copy})
 	rowset_changed'deploy_backup_copies'
@@ -2855,27 +2967,27 @@ function json_api.deploy_backup_copy_remove(dbk_copy)
 		backup_removed = true
 	end
 
-	return {notify = 'Backup copy removed: '..dbk_copy..'.'
-		..(backup_removed and ' That was the last copy of the backup.' or '')}
+	notify('Backup copy removed: %s.%s', dbk_copy,
+		backup_removed and ' That was the last copy of the backup.' or '')
 end
-cmd_dbk('dbk-remove COPY1[-COPY2] ...', 'Remove deploy backup copies', function(...)
-	for i=1,select('#',...) do
-		local s = select(i,...)
+cmd_dbk('dbk-remove COPY1[-COPY2],...', 'Remove deploy backup copies', function(copies)
+	checkarg(copies, 'copies required')
+	for i,s in ipairs(words(copies:gsub(',', ' '))) do
 		local dbk_copy1, dbk_copy2 = s, s
 		if s:find'%-' then
 			dbk_copy1, dbk_copy2 = s:match'(.-)%-(.*)'
 		elseif s:find'%.%.' then
 			dbk_copy1, dbk_copy2 = s:match'(.-)%.%.(.*)'
 		end
-		dbk_copy1 = checkarg(dbk_copy1, 'invalid backup copy')
-		dbk_copy2 = checkarg(dbk_copy2, 'invalid backup copy')
-		for dbk_copy = max(dbk_copy1, dbk_copy2), min(dbk_copy1, dbk_copy2), -1 do
-			callp(mm.deploy_backup_copy_remove, dbk_copy)
+		dbk_copy1 = checkarg(id_arg(dbk_copy1), 'invalid backup copy')
+		dbk_copy2 = checkarg(id_arg(dbk_copy2), 'invalid backup copy')
+		for dbk_copy = min(dbk_copy1, dbk_copy2), max(dbk_copy1, dbk_copy2), 1 do
+			mm.deploy_backup_copy_remove(opt, dbk_copy)
 		end
 	end
 end)
 
-function hybrid_api.deploy_restore(to_text, dbk_copy, dest_deploy)
+function api.deploy_restore(opt, dbk_copy, dest_deploy)
 
 	local c = dbk_copy_info(dbk_copy)
 	local vars = deploy_vars(c.deploy, dest_deploy)
@@ -2890,16 +3002,14 @@ function hybrid_api.deploy_restore(to_text, dbk_copy, dest_deploy)
 		where deploy = ?
 	]], c.deploy)
 
-	local task = mm.ssh_sh(c.machine, [[
+	mm.ssh_sh(c.machine, [[
 		#use backup user deploy
 		deploy_restore "$dbk"
 	]], update({
 		dbk = c.dbk,
 	}, vars), {
 		name = 'deploy_restore '..c.machine,
-		out_stdouterr = to_text,
 	})
-	check500(task.exit_code == 0, 'deploy_restore exit code: %d', task.exit_code)
 
 	insert_or_update_row('deploy', {
 		deploy = dest_deploy,
@@ -2919,7 +3029,7 @@ function hybrid_api.deploy_restore(to_text, dbk_copy, dest_deploy)
 	})
 
 end
-cmd_dbk('dbk-restore COPY [DEPLOY_NAME]', 'Restore a deployment', mm.out_deploy_restore)
+cmd_dbk('dbk-restore COPY [DEPLOY_NAME]', 'Restore a deployment', mm.deploy_restore)
 
 --schedule backup tasks ------------------------------------------------------
 
@@ -2944,16 +3054,9 @@ local function machine_set_scheduled_backup_tasks(machine, enable)
 		where machine = ?
 	]], machine)
 
-	local copy_machines = query([[
-		select dest_machine from machine_backup_copy_machine
-		where machine = ?
-	]], machine)
-
 	mm.set_scheduled_task('machine_full_backup '..machine, row.active and row.full_backup_active and {
 		action = function()
-			mm.machine_backup(machine,
-				'scheduled full backup',
-				nil, unpack(copy_machines))
+			mm.machine_backup(machine, 'scheduled full backup')
 		end,
 		task_name   = 'backup '..machine,
 		machine     = machine,
@@ -2963,9 +3066,7 @@ local function machine_set_scheduled_backup_tasks(machine, enable)
 
 	mm.set_scheduled_task('machine_incr_backup '..machine, row.active and row.incr_backup_active and {
 		action = function()
-			mm.machine_backup(machine,
-				'scheduled incremental backup',
-				'latest', unpack(copy_machines))
+			mm.machine_backup(machine, 'scheduled incremental backup', 'latest')
 		end,
 		task_name   = 'backup '..machine,
 		machine     = machine,
@@ -2973,6 +3074,45 @@ local function machine_set_scheduled_backup_tasks(machine, enable)
 		run_every   = row.incr_backup_run_every,
 	} or nil)
 
+end
+
+local function machine_update(machine, delete)
+	machine_set_scheduled_backup_tasks(machine, not delete)
+end
+
+local function deploy_set_scheduled_backup_tasks(deploy, enable)
+
+	if not enable then
+		mm.set_scheduled_task('deploy_backup '..deploy, nil)
+		return
+	end
+
+	local row = first_row([[
+		select
+			active,
+			deployed_at,
+			backup_active,
+			time_to_sec(backup_start_hours) backup_start_hours,
+			backup_run_every
+		from deploy
+		where deploy = ?
+	]], deploy)
+
+	mm.set_scheduled_task('deploy_backup '..deploy,
+		row.active and row.deployed_at and row.backup_active and {
+		action = function()
+			mm.deploy_backup(machine, 'scheduled backup')
+		end,
+		task_name   = 'backup '..deploy,
+		deploy      = deploy,
+		start_hours = row.backup_start_hours,
+		run_every   = row.backup_run_every,
+	} or nil)
+
+end
+
+function deploy_update(deploy, delete)
+	deploy_set_scheduled_backup_tasks(deploy, not delete)
 end
 
 function machine_schedule_backup_tasks()
@@ -2984,20 +3124,34 @@ function machine_schedule_backup_tasks()
 	end
 end
 
+function deploy_schedule_backup_tasks()
+	for _,deploy in each_row_vals([[
+		select deploy from deploy
+		where active = 1 and deployed_at is not null and backup_active = 1
+	]]) do
+		deploy_set_scheduled_backup_tasks(deploy, true)
+	end
+end
+
+
 --remote access tools --------------------------------------------------------
 
 cmd_ssh('ssh -|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(md, cmd, ...)
 	checkarg(md, 'machine or deploy required')
 	local machines =
 		md == '-' and mm.machines()
-		or glue.names(md:gsub(',', ' '))
+		or words(md:gsub(',', ' '))
 	local last_exit_code
 	for _,md in ipairs(machines) do
 		local ip, m = mm.ip(md)
 		say('SSH to %s:', m)
 		local task = mm.ssh(md,
 			cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"},
-			not cmd and {allocate_tty = true} or nil)
+			{
+				allow_fail = true,
+				allocate_tty = not cmd or nil,
+			}
+		)
 		if task.exit_code ~= 0 then
 			say('SSH to %s: exit code: %d', m, task.exit_code)
 		end
@@ -3120,10 +3274,9 @@ function mm.mount(machine, rem_path, drive, bg)
 		if bg then
 			exec(cmd)
 		else
-			local task = mm.exec(cmd, {
+			mm.exec(cmd, {
 				name = 'mount '..drive,
 			})
-			assertf(task.exit_code == 0, 'sshfs exit code: %d', task.exit_code)
 		end
 	else
 		NYI'mount'
@@ -3142,33 +3295,31 @@ cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 	end
 end)
 
-function text_api.rsync(dir, machine1, machine2)
-	local task = mm.ssh_sh(machine1, [[
+function api.rsync(opt, dir, machine1, machine2)
+	mm.ssh_sh(machine1, [[
 		#use ssh
 		rsync_to "$HOST" "$DIR"
 		]], update({
 			DIR = dir
 		}, rsync_vars(machine2)), {
-			out_stdouterr = true,
+			name = 'rsync '..machine1..' '..machine2, keyed = false,
 		}
 	)
-	check500(task.exit_code == 0, 'rsync_to exit code: %d', task.exit_code)
 end
-cmd_ssh_mounts('rsync DIR MACHINE1 MACHINE2', 'Copy files between machines', mm.out_rsync)
+cmd_ssh_mounts('rsync DIR MACHINE1 MACHINE2', 'Copy files between machines', mm.rsync)
 
-function text_api.sha(machine, dir)
-	local task = mm.ssh_sh(machine, [[
+function api.sha(opt, machine, dir)
+	mm.ssh_sh(machine, [[
 		#use fs
 		sha_dir "$DIR"
 		]], {
 			DIR = dir
 		}, {
-			out_stdouterr = true,
+			name = 'sha '..machine, keyed = false,
 		}
 	)
-	check500(task.exit_code == 0, 'sha_dir exit code: %d', task.exit_code)
 end
-cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', mm.out_sha)
+cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', mm.sha)
 
 --admin web UI ---------------------------------------------------------------
 
@@ -3232,11 +3383,11 @@ local function compute_cpu_max(self, vals)
 	local max_tp = 0
 	for i,cpu1 in ipairs(t1.cputimes) do
 		local cpu0 = t0.cputimes[i]
-		local tp = floor((
+		local tp = (
 			(cpu1.user - cpu0.user) +
 			(cpu1.nice - cpu0.nice) +
 			(cpu1.sys  - cpu0.sys )
-		) * d * 100)
+		) * d
 		max_tp = max(max_tp, tp)
 	end
 	return max_tp
@@ -3303,9 +3454,9 @@ rowset.machines = sql_rowset{
 	pk = 'machine',
 	order_by = 'pos, ctime',
 	field_attrs = {
-		cpu_max     = {readonly = true, w = 60, type = 'percent', align = 'right', text = 'CPU Max %', compute = compute_cpu_max},
-		ram_free    = {readonly = true, w = 60, type = 'filesize', filesize_decimals = 1, text = 'Free RAM', compute = compute_ram_free},
-		hdd_free    = {readonly = true, w = 60, type = 'filesize', filesize_decimals = 1, text = 'Free Disk', compute = compute_hdd_free},
+		cpu_max     = {readonly = true, w = 60, 'percent_int', align = 'right', text = 'CPU Max %', compute = compute_cpu_max},
+		ram_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, text = 'Free RAM', compute = compute_ram_free},
+		hdd_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, text = 'Free Disk', compute = compute_hdd_free},
 		public_ip   = {text = 'Public IP Address'},
 		local_ip    = {text = 'Local IP Address', hidden = true},
 		admin_page  = {text = 'VPS admin page of this machine'},
@@ -3316,7 +3467,7 @@ rowset.machines = sql_rowset{
 		hdd         = {readonly = true, w = 60, filesize_decimals = 1, text = 'Root Disk Size', compute = compute_hdd},
 		os_ver      = {readonly = true, text = 'Operating System'},
 		mysql_ver   = {readonly = true, text = 'MySQL Version'},
-		uptime      = {readonly = true, text = 'Uptime', type = 'duration', compute = compute_uptime},
+		uptime      = {readonly = true, text = 'Uptime', 'duration', compute = compute_uptime},
 	},
 	compute_row_vals = function(self, vals)
 		vals.t1 = nil
@@ -3333,6 +3484,7 @@ rowset.machines = sql_rowset{
 		vals.t0 = t0
 	end,
 	insert_row = function(self, row)
+		local m1 = row.machine
 		self:insert_into('machine', row, [[
 			machine provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
@@ -3347,12 +3499,13 @@ rowset.machines = sql_rowset{
 
 			admin_page pos
 		]])
-		local m1 = row.machine
 		cp(mm.keyfile(), mm.keyfile(m1))
 		cp(mm.ppkfile(), mm.ppkfile(m1))
-		machine_set_scheduled_backup_tasks(m1, true)
+		machine_update(m1)
 	end,
 	update_row = function(self, row)
+		local m1 = row.machine
+		local m0 = row['machine:old']
 		self:update_into('machine', row, [[
 			machine provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
@@ -3367,21 +3520,19 @@ rowset.machines = sql_rowset{
 
 			admin_page pos
 		]])
-		local m1 = row.machine
-		local m0 = row['machine:old']
 		if m1 and m1 ~= m0 then
 			if exists(mm.keyfile(m0)) then mv(mm.keyfile(m0), mm.keyfile(m1)) end
 			if exists(mm.ppkfile(m0)) then mv(mm.ppkfile(m0), mm.ppkfile(m1)) end
-			machine_set_scheduled_backup_tasks(m0, false)
-			machine_set_scheduled_backup_tasks(m1, true)
+			machine_update(m0, true)
 		end
+		machine_update(m1)
 	end,
 	delete_row = function(self, row)
-		self:delete_from('machine', row)
 		local m0 = row['machine:old']
+		self:delete_from('machine', row)
 		rm(mm.keyfile(m0))
 		rm(mm.ppkfile(m0))
-		machine_set_scheduled_backup_tasks(m0, false)
+		machine_update(m0, true)
 	end,
 }
 
@@ -3457,6 +3608,7 @@ rowset.deploys = sql_rowset{
 	]],
 	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
+		local d1 = row.deploy
 		row.secret = b64(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
  		self:insert_into('deploy', row, [[
@@ -3467,8 +3619,11 @@ rowset.deploys = sql_rowset{
 			backup_run_every
 			backup_remove_older_than
 		]])
+		deploy_update(d1)
 	end,
 	update_row = function(self, row)
+		local d0 = row['deploy:old']
+		local d1 = row.deploy
 		self:update_into('deploy', row, [[
 			machine repo app wanted_app_version wanted_sdk_version
 			backup_active
@@ -3477,17 +3632,21 @@ rowset.deploys = sql_rowset{
 			backup_remove_older_than
 			env pos
 		]])
-		if row.deploy then
-			mm.deploy_rename(row['deploy:old'], row.deploy)
+		if d1 and d1 ~= d0 then
+			mm.deploy_rename(d0, d1)
+			deploy_update(d0, true)
 		end
+		deploy_update(d0)
 	end,
 	delete_row = function(self, row)
+		local d0 = row['deploy:old']
 		local deployed = first_row([[
 				select if(deployed_app_commit, 1, 0)
 				from deploy where deploy = ?
-			]], row['deploy:old']) == 1
+			]], d0) == 1
 		raise('db', '%s', 'Remove the deploy from the machine first.')
 		self:delete_from('deploy', row)
+		deploy_update(d0, true)
 	end,
 }
 
@@ -3541,7 +3700,7 @@ rowset.config = virtual_rowset(function(self, ...)
 
 	self.allow = 'admin'
 	self.fields = {
-		{name = 'config_id', type = 'number'},
+		{name = 'config_id', 'double'},
 		{name = 'mm_pubkey', text = 'MM\'s Public Key', maxlen = 8192},
 		{name = 'mysql_root_pass', text = 'MySQL Root Password'},
 	}
@@ -3568,13 +3727,16 @@ local function start_tunnels_and_log_servers()
 			machine,
 			log_local_port,
 			mysql_local_port
-		from machine order by machine
+		from machine
+		where active = 1
+		order by machine
 	]]) do
 		if log_local_port then
 			mm.rtunnel(machine, log_local_port..':'..mm.log_port, {
 				editable = false,
 				async = true,
 			})
+			mm.log_server(machine)
 		end
 		if mysql_local_port then
 			mm.tunnel(machine, mysql_local_port..':'..mm.mysql_port, {
@@ -3587,7 +3749,6 @@ local function start_tunnels_and_log_servers()
 			config(machine..'_db_name', 'performance_schema')
 			config(machine..'_db_schema', false)
 		end
-		pcall(mm.log_server, machine)
 	end
 end
 
@@ -3606,6 +3767,8 @@ function mm:run_server()
 		runafter(0, function()
 			start_tunnels_and_log_servers()
 			machine_schedule_backup_tasks()
+			deploy_schedule_backup_tasks()
+			load_tasks_last_run()
 			runagainevery(60, run_tasks, 'run-tasks-every-60s')
 		end, 'startup')
 

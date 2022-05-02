@@ -106,7 +106,7 @@ deploy_backup() { # DEPLOY DBK [PARENT_DBK]
 	checkvars deploy dbk
 
 	mysql_backup_db     $deploy $(bkp_dir deploy $dbk mysql)
-	deploy_backup_files $deploy $(bkp_dir deploy $dbk files) $(bkp_dir deploy $parent_dbk files)
+	deploy_backup_files $deploy $(bkp_dir deploy $dbk files) $(bkp_dir deploy "$parent_dbk" files)
 
 	deploy_backup_info $dbk
 }

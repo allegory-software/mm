@@ -82,7 +82,8 @@ sync_dir() { # SRC_DIR DST_DIR [LINK_DIR]
 		checkvars link_dir
 	}
 	checkvars src_dir dst_dir
-	say -n "Copying $src_dir to $dst_dir${link_dir:+ link_dir=$link_dir} ... "
+
+	say -n "Copying dir $src_dir to $dst_dir ${link_dir:+link_dir $link_dir }... "
 
 	# NOTE: the dot syntax cuts out the path before it as a way to make the path relative.
 	[ "$DRY" ] || must rsync --delete -aR ${link_dir:+--link-dest=$link_dir} $src_dir/./. $dst_dir

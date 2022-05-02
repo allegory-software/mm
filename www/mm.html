@@ -27,7 +27,7 @@ textarea.x-editbox-input[console] {
 		"h1"
 		"mm_pubkey"
 		"ssh_key_gen_button"
-		"ssh_key_updates_button"
+		"ssh_key_update_button"
 		"h2"
 		"mysql_root_pass"
 	;
@@ -122,7 +122,7 @@ textarea.x-editbox-input[console] {
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
 								shape=area sum_cols="max_cpu_sys max_cpu avg_cpu_sys avg_cpu" group_cols=clock
-								min_sum=0 max_sum=100
+								min_sum=0 max_sum=1
 								min_val=-60 max_val=0
 							>
 							</x-chart>
@@ -269,7 +269,7 @@ textarea.x-editbox-input[console] {
 								<x-chart
 									nav_id=mm_deploy_procinfo_log
 									shape=area sum_cols="cpu_sys cpu" group_cols=clock
-									min_sum=0 max_sum=100
+									min_sum=0 max_sum=1
 									min_val=-60 max_val=0
 								>
 								</x-chart>
@@ -394,7 +394,7 @@ textarea.x-editbox-input[console] {
 					<x-button danger action_name=ssh_key_gen style="grid-area: ssh_key_gen_button"
 						text="Generate new key" icon="fa fa-key">
 					</x-button>
-					<x-button danger action_name=ssh_key_updates style="grid-area: ssh_key_updates_button"
+					<x-button danger action_name=ssh_key_update style="grid-area: ssh_key_update_button"
 						text="Upload key to all machines" icon="fa fa-upload">
 					</x-button>
 					<div area=h2><hr><h2>MySQL</h2></div>

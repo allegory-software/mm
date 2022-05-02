@@ -1,16 +1,67 @@
 
+// text streaming API client -------------------------------------------------
+
+let chunk_decoder = function(onchunk) {
+	let i = 0
+	let chan, size
+	return function(s, finished) {
+		while (1) {
+			let len = s.length-i
+			if (size == null && len >= 10) {
+				chan = s.slice(i, i+1)
+				size = parseInt(s.slice(i+1, i+9), 16)
+				i+=10; len-=10
+			}
+			if (size != null && len >= size) {
+				let s1 = s.slice(i, i+size); i+=size
+				onchunk(chan, s1, finished)
+				chan = null
+				size = null
+				continue
+			}
+			break
+		}
+	}
+}
+
+let mm_onchunk = function(chan, s, finished) {
+	if (chan == 'E')
+		notify(s, 'error')
+	else if (chan == 'N')
+		notify(s)
+}
+
+// mm_api.cmd([e,][opt,]...args)
+mm_api = new Proxy(obj(), {
+	get(_, cmd) {
+		return function(...args) {
+			let e, opt
+			if (iselem(args[0]))
+				e = args.shift()
+			if (isobj(args[0]))
+				opt = args.shift
+			return ajax({
+				url: ['', 'api.txt', cmd.replaceAll('_', '-')],
+				upload: {opt: opt, args: args},
+				onchunk: chunk_decoder(mm_onchunk),
+				notify: e,
+			})
+		}
+	}
+})
+
 // actions -------------------------------------------------------------------
 
 function ssh_key_gen() {
-	this.post('/api.json/ssh-key-gen')
+	mm_api.ssh_key_gen(this)
 }
 
-function ssh_key_updates() {
-	this.post('/api.json/ssh-key-update')
+function ssh_key_update() {
+	mm_api.ssh_key_update(this)
 }
 
 function machine_backup() {
-	this.post(['', 'api.json', 'machine_backup', this.val('machine')])
+	mm_api.machine_backup(this, this.val('machine'))
 }
 
 function deploy_action(btn, action, ...args) {

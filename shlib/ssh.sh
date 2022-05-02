@@ -1,46 +1,45 @@
-#use die
+#use die fs
 
 ssh_hostkey_update() { # HOST FINGERPRINT
 	local host="$1"
 	local fp="$2"
 	checkvars host fp-
-	say -n "Updating SSH host fingerprint for host $host (/etc/ssh) ... "
+	say "Updating SSH host fingerprint for host $host (/etc/ssh) ... (*)"
 	local kh=/etc/ssh/ssh_known_hosts
 	run ssh-keygen -R "$host" -f $kh # remove host line if found
 	local newline=$'\n'
 	append "$fp$newline" $kh
 	must chmod 644 $kh
-	say OK
+	say "(*) SSH host fingerprint updated."
 }
 
 ssh_host_update() { # host keyname [unstable_ip]
 	local host="$1"
 	local keyname="$2"
 	checkvars host keyname
-	say -n "Assigning SSH key '$keyname' to host '$host' $HOME $3 ... "
+	say "Assigning SSH key '$keyname' to host '$host' $HOME $3 ... (*)"
 	must mkdir -p $HOME/.ssh
 	local CONFIG=$HOME/.ssh/config
 	touch "$CONFIG"
 	local s="$(sed 's/^Host/\n&/' $CONFIG | sed '/^Host '"$1"'$/,/^$/d;/^$/d')"
-	(
-		echo "$s"
-		printf "%s\n" "Host $1"
-		printf "\t%s\n" "HostName $1"
-		printf "\t%s\n" "IdentityFile $HOME/.ssh/${2}.id_rsa"
-		[ "$3" ] && printf "\t%s\n" "CheckHostIP no"
-		return 0
-	) > $CONFIG || die "SAVE-TO: $CONFIG [$?]"
+	s="$s
+Host $1
+  HostName $1
+  IdentityFile $HOME/.ssh/${2}.id_rsa"
+	[ "$3" ] && s="$s
+  CheckHostIP no"
+	save "$s" $CONFIG
 	must chown $USER:$USER -R $HOME/.ssh
-	say OK
+	say "(*) SSH key assigned."
 }
 
 ssh_key_update() { # keyname key
-	say -n "Updating SSH key '$1' ($HOME) ... "
+	say "Updating SSH key '$1' ($HOME) ... (*)"
 	must mkdir -p $HOME/.ssh
 	local idf=$HOME/.ssh/${1}.id_rsa
 	save "$2" $idf $USER
 	must chown $USER:$USER -R $HOME/.ssh
-	say OK
+	say "(*) SSH key updated."
 }
 
 ssh_host_key_update() { # host keyname key [unstable_ip]
@@ -49,7 +48,7 @@ ssh_host_key_update() { # host keyname key [unstable_ip]
 }
 
 ssh_update_pubkey() { # keyname key
-	say -n "Updating SSH public key '$1' ... "
+	say "Updating SSH public key '$1' ... (*)"
 	local ak=$HOME/.ssh/authorized_keys
 	must mkdir -p $HOME/.ssh
 	[ -f $ak ] && must sed -i "/ $1/d" $ak
@@ -57,7 +56,7 @@ ssh_update_pubkey() { # keyname key
 	must append "$2$newline" $ak
 	must chmod 600 $ak
 	must chown $USER:$USER -R $HOME/.ssh
-	say OK
+	say "(*) SSH public key updated."
 }
 
 ssh_pubkey() { # keyname
@@ -111,12 +110,14 @@ rsync_to() { # HOST DIR|FILE [LINK_DIR]
 	}
 	checkvars SSH_KEY- SSH_HOSTKEY-
 
-	say "Copying dir $dir to host $host${link_dir:+ link_dir=$link_dir} ... "
+	say -n "Copying dir $dir to host $host ${link_dir:+link_dir $link_dir }... "
 	local p=/root/.scp_clone_dir.p.$$
 	local h=/root/.scp_clone_dir.h.$$
 	trap 'rm -f $p $h' EXIT
-	save "$SSH_KEY"     $p root
-	save "$SSH_HOSTKEY" $h root
+	printf "%s" "$SSH_KEY"     > $p || die "saving $p failed. [$?]"
+	printf "%s" "$SSH_HOSTKEY" > $h || die "saving $h failed. [$?]"
+	must chmod 600       $p $h
+	must chown root:root $p $h
 	SSH_KEY=
 	SSH_HOSTKEY=
 
@@ -126,5 +127,5 @@ rsync_to() { # HOST DIR|FILE [LINK_DIR]
 		-aR "$dir/./." "root@$host:/$dir"
 
 	rm -f $p $h
-	say "Files copied."
+	say "OK"
 }
