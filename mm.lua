@@ -355,7 +355,7 @@ action['api.txt' ] = function(action, ...)
 	--be re-raised in the Lua client (the JS client calls notify() for them).
 	--Because the API is for both JS and Lua, we don't support multiple return
 	--values (you have to return arrays).
-	local args = extend(pack(...), post and unpack(post.args))
+	local args = extend(pack(...), post and post.args)
 	local opt = post and post.options or empty
 	local ok, ret = errors.pcall(handler, opt, unpack(args))
 	if not ok then
