@@ -113,6 +113,7 @@ local function mm_schema()
 	tables.machine_backup_copy_machine = {
 		machine      , strid, not_null, child_fk,
 		dest_machine , strid, not_null, child_fk(machine), pk,
+		synced       , bool0,
 	}
 
 	tables.deploy = {
@@ -120,6 +121,7 @@ local function mm_schema()
 		machine          , strid, fk,
 		repo             , url, not_null,
 		app              , strid, not_null,
+		domain           , strid,
 		wanted_app_version   , git_version,
 		wanted_sdk_version   , git_version,
 		deployed_app_version , git_version,
@@ -151,6 +153,7 @@ local function mm_schema()
 	tables.deploy_backup_copy_machine = {
 		deploy       , strid, not_null, child_fk,
 		dest_machine , strid, not_null, child_fk(machine), pk,
+		synced       , bool0,
 	}
 
 	tables.deploy_vars = {
@@ -1606,18 +1609,15 @@ cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare)
 cmd_deployments('d|deploys', 'Show the list of deployments', function()
 	mm.print_rowset(opt, 'deploys', ([[
 		deploy
+		status
 		machine
 		active
 		app
 		env
 		deployed_at
 		started_at
-		wanted_app_version
-		deployed_app_version
-		deployed_app_commit
-		wanted_sdk_version
-		deployed_sdk_version
-		deployed_sdk_commit
+		wanted_app_version=want_app deployed_app_version=app_ver deployed_app_commit=app_comm
+		wanted_sdk_version=want_sdk deployed_sdk_version=sdk_ver deployed_sdk_commit=sdk_comm
 	]]):gsub('%s+', ','))
 end)
 
@@ -3158,7 +3158,7 @@ end
 
 --remote access tools --------------------------------------------------------
 
-cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(opt, mds, cmd, ...)
+function mm.ssh_command(mds, cmd, ...)
 	if mds == 'ALL' then
 		mds = mm.active_machines()
 		cmd = checkarg(cmd, 'command required')
@@ -3169,7 +3169,7 @@ cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(op
 	local cmd = cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"}
 	for _,md in ipairs(mds) do
 		local ip, m = mm.ip(md)
-		say('SSH to %s:', m)
+		if #mds > 1 then say('SSH to %s:', m) end
 		local task = mm.ssh(md, cmd, {
 			allow_fail = true,
 			allocate_tty = not cmd,
@@ -3182,6 +3182,9 @@ cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [CMD ...]', 'SSH to machine(s)', function(op
 		last_exit_code = task.exit_code
 	end
 	return last_exit_code
+end
+cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [- CMD ...]', 'SSH to machine(s)', function(opt, nds, ...)
+	return mm.ssh_command(mds, ...)
 end)
 
 --TIP: make a putty session called `mm` where you set the window size,
@@ -3218,6 +3221,21 @@ cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function
 	end)
 	proc.exec(cmd):forget()
 end)
+
+cmd_ssh('ls [-l] [-a] MACHINE:DIR'  , 'Run `ls` on machine',
+	function(opt, md_dir)
+		local md, dir = md_dir:match'^(.-):(.*)'
+		local args = {'ls', dir}
+		for k,v in pairs(opt) do
+			add(args, '-'..k)
+		end
+		mm.ssh_command(md, unpack(args))
+	end)
+cmd_ssh('cat MACHINE:FILE', 'Run `cat` on machine',
+	function(opt, md_file)
+		local md, file = md_file:match'^(.-):(.*)'
+		mm.ssh_command(md, 'cat', file)
+	end)
 
 --TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
 function mm.tunnel(machine, ports, opt, rev)
