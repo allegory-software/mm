@@ -1255,7 +1255,7 @@ end
 
 --ssh ------------------------------------------------------------------------
 
-local function lin(s) return Linux and false and s or nil end
+local function lin(s) return Linux and s or nil end
 function mm.ssh(md, args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
@@ -1267,7 +1267,7 @@ function mm.ssh(md, args, opt)
 		'-o', 'BatchMode=yes',
 		'-o', 'ConnectTimeout=3',
 		lin'-o', lin'ControlMaster=auto',
-		lin'-o', lin'ControlPath=~/.ssh/control-%h-%p-%r',
+		lin'-o', lin'ControlPath=~/.ssh/control-%h-%p-%r'..(opt.tty and '-tty' or ''),
 		lin'-o', lin'ControlPersist=600',
 		'-o', 'PreferredAuthentications=publickey',
 		'-o', 'UserKnownHostsFile='..mm.known_hosts_file(),
