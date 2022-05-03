@@ -77,20 +77,63 @@ replace_lines() { # REGEX FILE
 }
 '
 
-sync_dir() { # SRC_DIR DST_DIR [LINK_DIR]
-	local src_dir="$1"
-	local dst_dir="$2"
-	local link_dir="$3"
-	[ "$link_dir" ] && {
-		link_dir="$(realpath "$link_dir")" # --link-dest path must be absolute.
-		checkvars link_dir
+sync_dir() { # SRC_DIR= DST_DIR= [LINK_DIR=]
+	checkvars SRC_DIR DST_DIR
+	[ "$LINK_DIR" ] && {
+		LINK_DIR="$(realpath "$LINK_DIR")" # --link-dest path must be absolute.
+		checkvars LINK_DIR
 	}
-	checkvars src_dir dst_dir
 
-	say -n "Copying dir $src_dir to $dst_dir ${link_dir:+link_dir $link_dir }... "
+	say -n "Sync'ing dir
+  src: $src_dir
+  dst: $dst_dir "
+	[ "$LINK_DIR" ] && say -n "
+  lnk: $LINK_DIR "
+	say -n "
+  ... "
 
 	# NOTE: the dot syntax cuts out the path before it as a way to make the path relative.
-	[ "$DRY" ] || must rsync --delete -aR ${link_dir:+--link-dest=$link_dir} $src_dir/./. $dst_dir
+	[ "$DRY" ] || must rsync --delete -aHR ${LINK_DIR:+--link-dest=$LINK_DIR} $src_dir/./. $dst_dir
 
-	say "OK. $(dir_lean_size $dst_dir | numfmt --to=iec) bytes written."
+	say "OK. $(dir_lean_size $dst_dir | numfmt --to=iec) bytes in destination."
+}
+
+# HOST= SRC_DIR= [DST_DIR=] [LINK_DIR=] [SRC_MACHINE=] [DST_MACHINE=] [PROGRESS=1] sync_dir
+rsync_dir() {
+	[ "$DST_DIR" ] || DST_DIR="$SRC_DIR"
+	checkvars HOST SRC_DIR DST_DIR
+	[ "$LINK_DIR" ] && {
+		LINK_DIR="$(realpath "$LINK_DIR")" # --link-dest path must be absolute!
+		checkvars LINK_DIR
+	}
+	checkvars SSH_KEY- SSH_HOSTKEY-
+
+	[ "$DST_MACHINE" ] || DST_MACHINE=$HOST
+
+	say -n "Sync'ing dir
+  src: $SRC_MACHINE:$SRC_DIR
+  dst: $DST_MACHINE:$DST_DIR "
+	[ "$LINK_DIR" ] && say -n "
+  lnk: $LINK_DIR "
+	say -n "
+  ... "
+	local p=/root/.scp_clone_dir.p.$$
+	local h=/root/.scp_clone_dir.h.$$
+	trap 'rm -f $p $h' EXIT
+	printf "%s" "$SSH_KEY"     > $p || die "saving $p failed. [$?]"
+	printf "%s" "$SSH_HOSTKEY" > $h || die "saving $h failed. [$?]"
+	must chmod 600       $p $h
+	must chown root:root $p $h
+	SSH_KEY=
+	SSH_HOSTKEY=
+
+	# NOTE: the dot syntax cuts out the path before it as a way to make the path relative.
+	[ "$DRY" ] || must rsync --delete --timeout=5 \
+		${PROGRESS:+--info=progress2} \
+		${LINK_DIR:+--link-dest=$LINK_DIR} \
+		-e "ssh -o UserKnownHostsFile=$h -i $p" \
+		-aHR "$SRC_DIR/./." "root@$HOST:/$DST_DIR"
+
+	rm -f $p $h
+	say "OK"
 }

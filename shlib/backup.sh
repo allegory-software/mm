@@ -78,13 +78,14 @@ machine_backup_remove() {
 	rm_dir $(bkp_dir machine $mbk)
 }
 
-machine_backup_copy() { # HOST MBK [PARENT_MBK]
-	local host="$1"
-	local mbk="$2"
-	local parent_mbk="$3"
-	checkvars host mbk
+machine_backup_copy() { # MBK [PARENT_MBK]
+	local mbk="$1"
+	local parent_mbk="$2"
+	checkvars mbk
 
-	rsync_to $host $(bkp_dir machine $mbk) "" $(bkp_dir machine $parent_mbk)
+	SRC_DIR=$(bkp_dir machine $mbk) \
+	LINK_DIR=$(bkp_dir machine $parent_mbk) \
+		rsync_dir
 }
 
 machine_restore() { # MBK
@@ -118,13 +119,14 @@ deploy_backup_remove() { # DBK
 	rm_dir $(bkp_dir deploy $dbk)
 }
 
-deploy_backup_copy() { # HOST DBK [PARENT_DBK]
-	local host="$1"
-	local dbk="$2"
-	local parent_dbk="$3"
-	checkvars host dbk
+deploy_backup_copy() { # DBK [PARENT_DBK]
+	local dbk="$1"
+	local parent_dbk="$2"
+	checkvars dbk
 
-	rsync_to $host $(bkp_dir deploy $dbk) "" $(bkp_dir deploy $parent_dbk)
+	SRC_DIR=$(bkp_dir deploy $dbk) \
+	LINK_DIR=$(bkp_dir deploy $parent_dbk) \
+		rsync_dir
 }
 
 deploy_restore() { # DBK

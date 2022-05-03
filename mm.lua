@@ -287,6 +287,7 @@ mm.schema:import(mm_schema)
 
 local function NYI(event)
 	logerror('mm', event, 'NYI')
+	error('NYI: '..event)
 end
 
 --install --------------------------------------------------------------------
@@ -305,7 +306,9 @@ end)
 
 --simple text stream multiplexing protocol over HTTP.
 local function out_on(chan, s)
-	if cx().fake then
+	local cx = cx()
+	if not cx then return end
+	if cx.fake then
 		out(s)
 	else
 		assert(#chan == 1)
@@ -423,9 +426,10 @@ end
 
 local function call_json_api(opt, action, ...)
 
-	if isstr(opt) then --action, ...
+	if opt ~= nil and not istab(opt) then --action, ...
 		return call_json_api(empty, opt, action, ...)
 	end
+	opt = repl(opt, nil, empty)
 
 	local ret, res = getpage{
 		host = config'mm_host',
@@ -453,13 +457,20 @@ local function from_server()
 	return mm.conf.mm_host and not mm.server_running
 end
 
+local function pass_opt(opt, ...) --pass an optional options table at arg#1
+	if opt ~= nil and not istab(opt) then
+		return empty, opt, ...
+	else
+		return repl(opt, nil, empty), ...
+	end
+end
 local api = setmetatable({}, {__newindex = function(_, name, fn)
 	local api_name = name:gsub('_', '-')
 	mm[name] = function(opt, ...)
 		if from_server() then
-			return call_api(api_name, opt, ...)
+			return call_api(api_name, pass_opt(opt, ...))
 		end
-		return fn(opt or empty, ...)
+		return fn(pass_opt(opt, ...))
 	end
 	mm_api[name] = fn
 end})
@@ -577,7 +588,7 @@ function task:finish(exit_code)
 	end
 end
 
-function task:do_kill() NYI() end --stub
+function task:do_kill() NYI'do_kill' end --stub
 
 function task:kill()
 	self.killed = true
@@ -677,31 +688,33 @@ rowset.running_tasks = virtual_rowset(function(self)
 
 end)
 
-function api.print_running_tasks()
-	local fields = mm.schema:resolve_types{
-		{name = 'id'        },
-		{name = 'name'      },
-		{name = 'machine'   },
-		{name = 'status'    },
-		{name = 'start_time', 'time_timeago'},
-		{name = 'duration'  , 'duration'},
-		{name = 'exit_code' , 'double'},
-	}
-	local rows = {}
-	for task in sortedpairs(mm.tasks, cmp_start_time) do
-		add(rows, {
-			task.id,
-			task.name,
-			task.machine,
-			task.status,
-			task.start_time,
-			task.duration,
-			task.exit_code,
-		})
-	end
-	outpqr(rows, fields)
+function mm.print_running_tasks()
+	mm.print_rowset('running_tasks', [[
+		id
+		type
+		name
+		machine
+		deploy
+		status
+		start_time
+		duration
+		exit_code
+		errors
+	]])
 end
-cmd_tasks('t|tasks', 'Show running tasks', mm.print_running_tasks)
+
+function api.tail_running_task(opt, task_id)
+	local task = checkarg(mm.tasks_by_id[id_arg(task_id)], 'invalid task id: %s', task_id)
+	NYI'tail'
+end
+
+cmd_tasks('t|tasks [ID]', 'Show running tasks', function(opt, task_id)
+	if task_id then
+		mm.tail_running_task(task_id)
+	else
+		mm.print_running_tasks()
+	end
+end)
 
 rowset.task_runs = sql_rowset{
 	allow = 'admin',
@@ -816,12 +829,13 @@ rowset.scheduled_tasks = virtual_rowset(function(self)
 		t.active = false
 	end
 
-	function api.print_scheduled_tasks()
-		outpqr(load_rows(), self.fields)
-	end
-	cmd_tasks('ts|task-schedule', 'Show task schedule', mm.print_scheduled_tasks)
-
 end)
+
+function mm.print_scheduled_tasks()
+	mm.print_rowset('scheduled_tasks')
+end
+
+cmd_tasks('ts|task-schedule', 'Show task schedule', mm.print_scheduled_tasks)
 
 local function load_tasks_last_run()
 	for _, sched_name, last_run in each_row_vals[[
@@ -881,20 +895,31 @@ end
 
 --Lua+web+cmdline info api ---------------------------------------------------
 
-function mm.print_rowset(opt, name, cols)
-	name = name or 'rowsets'
+function mm.get_rowset(name, filter)
 	if from_server() then
-		t = call_json_api('rowset.json', name)
+		local call_opt = filter and {args = {filter = json(filter)}}
+		t = call_json_api(call_opt, 'rowset.json', name)
 	else
-		NYI()
+		NYI'get_rowset'
 	end
 	mm.schema:resolve_types(t.fields)
-	outpqr{
+	return t
+end
+
+--filter: {k1v1,k1v2,...} or {{k1v1,k1v2},{k1v3,k2v4},...} for composite pks.
+function mm.print_rowset(opt, name, cols, filter)
+	if opt ~= nil and not istab(opt) then
+		return mm.print_rowset(nil, opt, name, cols, filter)
+	end
+	local t = mm.get_rowset(name or 'rowsets', filter)
+	outpqr(update({
 		rows = t.rows, fields = t.fields,
 		showcols = cols and cols:gsub(',', ' '),
-	}
+	}, opt))
 end
-cmd('r|rowset [NAME] [COL1,...]', 'Show a rowset', mm.print_rowset)
+cmd('r|rowset [-cols=col1,...] [NAME] [KEY]', 'Show a rowset', function(opt, name, key)
+	mm.print_rowset(name, opt.cols, key and {tonumber(key) or key})
+end)
 
 function sshcmd(cmd)
 	return win and indir(mm.sshdir, cmd) or cmd
@@ -917,11 +942,11 @@ end
 local function callm(cmd, machine)
 	if not machine then
 		mm.each_machine(function(m)
-			mm[cmd](nil, m)
+			mm[cmd](m)
 		end, cmd..' %s')
 		return
 	end
-	mm[cmd](nil, machine)
+	mm[cmd](machine)
 end
 
 function api.deploy_info(opt, deploy)
@@ -942,7 +967,7 @@ function api.ip_and_machine(opt, md)
 	return {t.public_ip, m}
 end
 function mm.ip(md)
-	return unpack(mm.ip_and_machine(nil, md))
+	return unpack(mm.ip_and_machine(md))
 end
 cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
 	function(opt, md)
@@ -972,7 +997,7 @@ end
 function mm.keyfile(machine, ext) --`mm ssh ...` gets it from the server
 	local file = keyfile(machine, ext)
 	if from_server() then
-		local s = checkfound(mm.keyfile_contents(nil, machine, ext),
+		local s = checkfound(mm.keyfile_contents(machine, ext),
 			'SSH key file not found: %s', file)
 		save(file, s)
 	end
@@ -1089,9 +1114,11 @@ function mm.exec(cmd, opt)
 	local capture_stdout = opt.capture_stdout ~= false
 	local capture_stderr = opt.capture_stderr ~= false
 
+	local env = opt.env and update(proc.env(), opt.env)
+
 	local p, err = proc.exec{
 		cmd = cmd,
-		env = opt.env and update(proc.env(), opt.env),
+		env = env,
 		async = true,
 		autokill = true,
 		stdout = capture_stdout,
@@ -1228,23 +1255,27 @@ end
 
 --ssh ------------------------------------------------------------------------
 
+local function lin(s) return Linux and false and s or nil end
 function mm.ssh(md, args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
 	opt.machine = machine
 	return mm.exec(extend({
 		sshcmd'ssh',
-		opt.allocate_tty and '-t' or '-T',
+		opt.tty and '-t' or '-T',
 		'-q',
 		'-o', 'BatchMode=yes',
 		'-o', 'ConnectTimeout=3',
+		lin'-o', lin'ControlMaster=auto',
+		lin'-o', lin'ControlPath=~/.ssh/control-%h-%p-%r',
+		lin'-o', lin'ControlPersist=600',
 		'-o', 'PreferredAuthentications=publickey',
 		'-o', 'UserKnownHostsFile='..mm.known_hosts_file(),
 		'-i', mm.keyfile(machine),
 		'root@'..ip,
 	}, args), update({
-		capture_stdout = not opt.allocate_tty,
-		capture_stderr = not opt.allocate_tty,
+		capture_stdout = not opt.tty,
+		capture_stderr = not opt.tty,
 	}, opt))
 end
 
@@ -1356,7 +1387,7 @@ cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', mm.ssh_key_gen)
 --machine listing ------------------------------------------------------------
 
 cmd_machines('m|machines', 'Show the list of machines', function(opt)
-	mm.print_rowset(opt, 'machines', ([[
+	mm.print_rowset('machines', [[
 		machine
 		active
 		public_ip
@@ -1370,7 +1401,7 @@ cmd_machines('m|machines', 'Show the list of machines', function(opt)
 		os_ver
 		mysql_ver
 		ctime
-	]]):gsub('%s+', ','))
+	]])
 end)
 
 --machine rename -------------------------------------------------------------
@@ -1608,7 +1639,7 @@ cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare)
 --deploy listing -------------------------------------------------------------
 
 cmd_deployments('d|deploys', 'Show the list of deployments', function()
-	mm.print_rowset(opt, 'deploys', ([[
+	mm.print_rowset('deploys', [[
 		deploy
 		status
 		machine
@@ -1617,9 +1648,9 @@ cmd_deployments('d|deploys', 'Show the list of deployments', function()
 		env
 		deployed_at
 		started_at
-		wanted_app_version=want_app deployed_app_version=app_ver deployed_app_commit=app_comm
-		wanted_sdk_version=want_sdk deployed_sdk_version=sdk_ver deployed_sdk_commit=sdk_comm
-	]]):gsub('%s+', ','))
+		wanted_app_version=app_want deployed_app_version=app_depv deployed_app_commit=app_depc
+		wanted_sdk_version=sdk_want deployed_sdk_version=sdk_depv deployed_sdk_commit=sdk_depc
+	]])
 end)
 
 --deploy deploy --------------------------------------------------------------
@@ -1850,7 +1881,7 @@ local function update_deploys_live_state()
 	for deploy, vars in pairs(mm.deploy_state_vars) do
 		local t = vars.live
 		local dt = t and max(0, now - t)
-		local live_now = dt < 3
+		local live_now = dt and dt < 3
 		if (vars.live_now or false) ~= live_now then
 			vars.live_now = live_now
 			changed = true
@@ -2191,6 +2222,7 @@ local mysql_stats_rowset = {
 			cast(sum_timer_wait/1000000000000 as double) as exec_time_total,
 			cast(max_timer_wait/1000000000000 as double) as exec_time_max,
 			cast(avg_timer_wait/1000000000000 as double) as exec_time_avg,
+			cast(1000000000000/avg_timer_wait as double) as qps_avg,
 			sum_rows_sent as rows_sent,
 			cast(round(sum_rows_sent / count_star) as double) rows_sent_avg,
 			sum_rows_examined as rows_scanned
@@ -2203,10 +2235,11 @@ local mysql_stats_rowset = {
 	field_attrs = {
 		query = {w = 400},
 		exec_count      = {w = 40},
-		exec_time_total = {w = 40, decimals = 2},
-		exec_time_max   = {w = 40, decimals = 2},
-		exec_time_avg   = {w = 40, decimals = 2},
-		full_scan = {'bool'},
+		exec_time_total = {w = 60, decimals = 2},
+		exec_time_max   = {w = 60, decimals = 2},
+		exec_time_avg   = {w = 60, decimals = 2},
+		qps_avg         = {w = 60, decimals = 0},
+		full_scan       = {'bool'},
 	},
 	hide_cols = 'digest',
 	db = function(params)
@@ -2230,6 +2263,20 @@ rowset.deploy_mysql_stats = sql_rowset(update(mysql_stats_rowset, {
 		return db(machine)
 	end,
 }))
+
+cmd_mysql('mysql-stats MACHINE|DEPLOY', 'Print MySQL query statistics', function(opt, md)
+	local _, m = mm.ip(md)
+	local opt = {
+		hidecols = 'digest',
+		maxsizes = {query = 60},
+		colmap = {schema_name = 'db'},
+	}
+	if m ~= md then --deploy
+		mm.print_rowset(opt, 'deploy_mysql_stats', nil, {md})
+	else
+		mm.print_rowset(opt, 'machine_mysql_stats', nil, {m})
+	end
+end)
 
 --machine backups ------------------------------------------------------------
 
@@ -2448,11 +2495,13 @@ end
 cmd_mbk('mbk-backup MACHINE [NOTE] [UP_COPY] [MACHINE1,...]',
 	'Backup a machine', mm.machine_backup)
 
-local function rsync_vars(machine)
+local function rsync_vars(src_machine, dst_machine)
 	return {
-		HOST = mm.ip(machine, true),
-		SSH_KEY = load(mm.keyfile(machine)),
-		SSH_HOSTKEY = mm.ssh_hostkey(machine),
+		HOST = mm.ip(dst_machine),
+		SSH_KEY = load(mm.keyfile(dst_machine)),
+		SSH_HOSTKEY = mm.ssh_hostkey(dst_machine),
+		SRC_MACHINE = src_machine,
+		DST_MACHINE = dst_machine,
 	}
 end
 
@@ -2525,11 +2574,11 @@ function api.machine_backup_copy(opt, src_mbk_copy, dest_machines)
 
 		local task = mm.ssh_sh(c.machine, [[
 			#use ssh backup
-			machine_backup_copy "$HOST" "$mbk" "$parent_mbk"
+			machine_backup_copy "$mbk" "$parent_mbk"
 		]], update({
 			mbk = c.mbk,
 			parent_mbk = c.parent_mbk,
-		}, rsync_vars(dest_machine)), {
+		}, rsync_vars(c.machine, dest_machine)), {
 			name = 'machine_backup_copy '..src_mbk_copy..' '..dest_machine,
 			out_stdour = false,
 		})
@@ -2922,11 +2971,11 @@ function api.deploy_backup_copy(opt, src_dbk_copy, machine)
 
 	local task = mm.ssh_sh(c.machine, [[
 		#use ssh backup
-		deploy_backup_copy "$HOST" "$dbk" "$parent_dbk"
+		deploy_backup_copy "$dbk" "$parent_dbk"
 	]], update({
 		dbk = c.dbk,
 		parent_dbk = parent_dbk,
-	}, rsync_vars(machine)), {
+	}, rsync_vars(c.machine, machine)), {
 		name = 'deploy_backup_copy '..src_dbk_copy..' '..machine,
 	})
 
@@ -3160,9 +3209,10 @@ end
 --remote access tools --------------------------------------------------------
 
 function mm.ssh_command(opt, mds, cmd, ...)
-	if isstr(opt) then
-		return mm.ssh_command(empty, mds, cmd, ...)
+	if opt ~= nil and not istab(opt) then
+		return mm.ssh_command(empty, opt, mds, cmd, ...)
 	end
+	opt = repl(opt, nil, empty)
 	if mds == 'ALL' then
 		mds = mm.active_machines()
 		cmd = checkarg(cmd, 'command required')
@@ -3170,25 +3220,26 @@ function mm.ssh_command(opt, mds, cmd, ...)
 		mds = words(checkarg(mds, 'machine or deploy required'):gsub(',', ' '))
 	end
 	local last_exit_code
-	local cmd = cmd and {'bash', '-c', "'"..catargs(' ', cmd, ...).."'"}
+	local cmd = catargs(' ', cmd, ...)
+	local bash_cmd = cmd and {'bash', '-c', "'"..cmd.."'"}
 	for _,md in ipairs(mds) do
 		local ip, m = mm.ip(md)
-		if #mds > 1 then say('SSH to %s:', m) end
-		local task = mm.ssh(md, cmd, {
+		if #mds > 1 then say('%s: `%s`', m, cmd) end
+		local task = mm.ssh(md, bash_cmd, {
 			allow_fail = true,
-			allocate_tty = not cmd or opt.tty,
+			tty = not cmd or opt.tty,
 			capture_stdout = false,
 			capture_stderr = false,
 		})
 		if task.exit_code ~= 0 then
-			say('SSH to %s: exit code: %d', m, task.exit_code)
+			say('%s: exit code: %d', m, task.exit_code)
 		end
 		last_exit_code = task.exit_code
 	end
 	return last_exit_code
 end
-cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [- CMD ...]', 'SSH to machine(s)', function(opt, nds, ...)
-	return mm.ssh_command(mds, ...)
+cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [- CMD ...]', 'SSH to machine(s)', function(opt, mds, ...)
+	return mm.ssh_command(opt, mds, ...)
 end)
 
 --TIP: make a putty session called `mm` where you set the window size,
@@ -3228,7 +3279,7 @@ end)
 
 cmd_files('ls [-l] [-a] MACHINE:DIR'  , 'Run `ls` on machine',
 	function(opt, md_dir)
-		local md, dir = md_dir:match'^(.-):(.*)'
+		local md, dir = checkarg(md_dir, 'machine:dir expected'):match'^(.-):(.*)'
 		local args = {'ls', dir}
 		for k,v in pairs(opt) do
 			add(args, '-'..k)
@@ -3242,9 +3293,8 @@ cmd_files('cat MACHINE:FILE', 'Run `cat` on machine',
 		mm.ssh_command(md, 'cat', file)
 	end)
 
-cmd_files('mc MACHINE:DIR', 'Run `mc` on machine',
-	function(opt, md_file)
-		local md, dir = md_file:match'^(.-):(.*)'
+cmd_files('mc MACHINE [DIR]', 'Run `mc` on machine',
+	function(opt, md, dir)
 		mm.ssh_command({tty = true}, md, 'mc', dir)
 	end)
 
@@ -3294,13 +3344,13 @@ end
 cmd_ssh_tunnels('tunnel MACHINE [LPORT1:]RPORT1,...',
 	'Create SSH tunnel(s) to machine',
 	function(opt, machine, ports)
-		mm.tunnel(machine, ports, {allocate_tty = true})
+		mm.tunnel(machine, ports, {tty = true})
 	end)
 
 cmd_ssh_tunnels('rtunnel MACHINE [LPORT1:]RPORT1,...',
 	'Create reverse SSH tunnel(s) to machine',
 	function(opt, machine, ports)
-		return mm.rtunnel(machine, ports, {allocate_tty = true})
+		return mm.rtunnel(machine, ports, {tty = true})
 	end)
 
 cmd_mysql('mysql DEPLOY|MACHINE [SQL]',
@@ -3311,7 +3361,7 @@ cmd_mysql('mysql DEPLOY|MACHINE [SQL]',
 		local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
 		if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
 		return mm.ssh(machine, args, {
-			allocate_tty = not sql,
+			tty = not sql,
 			capture_stdout = false,
 			capture_stderr = false,
 		})
@@ -3358,22 +3408,27 @@ cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
 end)
 
 function api.rsync(opt, md1, md2)
-	local m1, d1 = md1:match'^(.-):(.*)'
-	local m2, d2 = md2:match'^(.-):(.*)'
+	local m1, d1 = checkarg(md1, 'source machine:dir required'):match'^(.-):(.*)'
+	local m2, d2 = checkarg(md2, 'dest machine:dir required'):match'^(.-):(.*)'
 	checkarg(m1, 'syntax error: %s', md1)
 	if not d2 then m2, d2 = md2, d1 end
 	mm.ssh_sh(m1, [[
 		#use ssh
-		rsync_to "$HOST" "$SRC_DIR" "$DST_DIR"
-		]], update({
-			SRC_DIR = d1,
-			DST_DIR = d2,
-		}, rsync_vars(m2)), {
-			name = 'rsync '..m1..' '..m2, keyed = false,
-		}
-	)
+		rsync_dir
+	]], update({
+		SRC_DIR = d1,
+		DST_DIR = d2,
+		PROGRESS = opt.progress and 1 or nil,
+	}, rsync_vars(m1, m2)), {
+		name = 'rsync '..m1..' '..m2, keyed = false,
+	})
 end
-cmd_files('rsync MACHINE1:DIR MACHINE2[:DIR]', 'Sync directories between machines', mm.rsync)
+cmd_files('rsync [-q] MACHINE1:DIR MACHINE2[:DIR]',
+	'Sync directories between machines',
+	function(opt, ...)
+		opt.progress = not opt.q
+		mm.rsync(opt, ...)
+	end)
 
 function api.sha(opt, machine, dir)
 	return mm.ssh_sh(machine, [[
