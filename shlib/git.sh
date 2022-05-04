@@ -1,5 +1,8 @@
 #use die
 
+# make repeated git pulls faster by reusing SSH connections.
+export GIT_SSH_COMMAND="ssh -o ControlMaster=auto -o ControlPersist=10 -o ControlPath=~/.ssh/control-%h-%p-%r-git"
+
 git_install_git_up() {
 	say "Installing 'git up' command..."
 	local git_up=/usr/lib/git-core/git-up

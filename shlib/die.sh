@@ -33,3 +33,9 @@ checkvars() { # NAME1[-] NAME2 ...
 		fi
 	done
 }
+
+# frontend for calling shlib function safely without exiting the shell.
+mm() {
+	cmd="${1//\-/_}"; shift
+	($cmd "$@")
+}

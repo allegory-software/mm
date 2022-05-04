@@ -118,10 +118,11 @@ local function mm_schema()
 
 	tables.deploy = {
 		deploy           , strpk,
-		machine          , strid, fk,
+		machine          , strid, weak_fk,
 		repo             , url, not_null,
 		app              , strid, not_null,
 		domain           , strid,
+		http_port        , uint16,
 		wanted_app_version   , git_version,
 		wanted_sdk_version   , git_version,
 		deployed_app_version , git_version,
@@ -176,7 +177,7 @@ local function mm_schema()
 	--not per schema, so the idea of "machine backups" come from this limitation.
 	tables.mbk = {
 		mbk         , idpk,
-		machine     , strid, weak_fk(machine),
+		machine     , strid, fk(machine),
 		parent_mbk  , id, fk(mbk),
 		start_time  , timeago,
 		duration    , duration,
@@ -197,8 +198,8 @@ local function mm_schema()
 	tables.mbk_copy = {
 		mbk_copy   , idpk,
 		parent_mbk_copy, id, fk(mbk_copy),
-		mbk        , id   , not_null, fk,
-		machine     , strid, not_null, fk, uk(mbk, machine),
+		mbk         , id, not_null, fk,
+		machine     , strid, not_null, child_fk, uk(mbk, machine),
 		start_time  , timeago,
 		duration    , duration,
 		size        , filesize,
@@ -224,7 +225,7 @@ local function mm_schema()
 	tables.dbk_copy = {
 		dbk_copy   , idpk,
 		dbk        , id, not_null, fk,
-		machine     , strid, not_null, fk, uk(dbk, machine),
+		machine     , strid, not_null, child_fk, uk(dbk, machine),
 		start_time  , timeago,
 		duration    , duration,
 		size        , filesize,
@@ -288,6 +289,12 @@ mm.schema:import(mm_schema)
 local function NYI(event)
 	logerror('mm', event, 'NYI')
 	error('NYI: '..event)
+end
+
+local function split(sep, s)
+	if not s then return nil, nil end
+	local s1, s2 = s:match('^(.-)'..esc(sep)..'(.*)')
+	return repl(s1, ''), repl(s2, '')
 end
 
 --install --------------------------------------------------------------------
@@ -397,7 +404,7 @@ local function call_api(action, opt, ...)
 				io.stderr:write(s)
 				io.stderr:flush()
 			elseif chan == 'E' then
-				raise('mm_api', s)
+				raise('mm_api', '%s', s)
 			elseif chan == 'R' then
 				retval = json_arg(s)
 			end
@@ -893,215 +900,7 @@ local function run_tasks()
 	end
 end
 
---Lua+web+cmdline info api ---------------------------------------------------
-
-function mm.get_rowset(name, filter)
-	if from_server() then
-		local call_opt = filter and {args = {filter = json(filter)}}
-		t = call_json_api(call_opt, 'rowset.json', name)
-	else
-		NYI'get_rowset'
-	end
-	mm.schema:resolve_types(t.fields)
-	return t
-end
-
---filter: {k1v1,k1v2,...} or {{k1v1,k1v2},{k1v3,k2v4},...} for composite pks.
-function mm.print_rowset(opt, name, cols, filter)
-	if opt ~= nil and not istab(opt) then
-		return mm.print_rowset(nil, opt, name, cols, filter)
-	end
-	local t = mm.get_rowset(name or 'rowsets', filter)
-	outpqr(update({
-		rows = t.rows, fields = t.fields,
-		showcols = cols and cols:gsub(',', ' '),
-	}, opt))
-end
-cmd('r|rowset [-cols=col1,...] [NAME] [KEY]', 'Show a rowset', function(opt, name, key)
-	mm.print_rowset(name, opt.cols, key and {tonumber(key) or key})
-end)
-
-function sshcmd(cmd)
-	return win and indir(mm.sshdir, cmd) or cmd
-end
-
-function api.active_machines()
-	return (query'select machine from machine where active = 1')
-end
-
-function mm.each_machine(f, fmt, ...)
-	local machines = mm.active_machines()
-	local threads = sock.threadset()
-	for _,machine in ipairs(machines) do
-		resume(threads:thread(f, fmt, machine, ...), machine)
-	end
-	threads:wait()
-end
-
---for each machine run a Lua API on the client-side.
-local function callm(cmd, machine)
-	if not machine then
-		mm.each_machine(function(m)
-			mm[cmd](m)
-		end, cmd..' %s')
-		return
-	end
-	mm[cmd](machine)
-end
-
-function api.deploy_info(opt, deploy)
-	return checkfound(first_row([[
-		select
-			deploy,
-			mysql_pass
-		from deploy where deploy = ?
-	]], checkarg(deploy, 'deploy required')), 'deploy not found')
-end
-
-function api.ip_and_machine(opt, md)
-	local md = checkarg(md, 'machine or deploy required')
-	local m = first_row('select machine from deploy where deploy = ?', md) or md
-	local t = first_row('select machine, public_ip from machine where machine = ?', m)
-	checkfound(t, 'machine not found: %s', m)
-	checkfound(t.public_ip, 'machine does not have a public ip: %s', m)
-	return {t.public_ip, m}
-end
-function mm.ip(md)
-	return unpack(mm.ip_and_machine(md))
-end
-cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
-	function(opt, md)
-		print((mm.ip(md)))
-	end)
-
-local function known_hosts_file()
-	return indir(mm.vardir, 'known_hosts')
-end
-function api.known_hosts_file_contents()
-	return load(known_hosts_file())
-end
-function mm.known_hosts_file()
-	local file = known_hosts_file()
-	if from_server() then
-		save(file, mm.known_hosts_file_contents())
-	end
-	return file
-end
-
-local function keyfile(machine, ext)
-	return indir(mm.vardir, 'mm'..(machine and '-'..machine or '')..'.'..(ext or 'key'))
-end
-function api.keyfile_contents(opt, machine, ext)
-	return load(keyfile(machine, ext), false)
-end
-function mm.keyfile(machine, ext) --`mm ssh ...` gets it from the server
-	local file = keyfile(machine, ext)
-	if from_server() then
-		local s = checkfound(mm.keyfile_contents(machine, ext),
-			'SSH key file not found: %s', file)
-		save(file, s)
-	end
-	return file
-end
-function mm.ppkfile(machine) --`mm putty ...` gets it from the server
-	return mm.keyfile(machine, 'ppk')
-end
-
-function api.ssh_pubkey(opt, machine)
-	--NOTE: Windows ssh-keygen puts the key name at the end, but the Linux one doesn't.
-	local s = mm.exec({
-		sshcmd'ssh-keygen', '-y', '-f', mm.keyfile(machine),
-	}, {
-		name = catargs(' ', 'ssh_pubkey ', machine), keyed = false, visible = false,
-		out_stdout = false,
-	}):stdout():trim()
-	return (s:match('^[^%s]+%s+[^%s]+')..' mm')
-end
-cmd_ssh_keys('ssh-pubkey [MACHINE]', 'Show a/the SSH public key', function(...)
-	print(mm.ssh_pubkey(...))
-end)
-
---for manual updating via `curl mm.allegory.ro/pubkey/MACHINE >> authroized_keys`.
-function action.pubkey(machine)
-	setmime'txt' --TODO: disable html filter
-	outall(mm.ssh_pubkey(machine))
-end
-
-function api.ssh_hostkey(opt, machine)
-	return checkfound(first_row([[
-		select ssh_hostkey from machine where machine = ?
-	]], checkarg(machine, 'machine required')), 'hostkey not found for machine: %s', machine):trim()
-end
-cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(...)
-	print(mm.ssh_hostkey(...))
-end)
-
-function api.ssh_hostkey_sha(opt, machine)
-	machine = checkarg(machine, 'machine required')
-	local key = first_row([[
-		select ssh_hostkey from machine where machine = ?
-	]], machine)
-	local key = checkfound(key, 'hostkey not found for machine: %s', machine):trim()
-	local task = mm.exec(sshcmd'ssh-keygen'..' -E sha256 -lf -', {
-		stdin = key,
-		out_stdout = false,
-		name = 'ssh_hostkey_sha '..machine,
-		keyed = false, nolog = true,
-	})
-	return (task:stdout():trim():match'%s([^%s]+)')
-end
-cmd_ssh_keys('ssh-hostkey-sha MACHINE', 'Show a SSH host key SHA', function(...)
-	print(mm.ssh_hostkey_sha(...))
-end)
-
---run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
-function mm.ssh_key_fix_perms(opt, machine)
-	if not win then return end
-	local s = mm.keyfile(machine)
-	readpipe('icacls %s /c /t /Inheritance:d', s)
-	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
-	readpipe('takeown /F %s', s)
-	readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
-	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
-	readpipe('icacls %s', s)
-	say'Perms fixed.'
-end
-cmd_ssh_keys('ssh-key-fix-perms [MACHINE]', 'Fix SSH key perms for VBOX',
-	mm.ssh_key_fix_perms)
-
-function mm.ssh_key_gen_ppk(machine)
-	local key = mm.keyfile(machine)
-	local ppk = mm.ppkfile(machine)
-	local p76 = ' --ppk-param version=2'
-		--^^included putty 0.76 has this (debian's putty-tools which is 0.70 doesn't).
-	local cmd = win
-		and fmt('%s /keygen %s /output=%s', indir(mm.bindir, 'winscp.com'), key, ppk)
-		or fmt('%s %s -O private -o %s%s', indir(mm.bindir, 'puttygen'), key, ppk, p76)
-	mm.exec(cmd, {
-		name = 'ssh_key_gen_ppk'..(machine and ' '..machine or ''),
-	})
-	notify'PPK file generated.'
-end
-
-function api.mysql_root_pass(opt, machine) --last line of the private key
-	local file = mm.keyfile(machine)
-	local s = checkfound(load(file, false), 'SSH key file not found: %s', file)
-		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
-	assert(#s == 32)
-	return s
-end
-cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(...)
-	print(mm.mysql_root_pass(...))
-end)
-
-function mm.mysql_pass(opt, deploy)
-	return mm.deploy_info(opt, deploy).mysql_pass
-end
-cmd_mysql('mysql-pass DEPLOY', 'Show the MySQL password for an app', function(...)
-	print(mm.mysql_pass(...))
-end)
-
---async exec -----------------------------------------------------------------
+--async exec tasks -----------------------------------------------------------
 
 function mm.exec(cmd, opt)
 
@@ -1253,10 +1052,340 @@ function mm.exec(cmd, opt)
 	return task
 end
 
---ssh ------------------------------------------------------------------------
+--client rowset API ----------------------------------------------------------
 
-local function lin(s) return Linux and s or nil end
-function mm.ssh(md, args, opt)
+function mm.get_rowset(name, filter)
+	if from_server() then
+		local call_opt = filter and {args = {filter = json(filter)}}
+		t = call_json_api(call_opt, 'rowset.json', name)
+	else
+		NYI'get_rowset'
+	end
+	mm.schema:resolve_types(t.fields)
+	return t
+end
+
+--filter: {k1v1,k1v2,...} or {{k1v1,k1v2},{k1v3,k2v4},...} for composite pks.
+function mm.print_rowset(opt, name, cols, filter)
+	if opt ~= nil and not istab(opt) then
+		return mm.print_rowset(nil, opt, name, cols, filter)
+	end
+	local t = mm.get_rowset(name or 'rowsets', filter)
+	outpqr(update({
+		rows = t.rows, fields = t.fields,
+		showcols = cols and cols:gsub(',', ' '),
+	}, opt))
+end
+cmd('r|rowset [-cols=col1,...] [NAME] [KEY]', 'Show a rowset', function(opt, name, key)
+	mm.print_rowset(name, opt.cols, key and {tonumber(key) or key})
+end)
+
+--client info api ------------------------------------------------------------
+
+function api.active_machines()
+	return (query'select machine from machine where active = 1')
+end
+
+function mm.each_machine(f, fmt, ...)
+	local machines = mm.active_machines()
+	local threads = sock.threadset()
+	for _,machine in ipairs(machines) do
+		resume(threads:thread(f, fmt, machine, ...), machine)
+	end
+	threads:wait()
+end
+
+--for each machine run a Lua API on the client-side.
+local function callm(cmd, machine)
+	if not machine then
+		mm.each_machine(function(m)
+			mm[cmd](m)
+		end, cmd..' %s')
+		return
+	end
+	mm[cmd](machine)
+end
+
+function api.deploy_info(opt, deploy)
+	return checkfound(first_row([[
+		select
+			deploy,
+			mysql_pass
+		from deploy where deploy = ?
+	]], checkarg(deploy, 'deploy required')), 'deploy not found')
+end
+
+function api.ip_and_machine(opt, md)
+	local md = checkarg(md, 'machine or deploy required')
+	local m = first_row('select machine from deploy where deploy = ?', md) or md
+	local t = first_row('select machine, public_ip from machine where machine = ?', m)
+	checkfound(t, 'machine not found: %s', m)
+	checkfound(t.public_ip, 'machine does not have a public ip: %s', m)
+	return {t.public_ip, m}
+end
+function mm.ip(md)
+	return unpack(mm.ip_and_machine(md))
+end
+cmd_machines('ip MACHINE|DEPLOY', 'Get the IP address of a machine or deployment',
+	function(opt, md)
+		print((mm.ip(md)))
+	end)
+
+--ssh / host keys ------------------------------------------------------------
+
+function sshcmd(cmd)
+	return win and indir(mm.sshdir, cmd) or cmd
+end
+
+local function known_hosts_file()
+	return indir(mm.vardir, 'known_hosts')
+end
+function api.known_hosts_file_contents()
+	return load(known_hosts_file())
+end
+function mm.known_hosts_file()
+	local file = known_hosts_file()
+	if from_server() then
+		save(file, mm.known_hosts_file_contents())
+	end
+	return file
+end
+
+local function gen_known_hosts_file()
+	local t = {}
+	for i, ip, s in each_row_vals[[
+		select public_ip, ssh_hostkey
+		from machine
+		where ssh_hostkey is not null
+		order by pos, ctime
+	]] do
+		add(t, s)
+	end
+	save(mm.known_hosts_file(), concat(t, '\n'))
+end
+
+function api.ssh_hostkey_update(opt, machine)
+	local ip, machine = mm.ip(machine)
+	local s = mm.exec({
+		sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', ip
+	}, {
+		name = 'ssh_hostkey_update '..machine,
+		out_stdout = false,
+		out_stderr = false,
+	}):stdout()
+	assert(update_row('machine', {machine, ssh_hostkey = s}).affected_rows == 1)
+	gen_known_hosts_file()
+	notify('Host key updated for %s.', machine)
+end
+cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
+	mm.ssh_hostkey_update)
+
+function api.ssh_hostkey(opt, machine)
+	return checkfound(first_row([[
+		select ssh_hostkey from machine where machine = ?
+	]], checkarg(machine, 'machine required')), 'hostkey not found for machine: %s', machine):trim()
+end
+cmd_ssh_keys('ssh-hostkey MACHINE', 'Show a SSH host key', function(...)
+	print(mm.ssh_hostkey(...))
+end)
+
+function api.ssh_hostkey_sha(opt, machine)
+	machine = checkarg(machine, 'machine required')
+	local key = first_row([[
+		select ssh_hostkey from machine where machine = ?
+	]], machine)
+	local key = checkfound(key, 'hostkey not found for machine: %s', machine):trim()
+	local task = mm.exec(sshcmd'ssh-keygen'..' -E sha256 -lf -', {
+		stdin = key,
+		out_stdout = false,
+		name = 'ssh_hostkey_sha '..machine,
+		keyed = false, nolog = true,
+	})
+	return (task:stdout():trim():match'%s([^%s]+)')
+end
+cmd_ssh_keys('ssh-hostkey-sha MACHINE', 'Show a SSH host key SHA', function(...)
+	print(mm.ssh_hostkey_sha(...))
+end)
+
+--ssh / private keys ---------------------------------------------------------
+
+local function keyfile(machine, ext)
+	return indir(mm.vardir, 'mm'..(machine and '-'..machine or '')..'.'..(ext or 'key'))
+end
+function api.keyfile_contents(opt, machine, ext)
+	return load(keyfile(machine, ext), false)
+end
+function mm.keyfile(machine, ext) --`mm ssh ...` gets it from the server
+	local file = keyfile(machine, ext)
+	if from_server() then
+		local s = checkfound(mm.keyfile_contents(machine, ext),
+			'SSH key file not found: %s', file)
+		save(file, s)
+	end
+	return file
+end
+function mm.ppkfile(machine) --`mm putty ...` gets it from the server
+	return mm.keyfile(machine, 'ppk')
+end
+
+--run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
+function mm.ssh_key_fix_perms(opt, machine)
+	if not win then return end
+	local s = mm.keyfile(machine)
+	readpipe('icacls %s /c /t /Inheritance:d', s)
+	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
+	readpipe('takeown /F %s', s)
+	readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
+	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
+	readpipe('icacls %s', s)
+	say'Perms fixed.'
+end
+cmd_ssh_keys('ssh-key-fix-perms [MACHINE]', 'Fix SSH key perms for VBOX',
+	mm.ssh_key_fix_perms)
+
+function mm.ssh_key_gen_ppk(machine)
+	local key = mm.keyfile(machine)
+	local ppk = mm.ppkfile(machine)
+	local p76 = ' --ppk-param version=2'
+		--^^included putty 0.76 has this (debian's putty-tools which is 0.70 doesn't).
+	local cmd = win
+		and fmt('%s /keygen %s /output=%s', indir(mm.bindir, 'winscp.com'), key, ppk)
+		or fmt('%s %s -O private -o %s%s', indir(mm.bindir, 'puttygen'), key, ppk, p76)
+	mm.exec(cmd, {
+		name = 'ssh_key_gen_ppk'..(machine and ' '..machine or ''),
+	})
+	notify'PPK file generated.'
+end
+
+function api.ssh_key_gen()
+	rm(mm.keyfile())
+	mm.exec({
+		sshcmd'ssh-keygen', '-f', mm.keyfile(),
+		'-t', 'rsa',
+		'-b', '2048',
+		'-C', 'mm',
+		'-q',
+		'-N', '',
+	}, {
+		name = 'ssh_key_gen',
+	})
+	rm(mm.keyfile()..'.pub') --we'll compute it every time.
+	mm.ssh_key_fix_perms()
+	mm.ssh_key_gen_ppk()
+	rowset_changed'config'
+	query'update machine set ssh_key_ok = 0'
+	rowset_changed'machines'
+	notify'SSH key generated.'
+end
+cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', mm.ssh_key_gen)
+
+function api.ssh_key_update(opt, machine)
+	note('mm', 'upd-key', '%s', machine)
+	local pubkey = mm.ssh_pubkey()
+	stored_pubkey = mm.ssh_sh(machine, [=[
+		#use ssh mysql user
+		has_mysql && {
+			mysql_update_pass localhost root "$MYSQL_ROOT_PASS"
+			mysql_gen_my_cnf  localhost root "$MYSQL_ROOT_PASS"
+		}
+		ssh_update_pubkey mm "$PUBKEY"
+		user_lock_pass root
+		ssh_pubkey mm  # print it so we can check it
+	]=], {
+		PUBKEY = pubkey,
+		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
+	}, {
+		name = 'ssh_key_update '..machine,
+		out_stdout = false,
+	}):stdout():trim()
+	check500(stored_pubkey == pubkey, 'SSH public key NOT updated for: %s.', machine)
+
+	cp(mm.keyfile(), mm.keyfile(machine))
+	cp(mm.ppkfile(), mm.ppkfile(machine))
+	mm.ssh_key_fix_perms(machine)
+
+	update_row('machine', {machine, ssh_key_ok = true})
+	rowset_changed'machines'
+
+	notify('SSH key updated for %s.', machine)
+end
+cmd_ssh_keys('ssh-key-update [MACHINE]', 'Update SSH key(s)', function(opt, machine)
+	callm('ssh_key_update', machine)
+end)
+
+function api.ssh_key_check(opt, machine)
+	local host_pubkey = mm.ssh_sh(machine, [[
+		#use ssh
+		ssh_pubkey mm
+	]], nil, {
+		name = 'ssh_key_check '..(machine or ''),
+		keyed = false, nolog = true,
+		out_stdout = false,
+	}):stdout():trim()
+	local ok = host_pubkey == mm.ssh_pubkey()
+	update_row('machine', {machine, ssh_key_ok = ok})
+	rowset_changed'machines'
+	notify_kind(not ok and 'warn' or nil,
+		'SSH key is%s up-to-date for %s', ok and '' or ' NOT', ''..machine)
+end
+cmd_ssh_keys('ssh-key-check [MACHINE]', 'Check that SSH keys are up-to-date',
+	function(opt, machine)
+		callm('ssh_key_check', machine)
+	end)
+
+--ssh / mysql passwords derived from private keys ----------------------------
+
+function api.mysql_root_pass(opt, machine) --last line of the private key
+	local file = mm.keyfile(machine)
+	local s = checkfound(load(file, false), 'SSH key file not found: %s', file)
+		:gsub('%-+.-PRIVATE%s+KEY%-+', ''):gsub('[\r\n]', ''):trim():sub(-32)
+	assert(#s == 32)
+	return s
+end
+cmd_mysql('mysql-root-pass [MACHINE]', 'Show the MySQL root password', function(...)
+	print(mm.mysql_root_pass(...))
+end)
+
+function mm.mysql_pass(opt, deploy)
+	return mm.deploy_info(opt, deploy).mysql_pass
+end
+cmd_mysql('mysql-pass DEPLOY', 'Show the MySQL password for an app', function(...)
+	print(mm.mysql_pass(...))
+end)
+
+--ssh / public keys ----------------------------------------------------------
+
+function api.ssh_pubkey(opt, machine)
+	--NOTE: Windows ssh-keygen puts the key name at the end, but the Linux one doesn't.
+	local s = mm.exec({
+		sshcmd'ssh-keygen', '-y', '-f', mm.keyfile(machine),
+	}, {
+		name = catargs(' ', 'ssh_pubkey ', machine), keyed = false, visible = false,
+		out_stdout = false,
+	}):stdout():trim()
+	return (s:match('^[^%s]+%s+[^%s]+')..' mm')
+end
+cmd_ssh_keys('ssh-pubkey [MACHINE]', 'Show a/the SSH public key', function(...)
+	print(mm.ssh_pubkey(...))
+end)
+
+--for manual updating via `curl mm.allegory.ro/pubkey/MACHINE >> authroized_keys`.
+function action.pubkey(machine)
+	setmime'txt' --TODO: disable html filter
+	outall(mm.ssh_pubkey(machine))
+end
+
+--ssh / finally... -----------------------------------------------------------
+
+--make repeated SSH invocations faster by reusing connections.
+local function ssh_control_opts(tty)
+	if not Linux then return end
+	return
+		'-o', 'ControlMaster=auto',
+		'-o', 'ControlPath=~/.ssh/control-%h-%p-%r'..(tty and '-tty' or ''),
+		'-o', 'ControlPersist=10'
+end
+function mm.ssh(md, cmd_args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
 	opt.machine = machine
@@ -1266,14 +1395,12 @@ function mm.ssh(md, args, opt)
 		'-q',
 		'-o', 'BatchMode=yes',
 		'-o', 'ConnectTimeout=3',
-		lin'-o', lin'ControlMaster=auto',
-		lin'-o', lin'ControlPath=~/.ssh/control-%h-%p-%r'..(opt.tty and '-tty' or ''),
-		lin'-o', lin'ControlPersist=600',
 		'-o', 'PreferredAuthentications=publickey',
 		'-o', 'UserKnownHostsFile='..mm.known_hosts_file(),
+		}, {ssh_control_opts(opt.tty)}, {
 		'-i', mm.keyfile(machine),
-		'root@'..ip,
-	}, args), update({
+		'root@'..ip, cmd_args
+	}), update({
 		capture_stdout = not opt.tty,
 		capture_stderr = not opt.tty,
 	}, opt))
@@ -1360,29 +1487,335 @@ function mm.ssh_sh(machine, script, script_env, opt)
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
 
---machine ssh key gen --------------------------------------------------------
+--machine git keys update ----------------------------------------------------
 
-function api.ssh_key_gen()
-	rm(mm.keyfile())
-	mm.exec({
-		sshcmd'ssh-keygen', '-f', mm.keyfile(),
-		'-t', 'rsa',
-		'-b', '2048',
-		'-C', 'mm',
-		'-q',
-		'-N', '',
-	}, {
-		name = 'ssh_key_gen',
-	})
-	rm(mm.keyfile()..'.pub') --we'll compute it every time.
-	mm.ssh_key_fix_perms()
-	mm.ssh_key_gen_ppk()
-	rowset_changed'config'
-	query'update machine set ssh_key_ok = 0'
-	rowset_changed'machines'
-	notify'SSH key generated.'
+local function git_hosting_vars()
+	local vars = {}
+	local names = {}
+	for _,t in each_row[[
+		select name, host, ssh_hostkey, ssh_key
+		from git_hosting
+	]] do
+		for k,v in pairs(t) do
+			vars[(t.name..'_'..k):upper()] = v
+			names[t.name] = true
+		end
+	end
+	vars.GIT_HOSTS = cat(keys(names, true), ' ')
+	return vars
 end
-cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', mm.ssh_key_gen)
+
+function api.git_keys_update(opt, machine)
+	local vars = git_hosting_vars()
+	mm.ssh_sh(machine, [=[
+		#use ssh
+		ssh_git_keys_update
+	]=], vars, {
+		name = 'git_keys_update '..(machine or ''),
+	})
+	notify('Git keys updated for: %s.', machine)
+end
+cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
+	function(opt, machine)
+		callm('git_keys_update', machine)
+	end)
+
+--remote access tools --------------------------------------------------------
+
+function mm.ssh_cli(opt, mds, cmd, ...)
+	if opt ~= nil and not istab(opt) then
+		return mm.ssh_cli(empty, opt, mds, cmd, ...)
+	end
+	opt = repl(opt, nil, empty)
+	if mds == 'ALL' then
+		mds = mm.active_machines()
+		cmd = checkarg(cmd, 'command required')
+	else
+		mds = words(checkarg(mds, 'machine or deploy required'):gsub(',', ' '))
+	end
+	local last_exit_code
+	local cmd = catargs(' ', cmd, ...)
+	local bash_cmd = cmd and {'bash', '-c', "'"..cmd.."'"}
+	for _,md in ipairs(mds) do
+		local ip, m = mm.ip(md)
+		if #mds > 1 then say('%s: `%s`', m, cmd) end
+		local task = mm.ssh(md, bash_cmd, {
+			allow_fail = true,
+			tty = not cmd or opt.tty,
+			capture_stdout = false,
+			capture_stderr = false,
+		})
+		if task.exit_code ~= 0 then
+			say('%s: exit code: %d', m, task.exit_code)
+		end
+		last_exit_code = task.exit_code
+	end
+	return last_exit_code
+end
+cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [- CMD ...]', 'SSH to machine(s)', function(opt, mds, ...)
+	return mm.ssh_cli(opt, mds, ...)
+end)
+
+--TIP: make a putty session called `mm` where you set the window size,
+--uncheck "warn on close" and whatever else you need to make worrking
+--with putty comfortable for you.
+cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty', function(opt, md)
+	local ip, m = mm.ip(md)
+	local deploy = m ~= md and md or nil
+	local cmd = indir(mm.bindir, 'putty')..' -load mm -t -i '..mm.ppkfile(m)
+		..' root@'..ip
+	if opt.shlib then
+		local cmdfile = tmppath'puttycmd.txt'
+		local script = [[
+			#use deploy backup
+		]]
+		local script_env = update({
+			DEBUG   = env'DEBUG' or '',
+			VERBOSE = env'VERBOSE' or '',
+		}, git_hosting_vars(), deploy and deploy_vars(deploy))
+		local s = mm.sh_script(script:outdent(), script_env)
+		local s = catargs('\n',
+			'export MM_TMP_SH=/root/.mm.$$.sh',
+			'cat << \'EOFFF\' > $MM_TMP_SH',
+			'rm -f $MM_TMP_SH',
+			s,
+			deploy and 'must cd /home/$DEPLOY/$APP',
+			deploy and 'VARS="DEBUG VERBOSE" run_as $DEPLOY bash',
+			--deploy and 'sudo -iu '..deploy..' bash',
+			'EOFFF',
+			'exec bash --init-file $MM_TMP_SH'
+		)
+		save(cmdfile, s)
+		runafter(.5, function()
+			rm(cmdfile)
+		end)
+		cmd = cmd..' -m '..cmdfile
+	end
+	proc.exec(cmd):forget()
+end)
+
+cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
+	function(opt, md_dir)
+		local md, dir = split(':', md_dir)
+		checkarg(md and dir, 'machine:dir expected')
+		local args = {'ls', dir}
+		for k,v in pairs(opt) do
+			add(args, '-'..k)
+		end
+		mm.ssh_cli(md, unpack(args))
+	end)
+
+cmd_files('cat MACHINE:FILE', 'Run `cat` on machine',
+	function(opt, md_file)
+		local md, file = split(':', md_file)
+		checkarg(md and file, 'machine:file expected')
+		mm.ssh_cli(md, 'cat', file)
+	end)
+
+cmd_files('mc MACHINE [DIR]', 'Run `mc` on machine',
+	function(opt, md, dir)
+		mm.ssh_cli({tty = true}, md, 'mc', dir)
+	end)
+
+cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
+	function(opt, md_file)
+		local md, file = split(':', md_file)
+		checkarg(md and file, 'machine:file expected')
+		mm.ssh_cli({tty = true}, md, 'mcedit', file)
+	end)
+
+--TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
+function mm.tunnel(machine, ports, opt, rev)
+	local args = {'-N'}
+	if logging.debug then add(args, '-v') end
+	ports = checkarg(ports, 'ports expected')
+	local rports = {}
+	for ports in ports:gmatch'([^,]+)' do
+		local lport, rport = split(':', ports)
+		rport = rport or ports
+		lport = lport or ports
+		add(args, rev and '-R' or '-L')
+		if rev then lport, rport = rport, lport end
+		add(args, '127.0.0.1:'..lport..':127.0.0.1:'..rport)
+		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
+		add(rports, rport)
+	end
+	local on_finish
+	local function start_tunnel()
+		mm.ssh(machine, args, update({
+			name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
+			type = 'long',
+			on_finish = on_finish,
+		}, opt))
+	end
+	function on_finish(task)
+		if task.killed then return end
+		sleep(1)
+		start_tunnel()
+	end
+	start_tunnel()
+end
+function mm.rtunnel(machine, ports, opt)
+	return mm.tunnel(machine, ports, opt, true)
+end
+
+cmd_ssh_tunnels('tunnel MACHINE [LPORT1:]RPORT1,...',
+	'Create SSH tunnel(s) to machine',
+	function(opt, machine, ports)
+		mm.tunnel(machine, ports, {tty = true})
+	end)
+
+cmd_ssh_tunnels('rtunnel MACHINE [LPORT1:]RPORT1,...',
+	'Create reverse SSH tunnel(s) to machine',
+	function(opt, machine, ports)
+		return mm.rtunnel(machine, ports, {tty = true})
+	end)
+
+cmd_mysql('mysql DEPLOY|MACHINE [SQL]',
+	'Execute MySQL command or remote REPL',
+	function(opt, md, sql)
+		local ip, machine = mm.ip(md)
+		local deploy = machine ~= md and md
+		local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
+		if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
+		return mm.ssh(machine, args, {
+			tty = not sql,
+			capture_stdout = false,
+			capture_stderr = false,
+		})
+	end)
+
+--TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
+function mm.mount(opt, machine, rem_path, drive)
+	if win then
+		drive = drive or 'S'
+		rem_path = rem_path or '/'
+		local cmd =
+			'"'..indir(mm.sshfsdir, 'sshfs.exe')..'"'..
+			' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
+			(opt.bg and '' or ' -f')..
+			--' -odebug'.. --good stuff (implies -f)
+			--these were copy-pasted from sshfs-win manager.
+			' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
+			' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
+			--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
+			' -ossh_command='..path.sep(indir(mm.sshfsdir, 'ssh'), nil, '/')..
+			' -oBatchMode=yes'..
+			' -oRequestTTY=no'..
+			' -oPreferredAuthentications=publickey'..
+			' -oUserKnownHostsFile='..path.sep(mm.known_hosts_file(), nil, '/')..
+			' -oIdentityFile='..path.sep(mm.keyfile(machine), nil, '/')
+		if opt.bg then
+			exec(cmd)
+		else
+			mm.exec(cmd, {
+				name = 'mount '..drive,
+			})
+		end
+	else
+		NYI'mount'
+	end
+end
+cmd_ssh_mounts('mount [-bg] MACHINE PATH [DRIVE]', 'Mount remote path to drive', mm.mount)
+cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
+	if win then
+		exec'taskkill /f /im sshfs.exe'
+	else
+		NYI'mount_kill_all'
+	end
+end)
+
+local function rsync_vars(src_machine, dst_machine)
+	return {
+		HOST = mm.ip(dst_machine),
+		SSH_KEY = load(mm.keyfile(dst_machine)),
+		SSH_HOSTKEY = mm.ssh_hostkey(dst_machine),
+		SRC_MACHINE = src_machine,
+		DST_MACHINE = dst_machine,
+	}
+end
+
+function mm.rsync(opt, md1, md2)
+	if isstr(opt) then opt, md1, md2 = empty, opt, md1 end
+	md1 = str_arg(md1)
+	md2 = str_arg(md2)
+	local m1, d1 = split(':', md1)
+	local m2, d2 = split(':', md2)
+	if not (m1 or d1) then d1 = md1 end -- [SRC_MACHINE:]DIR
+	if not (m2 or d2) then m2 = md2 end -- DST_MACHINE[:DIR]
+	d2 = d2 or d1
+	checkarg(d1, '[source:]dir required')
+	if m1 and m2 then --remote-to-remote
+		mm.ssh_sh(m1, [[
+			#use ssh
+			rsync_dir
+		]], update({
+			SRC_DIR = d1,
+			DST_DIR = d2,
+			PROGRESS = opt.progress and 1 or nil,
+		}, rsync_vars(m1, m2)), {
+			name = 'rsync '..m1..' '..m2, keyed = false,
+			tty = opt.tty,
+		})
+	else
+		local ssh_cmd = 'ssh'
+			..' -q -o BatchMode=yes'
+			..' -o PreferredAuthentications=publickey'
+			..' -o UserKnownHostsFile='..path.sep(mm.known_hosts_file(), nil, '/')
+			..' -i '..mm.keyfile(m1 or m2)
+			..' '..proc.quote_args_unix(ssh_control_opts(opt.tty))
+		if m2 then --upload
+			local ip = mm.ip(m2)
+			out_on('2', _('Uploading %s to %s:%s ... \n', d1, m2, d2))
+			mm.exec({
+				sshcmd'rsync', '--delete', '--timeout=5',
+				opt.progress and '--info=progress2' or nil,
+				'-e', ssh_cmd, '-aHR', d1..'/./.', 'root@'..ip..':/'..d2,
+			}, {
+				name = 'rsync upload-to '..m2,
+				capture_stdout = not opt.tty,
+				capture_stderr = not opt.tty,
+			})
+		elseif m1 then --download
+			local ip = mm.ip(m1)
+			out_on('2', _('Downloading %s:%s to %s ... \n', m1, d1, d2))
+			mm.exec({
+				sshcmd'rsync', '--delete', '--timeout=5',
+				opt.progress and '--info=progress2' or nil,
+				'-e', ssh_cmd, '-aHR', 'root@'..ip..':/'..d1..'/./.', '/'..d2,
+			}, {
+				name = 'rsync download-from '..m1,
+				capture_stdout = not opt.tty,
+				capture_stderr = not opt.tty,
+			})
+		else
+			NYI'local-to-local rsync'
+		end
+	end
+end
+cmd_files('rsync [-q] [SRC_MACHINE:]DIR [DST_MACHINE][:DIR]',
+	'Sync directories between machines',
+	function(opt, ...)
+		opt.progress = not opt.q
+		opt.tty = true
+		mm.rsync(opt, ...)
+	end)
+
+function api.sha(opt, machine, dir)
+	return mm.ssh_sh(machine, [[
+		#use fs
+		sha_dir "$DIR"
+		]], {
+			DIR = dir
+		}, {
+			name = 'sha '..machine, keyed = false,
+			out_stdout = false,
+		}
+	):stdout():trim()
+end
+cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', function(...)
+	print(mm.sha(...))
+end)
 
 --machine listing ------------------------------------------------------------
 
@@ -1489,149 +1922,29 @@ cmd_machines('i|machine-info MACHINE', 'Show machine info', mm.update_machine_in
 --machine reboot -------------------------------------------------------------
 
 function api.machine_reboot(opt, machine)
-	mm.ssh(machine, {
-		'reboot',
-	}, {
+	mm.ssh(machine, {'reboot'}, {
 		name = 'machine_reboot '..(machine or ''),
 	})
 	notify('Machine rebooted: %s.', machine)
 end
-
---machine ssh hostkey update -------------------------------------------------
-
-local function gen_known_hosts_file()
-	local t = {}
-	for i, ip, s in each_row_vals[[
-		select public_ip, ssh_hostkey
-		from machine
-		where ssh_hostkey is not null
-		order by pos, ctime
-	]] do
-		add(t, s)
-	end
-	save(mm.known_hosts_file(), concat(t, '\n'))
-end
-
-function api.ssh_hostkey_update(opt, machine)
-	local ip, machine = mm.ip(machine)
-	local s = mm.exec({
-		sshcmd'ssh-keyscan', '-4', '-T', '2', '-t', 'rsa', ip
-	}, {
-		name = 'ssh_hostkey_update '..machine,
-		out_stdout = false,
-		out_stderr = false,
-	}):stdout()
-	assert(update_row('machine', {machine, ssh_hostkey = s}).affected_rows == 1)
-	gen_known_hosts_file()
-	notify('Host key updated for %s.', machine)
-end
-cmd_ssh_keys('ssh-hostkey-update MACHINE', 'Make a machine known again to us',
-	mm.ssh_hostkey_update)
-
---machine ssh key update -----------------------------------------------------
-
-function api.ssh_key_update(opt, machine)
-	note('mm', 'upd-key', '%s', machine)
-	local pubkey = mm.ssh_pubkey()
-	stored_pubkey = mm.ssh_sh(machine, [=[
-		#use ssh mysql user
-		has_mysql && {
-			mysql_update_pass localhost root "$MYSQL_ROOT_PASS"
-			mysql_gen_my_cnf  localhost root "$MYSQL_ROOT_PASS"
-		}
-		ssh_update_pubkey mm "$PUBKEY"
-		user_lock_pass root
-		ssh_pubkey mm  # print it so we can check it
-	]=], {
-		PUBKEY = pubkey,
-		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
-	}, {
-		name = 'ssh_key_update '..machine,
-		out_stdout = false,
-	}):stdout():trim()
-	check500(stored_pubkey == pubkey, 'SSH public key NOT updated for: %s.', machine)
-
-	cp(mm.keyfile(), mm.keyfile(machine))
-	cp(mm.ppkfile(), mm.ppkfile(machine))
-	mm.ssh_key_fix_perms(machine)
-
-	update_row('machine', {machine, ssh_key_ok = true})
-	rowset_changed'machines'
-
-	notify('SSH key updated for %s.', machine)
-end
-cmd_ssh_keys('ssh-key-update [MACHINE]', 'Update SSH key(s)', function(opt, machine)
-	callm('ssh_key_update', machine)
-end)
-
---machine ssh key check ------------------------------------------------------
-
-function api.ssh_key_check(opt, machine)
-	local host_pubkey = mm.ssh_sh(machine, [[
-		#use ssh
-		ssh_pubkey mm
-	]], nil, {
-		name = 'ssh_key_check '..(machine or ''),
-		keyed = false, nolog = true,
-		out_stdout = false,
-	}):stdout():trim()
-	local ok = host_pubkey == mm.ssh_pubkey()
-	update_row('machine', {machine, ssh_key_ok = ok})
-	rowset_changed'machines'
-	notify_kind(not ok and 'warn' or nil,
-		'SSH key is%s up-to-date for %s', ok and '' or ' NOT', ''..machine)
-end
-cmd_ssh_keys('ssh-key-check [MACHINE]', 'Check that SSH keys are up-to-date',
-	function(opt, machine)
-		callm('ssh_key_check', machine)
-	end)
-
---machine git keys update ----------------------------------------------------
-
-local function git_hosting_vars()
-	local vars = {}
-	local names = {}
-	for _,t in each_row[[
-		select name, host, ssh_hostkey, ssh_key
-		from git_hosting
-	]] do
-		for k,v in pairs(t) do
-			vars[(t.name..'_'..k):upper()] = v
-			names[t.name] = true
-		end
-	end
-	vars.GIT_HOSTS = cat(keys(names, true), ' ')
-	return vars
-end
-
-function api.git_keys_update(opt, machine)
-	local vars = git_hosting_vars()
-	mm.ssh_sh(machine, [=[
-		#use ssh
-		ssh_git_keys_update
-	]=], vars, {
-		name = 'git_keys_update '..(machine or ''),
-	})
-	notify('Git keys updated for: %s.', machine)
-end
-cmd_ssh_keys('git-keys-update [MACHINE]', 'Updage Git SSH keys',
-	function(opt, machine)
-		callm('git_keys_update', machine)
-	end)
 
 --machine prepare ------------------------------------------------------------
 
 function api.prepare(opt, machine)
 	mm.ip(machine)
 	local vars = git_hosting_vars()
-	vars.MYSQL_ROOT_PASS = mm.mysql_root_pass(machine)
 	vars.MACHINE = machine
+	vars.MYSQL_ROOT_PASS = mm.mysql_root_pass(machine)
+	vars.DHPARAM = load(indir(mm.vardir, 'dhparam.pem'))
 	mm.ssh_sh(machine, [=[
 		#use deploy
 		machine_prepare
 	]=], vars, {
 		name = 'prepare '..machine,
 	})
+
+	mm.rsync('')
+
 	notify('Machine prepared: %s.', machine)
 end
 cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare)
@@ -1669,6 +1982,8 @@ local function deploy_vars(deploy, new_deploy)
 			d.wanted_sdk_version sdk_version,
 			if(d.deployed_app_commit is not null, 1, 0) deployed,
 			coalesce(d.env, 'dev') env,
+			d.domain,
+			d.http_port,
 			d.mysql_pass,
 			d.secret
 		from
@@ -1681,6 +1996,8 @@ local function deploy_vars(deploy, new_deploy)
 
 	new_deploy = new_deploy or deploy
 	vars.DEPLOY = new_deploy
+
+	checkarg(vars.MACHINE, 'Machine not set for deploy: %s', new_deploy)
 
 	for _, name, val in each_row_vals([[
 		select
@@ -2433,7 +2750,7 @@ function api.machine_backup(opt, machine, note, parent_mbk_copy, dest_machines)
 
 	query([[
 		insert into mbk_deploy (
-			mbk        ,
+			mbk         ,
 			deploy      ,
 			app_version ,
 			sdk_version ,
@@ -2494,16 +2811,6 @@ function api.machine_backup(opt, machine, note, parent_mbk_copy, dest_machines)
 end
 cmd_mbk('mbk-backup MACHINE [NOTE] [UP_COPY] [MACHINE1,...]',
 	'Backup a machine', mm.machine_backup)
-
-local function rsync_vars(src_machine, dst_machine)
-	return {
-		HOST = mm.ip(dst_machine),
-		SSH_KEY = load(mm.keyfile(dst_machine)),
-		SSH_HOSTKEY = mm.ssh_hostkey(dst_machine),
-		SRC_MACHINE = src_machine,
-		DST_MACHINE = dst_machine,
-	}
-end
 
 local function mbk_copy_info(mbk_copy)
 	return checkfound(first_row([[
@@ -2696,14 +3003,9 @@ end
 cmd_mbk('mbk-remove COPY1[-COPY2],...', 'Remove machine backup copies', function(copies)
 	checkarg(copies, 'backup copy required')
 	for i,s in ipairs(words(copies:gsub(',', ' '))) do
-		local mbk_copy1, mbk_copy2 = s, s
-		if s:find'%-' then --COPY1-COPY2
-			mbk_copy1, mbk_copy2 = s:match'(.-)%-(.*)'
-		elseif s:find'%.%.' then --COPY1..COPY2
-			mbk_copy1, mbk_copy2 = s:match'(.-)%.%.(.*)'
-		end
-		mbk_copy1 = checkarg(id_arg(mbk_copy1), 'invalid backup copy')
-		mbk_copy2 = checkarg(id_arg(mbk_copy2), 'invalid backup copy')
+		local mbk_copy1, mbk_copy2 = split(s:find'%-' and '-' or '..', s)
+		mbk_copy1 = checkarg(id_arg(mbk_copy1 or s), 'invalid backup copy')
+		mbk_copy2 = checkarg(id_arg(mbk_copy2 or s), 'invalid backup copy')
 		for mbk_copy = min(mbk_copy1, mbk_copy2), max(mbk_copy1, mbk_copy2), 1 do
 			mm.machine_backup_copy_remove(opt, mbk_copy)
 		end
@@ -2810,23 +3112,23 @@ function api.print_deploy_backups(opt, deploy)
 end
 cmd_dbk('dbk|deploy-backups DEPLOY', 'Show deploy backups', mm.print_deploy_backups)
 
-function api.deploy_backup(opt, deploy, note, ...)
+function api.deploy_backup(opt, deploy)
 
 	deploy = checkarg(deploy, 'deploy required')
 
 	local d = checkfound(first_row([[
 		select
-			machine,
 			deployed_app_version,
 			deployed_sdk_version,
 			deployed_app_commit,
 			deployed_sdk_commit,
+			machine,
 			deployed_at
 		from deploy
 		where deploy = ?
 	]], deploy), 'deploy not found')
 
-	checkarg(d.deployed_at, '%s is not deployed.', deploy)
+	checkarg(d.deployed_at and d.machine, 'deploy is not deployed: %s', deploy)
 
 	local task_name = 'deploy_backup '..deploy
 	check500(not mm.running_task(task_name), 'already running: %s', task_name)
@@ -2848,7 +3150,7 @@ function api.deploy_backup(opt, deploy, note, ...)
 		sdk_version = d.deployed_sdk_version,
 		app_commit  = d.deployed_app_commit,
 		sdk_commit  = d.deployed_sdk_commit,
-		note = note,
+		note = opt.note,
 		start_time = start_time,
 	})
 
@@ -2889,15 +3191,10 @@ function api.deploy_backup(opt, deploy, note, ...)
 	})
 	rowset_changed'deploy_backup_copies'
 
-	for i=1,select('#',...) do
-		local machine = select(i,...)
-		mm.dbk_copy(opt, dbk_copy, deploy)
-	end
-
 	notify('Backup completed for: %s.', deploy)
 end
-cmd_dbk('dbk-backup DEPLOY [NOTE] [MACHINE1,...]',
-	'Backup a deploy', mm.deploy_backup)
+cmd_dbk('dbk-backup [-note="..."] DEPLOY',
+	'Create a backup for a deploy', mm.deploy_backup)
 
 local function dbk_copy_info(dbk_copy)
 	return checkfound(first_row([[
@@ -3045,14 +3342,9 @@ end
 cmd_dbk('dbk-remove COPY1[-COPY2],...', 'Remove deploy backup copies', function(copies)
 	checkarg(copies, 'copies required')
 	for i,s in ipairs(words(copies:gsub(',', ' '))) do
-		local dbk_copy1, dbk_copy2 = s, s
-		if s:find'%-' then
-			dbk_copy1, dbk_copy2 = s:match'(.-)%-(.*)'
-		elseif s:find'%.%.' then
-			dbk_copy1, dbk_copy2 = s:match'(.-)%.%.(.*)'
-		end
-		dbk_copy1 = checkarg(id_arg(dbk_copy1), 'invalid backup copy')
-		dbk_copy2 = checkarg(id_arg(dbk_copy2), 'invalid backup copy')
+		local dbk_copy1, dbk_copy2 = split(s:find'%-' and '-' or '..', s)
+		dbk_copy1 = checkarg(id_arg(dbk_copy1 or s), 'invalid backup copy')
+		dbk_copy2 = checkarg(id_arg(dbk_copy2 or s), 'invalid backup copy')
 		for dbk_copy = min(dbk_copy1, dbk_copy2), max(dbk_copy1, dbk_copy2), 1 do
 			mm.deploy_backup_copy_remove(opt, dbk_copy)
 		end
@@ -3159,9 +3451,10 @@ local function deploy_set_scheduled_backup_tasks(deploy, enable)
 		return
 	end
 
-	local row = first_row([[
+	local d = first_row([[
 		select
 			active,
+			machine,
 			deployed_at,
 			backup_active,
 			time_to_sec(backup_start_hours) backup_start_hours,
@@ -3171,14 +3464,14 @@ local function deploy_set_scheduled_backup_tasks(deploy, enable)
 	]], deploy)
 
 	mm.set_scheduled_task('deploy_backup '..deploy,
-		row.active and row.deployed_at and row.backup_active and {
+		d.active and d.machine and d.deployed_at and d.backup_active and {
 		action = function()
 			mm.deploy_backup(machine, 'scheduled backup')
 		end,
 		task_name   = 'backup '..deploy,
 		deploy      = deploy,
-		start_hours = row.backup_start_hours,
-		run_every   = row.backup_run_every,
+		start_hours = d.backup_start_hours,
+		run_every   = d.backup_run_every,
 	} or nil)
 
 end
@@ -3199,252 +3492,14 @@ end
 function deploy_schedule_backup_tasks()
 	for _,deploy in each_row_vals([[
 		select deploy from deploy
-		where active = 1 and deployed_at is not null and backup_active = 1
+		where
+			active = 1
+			and deployed_at is not null and machine is not null
+			and backup_active = 1
 	]]) do
 		deploy_set_scheduled_backup_tasks(deploy, true)
 	end
 end
-
-
---remote access tools --------------------------------------------------------
-
-function mm.ssh_command(opt, mds, cmd, ...)
-	if opt ~= nil and not istab(opt) then
-		return mm.ssh_command(empty, opt, mds, cmd, ...)
-	end
-	opt = repl(opt, nil, empty)
-	if mds == 'ALL' then
-		mds = mm.active_machines()
-		cmd = checkarg(cmd, 'command required')
-	else
-		mds = words(checkarg(mds, 'machine or deploy required'):gsub(',', ' '))
-	end
-	local last_exit_code
-	local cmd = catargs(' ', cmd, ...)
-	local bash_cmd = cmd and {'bash', '-c', "'"..cmd.."'"}
-	for _,md in ipairs(mds) do
-		local ip, m = mm.ip(md)
-		if #mds > 1 then say('%s: `%s`', m, cmd) end
-		local task = mm.ssh(md, bash_cmd, {
-			allow_fail = true,
-			tty = not cmd or opt.tty,
-			capture_stdout = false,
-			capture_stderr = false,
-		})
-		if task.exit_code ~= 0 then
-			say('%s: exit code: %d', m, task.exit_code)
-		end
-		last_exit_code = task.exit_code
-	end
-	return last_exit_code
-end
-cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [- CMD ...]', 'SSH to machine(s)', function(opt, mds, ...)
-	return mm.ssh_command(opt, mds, ...)
-end)
-
---TIP: make a putty session called `mm` where you set the window size,
---uncheck "warn on close" and whatever else you need to make worrking
---with putty comfortable for you.
-cmd_ssh(Windows, 'putty MACHINE|DEPLOY', 'SSH into machine with putty', function(opt, md)
-	local ip, m = mm.ip(md)
-	local deploy = m ~= md and md or nil
-	local cmdfile = tmppath'puttycmd.txt'
-	local cmd = indir(mm.bindir, 'putty')..' -load mm -t -i '..mm.ppkfile(m)
-		..' root@'..ip..' -m '..cmdfile
-	local script = [[
-	#use deploy backup
-	]]
-	local script_env = update({
-		DEBUG   = env'DEBUG' or '',
-		VERBOSE = env'VERBOSE' or '',
-	}, git_hosting_vars(), deploy and deploy_vars(deploy))
-	local s = mm.sh_script(script:outdent(), script_env)
-	local s = catargs('\n',
-		'export MM_TMP_SH=/root/.mm.$$.sh',
-		'cat << \'EOFFF\' > $MM_TMP_SH',
-		'rm -f $MM_TMP_SH',
-		s,
-		deploy and 'must cd /home/$DEPLOY/$APP',
-		deploy and 'VARS="DEBUG VERBOSE" run_as $DEPLOY bash',
-		--deploy and 'sudo -iu '..deploy..' bash',
-		'EOFFF',
-		'exec bash --init-file $MM_TMP_SH'
-	)
-	save(cmdfile, s)
-	runafter(.5, function()
-		rm(cmdfile)
-	end)
-	proc.exec(cmd):forget()
-end)
-
-cmd_files('ls [-l] [-a] MACHINE:DIR'  , 'Run `ls` on machine',
-	function(opt, md_dir)
-		local md, dir = checkarg(md_dir, 'machine:dir expected'):match'^(.-):(.*)'
-		local args = {'ls', dir}
-		for k,v in pairs(opt) do
-			add(args, '-'..k)
-		end
-		mm.ssh_command(md, unpack(args))
-	end)
-
-cmd_files('cat MACHINE:FILE', 'Run `cat` on machine',
-	function(opt, md_file)
-		local md, file = md_file:match'^(.-):(.*)'
-		mm.ssh_command(md, 'cat', file)
-	end)
-
-cmd_files('mc MACHINE [DIR]', 'Run `mc` on machine',
-	function(opt, md, dir)
-		mm.ssh_command({tty = true}, md, 'mc', dir)
-	end)
-
-cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
-	function(opt, md_file)
-		local md, file = md_file:match'^(.-):(.*)'
-		mm.ssh_command({tty = true}, md, 'mcedit', file)
-	end)
-
-
---TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
-function mm.tunnel(machine, ports, opt, rev)
-	local args = {'-N'}
-	if logging.debug then add(args, '-v') end
-	ports = checkarg(ports, 'ports expected')
-	local rports = {}
-	for ports in ports:gmatch'([^,]+)' do
-		local lport, rport = ports:match'(.-):(.*)'
-		rport = rport or ports
-		lport = lport or ports
-		add(args, rev and '-R' or '-L')
-		if rev then lport, rport = rport, lport end
-		add(args, '127.0.0.1:'..lport..':127.0.0.1:'..rport)
-		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
-		add(rports, rport)
-	end
-	local on_finish
-	local function start_tunnel()
-		mm.ssh(machine, args, update({
-			name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
-		}, update({
-			type = 'long',
-			on_finish = on_finish,
-		}, opt)))
-	end
-	function on_finish(task)
-		if task.killed then return end
-		sleep(1)
-		start_tunnel()
-	end
-	start_tunnel()
-end
-function mm.rtunnel(machine, ports, opt)
-	return mm.tunnel(machine, ports, opt, true)
-end
-
-cmd_ssh_tunnels('tunnel MACHINE [LPORT1:]RPORT1,...',
-	'Create SSH tunnel(s) to machine',
-	function(opt, machine, ports)
-		mm.tunnel(machine, ports, {tty = true})
-	end)
-
-cmd_ssh_tunnels('rtunnel MACHINE [LPORT1:]RPORT1,...',
-	'Create reverse SSH tunnel(s) to machine',
-	function(opt, machine, ports)
-		return mm.rtunnel(machine, ports, {tty = true})
-	end)
-
-cmd_mysql('mysql DEPLOY|MACHINE [SQL]',
-	'Execute MySQL command or remote REPL',
-	function(opt, md, sql)
-		local ip, machine = mm.ip(md)
-		local deploy = machine ~= md and md
-		local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
-		if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
-		return mm.ssh(machine, args, {
-			tty = not sql,
-			capture_stdout = false,
-			capture_stderr = false,
-		})
-	end)
-
---TODO: `sshfs.exe` is buggy in background mode: it kills itself when parent cmd is closed.
-function mm.mount(opt, machine, rem_path, drive)
-	if win then
-		drive = drive or 'S'
-		rem_path = rem_path or '/'
-		local cmd =
-			'"'..indir(mm.sshfsdir, 'sshfs.exe')..'"'..
-			' root@'..mm.ip(machine)..':'..rem_path..' '..drive..':'..
-			(opt.bg and '' or ' -f')..
-			--' -odebug'.. --good stuff (implies -f)
-			--these were copy-pasted from sshfs-win manager.
-			' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
-			' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
-			--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
-			' -ossh_command='..path.sep(indir(mm.sshfsdir, 'ssh'), nil, '/')..
-			' -oBatchMode=yes'..
-			' -oRequestTTY=no'..
-			' -oPreferredAuthentications=publickey'..
-			' -oUserKnownHostsFile='..path.sep(mm.known_hosts_file(), nil, '/')..
-			' -oIdentityFile='..path.sep(mm.keyfile(machine), nil, '/')
-		if opt.bg then
-			exec(cmd)
-		else
-			mm.exec(cmd, {
-				name = 'mount '..drive,
-			})
-		end
-	else
-		NYI'mount'
-	end
-end
-cmd_ssh_mounts('mount [-bg] MACHINE PATH [DRIVE]', 'Mount remote path to drive', mm.mount)
-cmd_ssh_mounts('mount-kill-all', 'Kill all background mounts', function()
-	if win then
-		exec'taskkill /f /im sshfs.exe'
-	else
-		NYI'mount_kill_all'
-	end
-end)
-
-function api.rsync(opt, md1, md2)
-	local m1, d1 = checkarg(md1, 'source machine:dir required'):match'^(.-):(.*)'
-	local m2, d2 = checkarg(md2, 'dest machine:dir required'):match'^(.-):(.*)'
-	checkarg(m1, 'syntax error: %s', md1)
-	if not d2 then m2, d2 = md2, d1 end
-	mm.ssh_sh(m1, [[
-		#use ssh
-		rsync_dir
-	]], update({
-		SRC_DIR = d1,
-		DST_DIR = d2,
-		PROGRESS = opt.progress and 1 or nil,
-	}, rsync_vars(m1, m2)), {
-		name = 'rsync '..m1..' '..m2, keyed = false,
-	})
-end
-cmd_files('rsync [-q] MACHINE1:DIR MACHINE2[:DIR]',
-	'Sync directories between machines',
-	function(opt, ...)
-		opt.progress = not opt.q
-		mm.rsync(opt, ...)
-	end)
-
-function api.sha(opt, machine, dir)
-	return mm.ssh_sh(machine, [[
-		#use fs
-		sha_dir "$DIR"
-		]], {
-			DIR = dir
-		}, {
-			name = 'sha '..machine, keyed = false,
-			out_stdout = false,
-		}
-	):stdout():trim()
-end
-cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', function(...)
-	print(mm.sha(...))
-end)
 
 --admin web UI ---------------------------------------------------------------
 
@@ -3698,6 +3753,8 @@ rowset.deploys = sql_rowset{
 			started_at,
 			env,
 			repo,
+			domain,
+			http_port,
 			secret,
 			mysql_pass,
 			backup_active      ,
@@ -3738,7 +3795,7 @@ rowset.deploys = sql_rowset{
  		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
  		self:insert_into('deploy', row, [[
 			deploy machine repo app wanted_app_version wanted_sdk_version
-			env secret mysql_pass pos
+			env domain http_port secret mysql_pass pos
 			backup_active
 			backup_start_hours
 			backup_run_every
@@ -3749,8 +3806,15 @@ rowset.deploys = sql_rowset{
 	update_row = function(self, row)
 		local d0 = row['deploy:old']
 		local d1 = row.deploy
+		if row.machine then
+			local m0 = first_row('select machine from deploy where deploy = ?', d0)
+			if m0 then
+				raise('db', '%s', 'Remove the deploy from the machine first.')
+			end
+		end
 		self:update_into('deploy', row, [[
 			machine repo app wanted_app_version wanted_sdk_version
+			domain http_port
 			backup_active
 			backup_start_hours
 			backup_run_every
@@ -3766,7 +3830,7 @@ rowset.deploys = sql_rowset{
 	delete_row = function(self, row)
 		local d0 = row['deploy:old']
 		local deployed = first_row([[
-				select if(deployed_app_commit, 1, 0)
+				select if(deployed_at is not null and machine is not null, 1, 0)
 				from deploy where deploy = ?
 			]], d0) == 1
 		raise('db', '%s', 'Remove the deploy from the machine first.')

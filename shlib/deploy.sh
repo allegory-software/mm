@@ -20,7 +20,7 @@ machine_set_timezone() { # tz
 }
 
 machine_prepare() {
-	checkvars MACHINE MYSQL_ROOT_PASS
+	checkvars MACHINE MYSQL_ROOT_PASS DHPARAM
 
 	# disable clound-init because it resets our changes on reboot.
 	sudo touch /etc/cloud/cloud-init.disabled
@@ -34,7 +34,19 @@ machine_prepare() {
 	must sed -i '/^proc/d' /etc/fstab
 	append "proc  /proc  proc  defaults,nosuid,nodev,noexec,relatime,hidepid=1  0  0" /etc/fstab
 
-	apt_get_install sudo htop mc git gnupg2 lsb-release
+	apt_get_install sudo htop mc git nginx gnupg2 lsb-release
+
+	# add dhparam.pem from mm (dhparam is public).
+	save "$DHPARAM" /etc/nginx/certs/dhparam.pem
+
+	# remove nginx placeholder vhost.
+	must rm -f /etc/nginx/sites-enabled/default
+	nginx -s reload
+
+	# install acme.sh to auto-renew SSL certs.
+	curl https://get.acme.sh | sh -s email=my@example.com --nocron
+	# do this if ZeroSSL ever gets funny...
+	#/root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
 	git_install_git_up
 	git_config_user "mm@allegory.ro" "Many Machines"
@@ -64,6 +76,54 @@ machine_rename() { # OLD_MACHINE NEW_MACHINE
 	machine_set_hostname "$NEW_MACHINE"
 }
 
+deploy_nginx_config() { # DOMAIN= HTTP_PORT= $0
+	[ "$HTTP_PORT" -a "$DOMAIN" ] || return 0
+	checkvars HTTP_PORT DOMAIN
+	save "\
+server {
+	listen 80;
+	server_name $DOMAIN;
+	return 301 https://$host$request_uri;
+}
+
+server {
+	listen 443 ssl http2;
+	server_name $DOMAIN;
+
+	ssl_protocols TLSv1.2 TLSv1.3;
+	ssl_ciphers ECDH+AESGCM:ECDH+AES256:ECDH+AES128:DH+3DES:!ADH:!AECDH:!MD5;
+	ssl_prefer_server_ciphers on;
+	ssl_session_cache shared:SSL:10m;
+	ssl_session_timeout 4h;
+	ssl_session_tickets on;
+	ssl_certificate      /root/.acme.sh/$DOMAIN/$DOMAIN.cer;
+	ssl_certificate_key  /root/.acme.sh/$DOMAIN/$DOMAIN.key;
+	ssl_dhparam          /etc/nginx/certs/dhparam.pem;
+
+	# HSTS with preloading to google. Another amazing tech from the web people.
+	add_header Strict-Transport-Security: \"max-age=63072000; includeSubDomains; preload\" always;
+
+	location / {
+		proxy_pass http://127.0.0.1:$HTTP_PORT;
+	}
+
+	# acme thumbprint got with `acme.sh --register-account` (thumbprint is public).
+	location ~ ^/\.well-known/acme-challenge/([-_a-zA-Z0-9]+)$ {
+		default_type text/plain;
+		return 200 \"\$1.ba-H2X2peFTTxpFRtfM6Dk83qgbbkRvqY8hw6WPMpYc\";
+	}
+}
+" /etc/nginx/sites-enabled/$DOMAIN
+	must nginx -s reload
+}
+
+deploy_issue_cert() { # DOMAIN= $0
+	checkvars DOMAIN
+	must acme.sh --issue -d $DOMAIN --stateless
+	local keyfile=/root/.acme.sh/$DOMAIN/$DOMAIN.key
+	[ -f $keyfile ] || die "SSL certificate not created: $keyfile."
+}
+
 deploy_setup() {
 	checkvars DEPLOY MYSQL_PASS GIT_HOSTS-
 
@@ -77,7 +137,10 @@ deploy_setup() {
 	mysql_grant_user_db localhost $DEPLOY $DEPLOY
 	mysql_gen_my_cnf    localhost $DEPLOY $MYSQL_PASS $DEPLOY
 
-	say "First-time setup done."
+	deploy_issue_cert
+	deploy_nginx_config
+
+	say "Deploy setup done."
 }
 
 deploy_remove() { # DEPLOY
@@ -144,7 +207,6 @@ db_pass = '$MYSQL_PASS'
 secret = '$SECRET'
 
 --custom vars
-${HTTP_PORT:+http_port = '$HTTP_PORT'}
 ${HTTP_PORT:+http_port = $HTTP_PORT}
 ${SMTP_HOST:+smtp_host = '$SMTP_HOST'}
 ${SMTP_HOST:+smtp_user = '$SMTP_USER'}

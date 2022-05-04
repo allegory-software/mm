@@ -107,7 +107,6 @@ rsync_dir() {
 		checkvars LINK_DIR
 	}
 	checkvars SSH_KEY- SSH_HOSTKEY-
-
 	[ "$DST_MACHINE" ] || DST_MACHINE=$HOST
 
 	say -n "Sync'ing dir

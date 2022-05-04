@@ -66,7 +66,7 @@ function machine_backup() {
 
 function deploy_action(btn, action, ...args) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
-	btn.post(['', 'api.json', action, deploy, ...args])
+	mm_api[action](btn, deploy, ...args)
 	return false
 }
 function deploy_start   () { return deploy_action(this, 'app', 'start') }
@@ -76,7 +76,7 @@ function deploy_deploy  () { return deploy_action(this, 'deploy') }
 function deploy_remove  () { return deploy_action(this, 'deploy-remove') }
 
 function deploy_backup() {
-	this.post(['', 'api.json', 'backup', this.val('deploy')])
+	mm_api.backup(this, this.val('deploy'))
 }
 
 // wiring --------------------------------------------------------------------
@@ -114,7 +114,7 @@ on('mm_machines_grid.init', function(e) {
 				action: function() {
 					let machine = e.focused_row_cell_val('machine')
 					if (machine)
-						post('/api.json/machine-prepare', [machine])
+						mm_api.prepare(machine)
 				},
 			},
 			{
@@ -122,7 +122,7 @@ on('mm_machines_grid.init', function(e) {
 				action: function() {
 					let machine = e.focused_row_cell_val('machine')
 					if (machine)
-						post('/api.json/ssh-hostkey-update', [machine])
+						mm_api.ssh_hostkey_update(machine)
 				},
 			},
 			{
@@ -130,7 +130,7 @@ on('mm_machines_grid.init', function(e) {
 				action: function() {
 					let machine = e.focused_row_cell_val('machine')
 					if (machine)
-						post('/api.json/ssh-key-update', [machine])
+						mm_api.ssh_key_update(machine)
 				},
 			},
 			{
@@ -138,7 +138,7 @@ on('mm_machines_grid.init', function(e) {
 				action: function() {
 					let machine = e.focused_row_cell_val('machine')
 					if (machine)
-						post('/api.json/ssh-key-check', [machine])
+						mm_api.ssh_key_check(machine)
 				},
 			},
 			{
@@ -146,7 +146,7 @@ on('mm_machines_grid.init', function(e) {
 				action: function() {
 					let machine = e.focused_row_cell_val('machine')
 					if (machine)
-						post('/api.json/git-keys-update', [machine])
+						mm_api.git_keys_update(machine)
 				},
 			},
 		]
@@ -167,7 +167,7 @@ on('mm_machines_grid.init', function(e) {
 				action: function() {
 					let machine = e.focused_row_cell_val('machine')
 					if (machine)
-						post('/api.json/log-server', [machine])
+						mm_api.log_server(machine)
 				},
 			},
 			{
@@ -177,7 +177,7 @@ on('mm_machines_grid.init', function(e) {
 				action: function() {
 					let machine = e.focused_row_cell_val('machine')
 					if (machine)
-						post('/api.json/machine-reboot', [machine])
+						mm_api.machine_reboot(machine)
 				}
 			},
 		])
@@ -209,7 +209,7 @@ on('mm_machine_backup_copies_grid.init', function(e) {
 				action: function() {
 					let parent_mbk_copy = e.focused_row_cell_val('mbk_copy')
 					let machine = e.focused_row_cell_val('machine')
-					this.post(['', 'api.json', 'machine_backup'], [machine, null, parent_mbk_copy])
+					mm_api.machine_backup(this, machine, parent_mbk_copy)
 				},
 			},
 		])
