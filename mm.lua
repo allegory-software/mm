@@ -496,7 +496,7 @@ local cmd_ssh_mounts  = cmdsection('SSH-FS MOUNTS'     , wrap)
 local cmd_files       = cmdsection('FILES'             , wrap)
 local cmd_mysql       = cmdsection('MYSQL'             , wrap)
 local cmd_machines    = cmdsection('MACHINES'          , wrap)
-local cmd_deployments = cmdsection('DEPLOYMENTS'       , wrap)
+local cmd_deploys     = cmdsection('DEPLOYMENTS'       , wrap)
 local cmd_mbk         = cmdsection('MACHINE-LEVEL BACKUP & RESTORE', wrap)
 local cmd_dbk         = cmdsection('DEPLOYMENT-LEVEL BACKUP & RESTORE', wrap)
 local cmd_tasks       = cmdsection('TASKS'             , wrap)
@@ -1110,7 +1110,9 @@ function api.deploy_info(opt, deploy)
 	return checkfound(first_row([[
 		select
 			deploy,
-			mysql_pass
+			machine,
+			mysql_pass,
+			domain
 		from deploy where deploy = ?
 	]], checkarg(deploy, 'deploy required')), 'deploy not found')
 end
@@ -1399,8 +1401,9 @@ function mm.ssh(md, cmd_args, opt)
 		'-o', 'UserKnownHostsFile='..mm.known_hosts_file(),
 		}, {ssh_control_opts(opt.tty)}, {
 		'-i', mm.keyfile(machine),
-		'root@'..ip, cmd_args
-	}), update({
+		'root@'..ip
+		}, cmd_args
+	), update({
 		capture_stdout = not opt.tty,
 		capture_stderr = not opt.tty,
 	}, opt))
@@ -1942,16 +1945,53 @@ function api.prepare(opt, machine)
 	]=], vars, {
 		name = 'prepare '..machine,
 	})
-
-	mm.rsync('')
-
+	mm.rsync(indir(mm.vardir, '.acme.sh.etc/ca'), machine..':/root/.acme.sh.etc/ca')
 	notify('Machine prepared: %s.', machine)
 end
 cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare)
 
+--acme ssl cert provisioning -------------------------------------------------
+
+function api.acme_check(opt, machine)
+	mm.ssh_sh(machine, [[
+		#use deploy
+		acme_check
+	]], {
+		name = 'acme_check '..machine,
+	})
+	notify('ACME check done for machine: %s', machine)
+end
+cmd_deploys('acme-check [MACHINE]', 'ACME check/renew SSL certificates',
+	function(opt, machine)
+		callm('acme_check', machine)
+	end)
+
+function api.deploy_issue_cert(opt, deploy)
+	local d = mm.deploy_info(deploy)
+	checkarg(d.domain, 'Domain not set for deploy: %s', deploy)
+	local task = mm.ssh_sh(d.machine, [[
+		#use deploy
+		deploy_issue_cert "$DOMAIN"
+	]], {
+		DOMAIN = d.domain,
+	}, {
+		name = 'deploy_issue_cert '..deploy,
+		allow_fail = true,
+	})
+	if task.exit_code ~= 0 then return task.exit_code end
+
+	--save the cert locally so we can deploy on a diff. machine later.
+	mm.rsync(
+		d.machine..':/root/.acme.sh.etc/'..d.domain,
+		':'..mm.vardir..'/.acme.sh.etc/'..d.domain)
+end
+cmd_deploys('deploy-issue-cert DEPLOY',
+	'Issue SSL certificate for an app',
+	mm.deploy_issue_cert)
+
 --deploy listing -------------------------------------------------------------
 
-cmd_deployments('d|deploys', 'Show the list of deployments', function()
+cmd_deploys('d|deploys', 'Show the list of deployments', function()
 	mm.print_rowset('deploys', [[
 		deploy
 		status
@@ -2048,7 +2088,7 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 
 	notify('Deployed: %s.', deploy)
 end
-cmd_deployments('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
+cmd_deploys('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
 	mm.deploy)
 
 --deploy remove --------------------------------------------------------------
@@ -2077,7 +2117,7 @@ function api.deploy_remove(opt, deploy)
 
 	notify('Deploy removed: %s.', deploy)
 end
-cmd_deployments('deploy-remove DEPLOY', 'Remove a deployment',
+cmd_deploys('deploy-remove DEPLOY', 'Remove a deployment',
 	mm.deploy_remove)
 
 --deploy rename --------------------------------------------------------------
@@ -2126,7 +2166,7 @@ function api.deploy_rename(opt, old_deploy, new_deploy)
 
 	notify('Deploy renamed from %s to %s.', old_deploy, new_deploy)
 end
-cmd_deployments('deploy-rename OLD_DEPLOY NEW_DEPLOY',
+cmd_deploys('deploy-rename OLD_DEPLOY NEW_DEPLOY',
 	'Rename a deployment (requires app restart)',
 	mm.deploy_rename)
 
@@ -2164,7 +2204,7 @@ function api.app(opt, deploy, ...)
 	end
 	notify_kind(not ok and 'error' or nil, (task:stderr():gsub('^ABORT: ', '')))
 end
-cmd_deployments('app DEPLOY ...', 'Run a deployed app', mm.app)
+cmd_deploys('app DEPLOY ...', 'Run a deployed app', mm.app)
 
 --remote logging -------------------------------------------------------------
 

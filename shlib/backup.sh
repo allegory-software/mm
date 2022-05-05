@@ -36,7 +36,9 @@ machine_backup_files() { # BACKUP_DIR [PARENT_BACKUP_DIR]
 	local parent_dir="$2"
 	checkvars dir
 
-	sync_dir /home $dir "$parent_dir"
+	sync_dir /home $dir/home "$parent_dir"
+	sync_dir /root/.acme.sh/ $dir "$parent_dir"
+
 }
 
 machine_restore_files() { # BKP_DIR

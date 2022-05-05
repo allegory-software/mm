@@ -19,8 +19,19 @@ machine_set_timezone() { # tz
 	say "Machine timezone set to: $TZ."
 }
 
+acme_sh() {
+	local cmd_args="/root/.acme.sh/acme.sh --config-home /root/.acme.sh.etc"
+	run $cmd_args "$@"
+	local ret=$?; [ $ret == 2 ] && ret=0 # skipping gets exit code 2.
+	[ $ret == 0 ] || die "$cmd_args "$@" [$ret]"
+}
+
+acme_check() {
+	acme_sh --cron
+}
+
 machine_prepare() {
-	checkvars MACHINE MYSQL_ROOT_PASS DHPARAM
+	checkvars MACHINE MYSQL_ROOT_PASS DHPARAM-
 
 	# disable clound-init because it resets our changes on reboot.
 	sudo touch /etc/cloud/cloud-init.disabled
@@ -37,16 +48,16 @@ machine_prepare() {
 	apt_get_install sudo htop mc git nginx gnupg2 lsb-release
 
 	# add dhparam.pem from mm (dhparam is public).
-	save "$DHPARAM" /etc/nginx/certs/dhparam.pem
+	save "$DHPARAM" /etc/nginx/dhparam.pem
 
 	# remove nginx placeholder vhost.
 	must rm -f /etc/nginx/sites-enabled/default
 	nginx -s reload
 
 	# install acme.sh to auto-renew SSL certs.
-	curl https://get.acme.sh | sh -s email=my@example.com --nocron
+	curl https://get.acme.sh | sh -s email=my@example.com --nocron --config-home /root/.acme.sh.etc
 	# do this if ZeroSSL ever gets funny...
-	#/root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+	#acme_sh --set-default-ca --server letsencrypt
 
 	git_install_git_up
 	git_config_user "mm@allegory.ro" "Many Machines"
@@ -96,9 +107,9 @@ server {
 	ssl_session_cache shared:SSL:10m;
 	ssl_session_timeout 4h;
 	ssl_session_tickets on;
-	ssl_certificate      /root/.acme.sh/$DOMAIN/$DOMAIN.cer;
-	ssl_certificate_key  /root/.acme.sh/$DOMAIN/$DOMAIN.key;
-	ssl_dhparam          /etc/nginx/certs/dhparam.pem;
+	ssl_certificate      /root/.acme.sh.etc/$DOMAIN/$DOMAIN.cer;
+	ssl_certificate_key  /root/.acme.sh.etc/$DOMAIN/$DOMAIN.key;
+	ssl_dhparam          /etc/nginx/dhparam.pem;
 
 	# HSTS with preloading to google. Another amazing tech from the web people.
 	add_header Strict-Transport-Security: \"max-age=63072000; includeSubDomains; preload\" always;
@@ -117,10 +128,13 @@ server {
 	must nginx -s reload
 }
 
-deploy_issue_cert() { # DOMAIN= $0
+deploy_issue_cert() { # DOMAIN
+	local DOMAIN="$1"
 	checkvars DOMAIN
-	must acme.sh --issue -d $DOMAIN --stateless
-	local keyfile=/root/.acme.sh/$DOMAIN/$DOMAIN.key
+
+	say "Issuing SSL certificate for $DOMAIN ... "
+	acme_sh --issue -d $DOMAIN --stateless
+	local keyfile=/root/.acme.sh.etc/$DOMAIN/$DOMAIN.key
 	[ -f $keyfile ] || die "SSL certificate not created: $keyfile."
 }
 
