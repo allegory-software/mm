@@ -151,7 +151,7 @@ deploy_setup() {
 	mysql_grant_user_db localhost $DEPLOY $DEPLOY
 	mysql_gen_my_cnf    localhost $DEPLOY $MYSQL_PASS $DEPLOY
 
-	deploy_issue_cert
+	[ "$DOMAIN" ] && deploy_issue_cert $DOMAIN
 	deploy_nginx_config
 
 	say "Deploy setup done."

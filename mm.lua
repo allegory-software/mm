@@ -1981,8 +1981,7 @@ function api.deploy_issue_cert(opt, deploy)
 	if task.exit_code ~= 0 then return task.exit_code end
 
 	--save the cert locally so we can deploy on a diff. machine later.
-	mm.rsync(
-		d.machine..':/root/.acme.sh.etc/'..d.domain,
+	mm.rsync(d.machine..':/root/.acme.sh.etc/'..d.domain,
 		':'..mm.vardir..'/.acme.sh.etc/'..d.domain)
 end
 cmd_deploys('issue-ssl-cert DEPLOY',
@@ -2063,8 +2062,15 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 			wanted_sdk_version = sdk_ver,
 		})
 	end
+
 	local vars = deploy_vars(deploy)
 	update(vars, git_hosting_vars())
+
+	if vars.DOMAIN then
+		mm.rsync(mm.vardir..'/.acme.sh.etc/'..vars.DOMAIN,
+			vars.MACHINE..':/root/.acme.sh.etc/'..vars.DOMAIN)
+	end
+
 	local s = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
 		deploy
@@ -2072,6 +2078,7 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 		name = 'deploy '..deploy,
 		out_stdout = false,
 	}):stdout()
+
 	local app_commit = s:match'app_commit=([^%s]+)'
 	local sdk_commit = s:match'sdk_commit=([^%s]+)'
 	local now = time()
