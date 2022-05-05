@@ -1985,7 +1985,7 @@ function api.deploy_issue_cert(opt, deploy)
 		d.machine..':/root/.acme.sh.etc/'..d.domain,
 		':'..mm.vardir..'/.acme.sh.etc/'..d.domain)
 end
-cmd_deploys('deploy-issue-cert DEPLOY',
+cmd_deploys('issue-ssl-cert DEPLOY',
 	'Issue SSL certificate for an app',
 	mm.deploy_issue_cert)
 
