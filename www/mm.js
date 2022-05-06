@@ -25,10 +25,12 @@ let chunk_decoder = function(onchunk) {
 }
 
 let mm_onchunk = function(chan, s, finished) {
-	if (chan == 'E')
+	if (chan == 'N')
+		notify(s, 'info')
+	else if (chan == 'E')
 		notify(s, 'error')
-	else if (chan == 'N')
-		notify(s)
+	else if (chan == 'W')
+		notify(s, 'warn')
 }
 
 // mm_api.cmd([e,][opt,]...args)

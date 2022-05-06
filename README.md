@@ -4,9 +4,12 @@ Many Machines is a SAAS provisioning and administration tool with
 a web and command-line UI.
 
 MM keeps a database of your machines and deployments and provides you with
-a shell from which to do all your tedious sysadmin tasks, from SSH key
-management and backups to automated deployments and upgrades, app monitoring
-and database cluster configuration.
+a UI from which to perform and automate all your sysadmin tasks like SSH key
+management, scheduled backups, automated deployments, SSL certificate issuing,
+real-time app monitoring, etc.
+
+A terse but more extensive list of features and limitations is currently
+[in the code](https://github.com/allegory-software/many-machines/blob/master/mm.lua).
 
 ## Installing
 

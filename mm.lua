@@ -36,6 +36,7 @@ FEATURES
 		- backup copies kept on multiple machines.
 		- machine restore: create new deploys and/or override existing.
 		- deployment restore: create new or override existing.
+	- https proxy with automatic SSL certificate issuing and updating.
 
 LIMITATIONS
 	- the machines need to run Linux (Debian 10) and have a public IP.
@@ -316,6 +317,9 @@ local function out_on(chan, s)
 	local cx = cx()
 	if not cx then return end
 	if cx.fake then
+		if chan == 'N' then s = 'NOTE: '..s end
+		if chan == 'W' then s = 'WARN: '..s end
+		if chan == 'E' then s = 'ERROR: '..s end
 		out(s)
 	else
 		assert(#chan == 1)
@@ -334,14 +338,15 @@ local function outpqr(rows, fields)
 	_pqr(opt)
 end
 
-local function notify_kind(kind, fmt, ...)
-	local s = select('#', ...) > 0 and format(fmt, ...) or fmt
-	kind = kind or 'NOTE'
-	out_on('N', kind:upper()..': '..s..'\n')
+local function notify(fmt, ...)
+	out_on('N', format(fmt, ...))
 end
-local function notify       (...) notify_kind(nil    , ...) end
-local function notify_warn  (...) notify_kind('warn' , ...) end
-local function notify_error (...) notify_kind('error', ...) end
+local function notify_warn(fmt, ...)
+	out_on('W', format(fmt, ...))
+end
+local function notify_error(fmt, ...)
+	out_on('E', format(fmt, ...))
+end
 
 local mm_api = {} --{action->fn}
 
@@ -1045,8 +1050,9 @@ function mm.exec(cmd, opt)
 	end
 
 	if not opt.allow_fail and task.exit_code and task.exit_code ~= 0 then
-		local s = isstr(cmd) and cmd or proc.quote_args_unix(unpack(cmd))
-		check500(false, 'command `%s` exit code: %d', s, task.exit_code)
+		local cmd_s = isstr(cmd) and cmd or proc.quote_args_unix(unpack(cmd))
+		check500(false, 'exec: %s\nEXIT CODE: %s\nSTDIN:\n%s\nENV:%s\n',
+			cms_s, task.exit_code, task.stdin, opt.env)
 	end
 
 	return task
@@ -1327,8 +1333,11 @@ function api.ssh_key_check(opt, machine)
 	local ok = host_pubkey == mm.ssh_pubkey()
 	update_row('machine', {machine, ssh_key_ok = ok})
 	rowset_changed'machines'
-	notify_kind(not ok and 'warn' or nil,
-		'SSH key is%s up-to-date for %s', ok and '' or ' NOT', ''..machine)
+	if ok then
+		notify('SSH key is up-to-date for %s.', machine)
+	else
+		notify_error('SSH key is NOT up-to-date for %s.', machine)
+	end
 end
 cmd_ssh_keys('ssh-key-check [MACHINE]', 'Check that SSH keys are up-to-date',
 	function(opt, machine)
@@ -1470,22 +1479,20 @@ end
 
 --passing both the script and the script's expected stdin contents through
 --ssh's stdin at the same time is only possible due to a ridiculous behavior
---that only sh could have: sh reads its input one-byte-at-a-time and
---stops reading exactly after the `exit` command, not one byte more, so we can
---feed in stdin right after that. worse-is-better at its finest.
+--that only bash could have: sh reads its input one-byte-at-a-time and
+--stops reading exactly after the `exit` command, not one byte later, so
+--we can feed in stdin right after that. worse-is-better at its finest.
 function mm.ssh_sh(machine, script, script_env, opt)
 	opt = opt or {}
 	local script_env = update({
-		DEBUG   = env'DEBUG' or '',
-		VERBOSE = env'VERBOSE' or '',
+		DEBUG   = env'DEBUG',
+		VERBOSE = env'VERBOSE',
 	}, script_env)
 	local script_s = script:outdent()
 	local s = mm.sh_script(script_s, script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
-	if logging.verbose then
-		local first_line = script_s:gsub('^%s*#use.-\r?\n', '')
-			:gsub('^%s*', ''):gsub('\n.*', '')..' [...]'
-		note('mm', 'ssh-sh', '%s %s', machine, first_line)
+	if logging.debug then
+		debug('mm', 'ssh-sh', '%s %s %s', machine, script_s:trim(), script_env)
 	end
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
@@ -1976,7 +1983,6 @@ function api.deploy_issue_cert(opt, deploy)
 		DOMAIN = d.domain,
 	}, {
 		name = 'deploy_issue_cert '..deploy,
-		allow_fail = true,
 	})
 	if task.exit_code ~= 0 then return task.exit_code end
 
@@ -2199,7 +2205,7 @@ function api.app(opt, deploy, ...)
 			args = args,
 		}, {
 			name = task_name,
-			allow_fail = true,
+			--allow_fail = true,
 		})
 	local ok = task.exit_code == 0
 	if ok then
@@ -2209,7 +2215,11 @@ function api.app(opt, deploy, ...)
 			rowset_changed'deploys'
 		end
 	end
-	notify_kind(not ok and 'error' or nil, (task:stderr():gsub('^ABORT: ', '')))
+	if ok then
+		notify(task:stderr())
+	else
+		notify_error((task:stderr():gsub('^ABORT: ', '')))
+	end
 end
 cmd_deploys('app DEPLOY ...', 'Run a deployed app', mm.app)
 
