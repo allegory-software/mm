@@ -8,6 +8,9 @@ a UI from which to perform and automate all your sysadmin tasks like SSH key
 management, scheduled backups, automated deployments, SSL certificate issuing,
 real-time app monitoring, etc.
 
+One notable feature of MM that's less common in tools of this type is the
+presence of Windows-native sysadmin tools like sshfs, putty, etc.
+
 A terse but more extensive list of features and limitations is currently
 [in the code](https://github.com/allegory-software/many-machines/blob/master/mm.lua).
 
