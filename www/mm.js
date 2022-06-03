@@ -27,7 +27,7 @@ let chunk_decoder = function(onchunk) {
 let mm_onchunk = function(chan, s, finished) {
 	if (chan == 'N')
 		notify(s, 'info')
-	else if (chan == 'E')
+	else if (chan == 'E' || chan == 'e')
 		notify(s, 'error')
 	else if (chan == 'W')
 		notify(s, 'warn')

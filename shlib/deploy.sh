@@ -30,6 +30,11 @@ acme_check() {
 	acme_sh --cron
 }
 
+tarantool_install() { # tarantool 2.10
+	must curl -L https://tarantool.io/BsbZsuW/release/2/installer.sh | bash
+	apt_get_install tarantool
+}
+
 machine_prepare() {
 	checkvars MACHINE MYSQL_ROOT_PASS DHPARAM-
 
@@ -46,6 +51,8 @@ machine_prepare() {
 	append "proc  /proc  proc  defaults,nosuid,nodev,noexec,relatime,hidepid=1  0  0" /etc/fstab
 
 	apt_get_install sudo htop mc git nginx gnupg2 lsb-release
+
+	tarantool_install
 
 	# add dhparam.pem from mm (dhparam is public).
 	save "$DHPARAM" /etc/nginx/dhparam.pem

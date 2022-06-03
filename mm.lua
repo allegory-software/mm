@@ -1,5 +1,5 @@
+--go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ x:\sdk\bin\windows\luajit mm.lua -vv run
---go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -v
 --[[
 
 	Many Machines, the independent man's SAAS provisioning tool.
@@ -249,23 +249,27 @@ local function mm_schema()
 
 end
 
-local xapp = require'$xapp'
+--modules, config, tools, install --------------------------------------------
 
-config('https_addr', false)
+--debug.traceback = require'stacktraceplus'.stacktrace
+
+local xapp = require'xapp'
+
 config('multilang', false)
 config('allow_create_user', false)
 config('auto_create_user', false)
 
-local mm = xapp('mm', ...)
+local mm = xapp(...)
 
-local b64 = require'base64'.encode
-local mustache = require'mustache'
-local queue = require'queue'
-local mess = require'mess'
-
---config ---------------------------------------------------------------------
+require'base64'
+require'mustache'
+require'queue'
+require'mess'
+require'tasks'
+require'mysql_print'
 
 mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
+mm.bindir   = indir(scriptdir(), 'bin', win and 'windiws' or 'linux')
 mm.sshdir   = mm.bindir
 
 config('page_title_suffix', 'Many Machines')
@@ -276,7 +280,6 @@ config('dev_email', 'cosmin.apreutesei@gmail.com')
 config('secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 config('smtp_host', 'mail.bpnpart.com')
 config('smtp_user', 'admin@bpnpart.com')
-config('host', 'bpnpart.com')
 config('noreply_email', 'admin@bpnpart.com')
 
 --logging.filter[''] = true
@@ -298,8 +301,6 @@ local function split(sep, s)
 	return repl(s1, ''), repl(s2, '')
 end
 
---install --------------------------------------------------------------------
-
 cmd('install [forealz]', 'Install or migrate mm', function(opt, doit)
 	create_db()
 	local dry = doit ~= 'forealz'
@@ -312,54 +313,20 @@ end)
 
 --web api / server -----------------------------------------------------------
 
---simple text stream multiplexing protocol over HTTP.
-local function out_on(chan, s)
-	local cx = cx()
-	if not cx then return end
-	if cx.fake then
-		if chan == 'N' then s = 'NOTE: '..s end
-		if chan == 'W' then s = 'WARN: '..s end
-		if chan == 'E' then s = 'ERROR: '..s end
-		out(s)
-	else
-		assert(#chan == 1)
-		out(format('%s%08x\n%s', chan, #s, s))
-	end
-end
-
-local outprint = glue.printer(function(s)
-	out_on('1', s)
-end)
-
-local _pqr = pqr
-local function outpqr(rows, fields)
-	local opt = rows.rows and update({}, rows) or {rows = rows, fields = fields}
-	opt.print = outprint
-	_pqr(opt)
-end
-
-local function notify(fmt, ...)
-	out_on('N', format(fmt, ...))
-end
-local function notify_warn(fmt, ...)
-	out_on('W', format(fmt, ...))
-end
-local function notify_error(fmt, ...)
-	out_on('E', format(fmt, ...))
-end
-
 local mm_api = {} --{action->fn}
 
-action['api.txt' ] = function(action, ...)
+local out_term = streaming_terminal{send = out}
+
+action['api.txt'] = function(action, ...)
 	setcompress(false)
 	--^^required so that each out() call is a HTTP chunk and there's no buffering.
 	setheader('content-type', 'application/octet-stream')
 	--^^the only way to make chrome fire onreadystatechange() for each chunk.
+	allow(admin())
 	checkarg(method'post', 'try POST')
 	local handler = checkfound(mm_api[action:gsub('-', '_')], 'action not found: %s', action)
 	local post = repl(post(), '')
 	checkarg(post == nil or istab(post))
-	allow(admin())
 	--Args are passed to the API handler as `getarg1, ..., postarg1, ...`
 	--so you can pass args as GET or POST or a combination, the API won't know.
 	--GET args come from the URI path so they're all strings. POST args come
@@ -371,53 +338,41 @@ action['api.txt' ] = function(action, ...)
 	--JSON-decoded with all `null` values transformed into `nil`.
 	--To make the API scriptable, errors are caught and sent to the client to
 	--be re-raised in the Lua client (the JS client calls notify() for them).
-	--Because the API is for both JS and Lua, we don't support multiple return
-	--values (you have to return arrays).
+	--Because the API is for both JS and Lua to consume, we don't support
+	--multiple return values (you have to return arrays instead).
 	local args = extend(pack(...), post and post.args)
 	local opt = post and post.options or empty
-	local ok, ret = errors.pcall(handler, opt, unpack(args))
+	local prev_term = set_current_terminal(out_term)
+	local ok, ret = pcall(handler, opt, unpack(args))
 	if not ok then
-		out_on('E', tostring(ret))
+		out_term:send_on('e', tostring(ret))
 	elseif ret ~= nil then
-		out_on('R', json(ret))
+		out_term:send_on('r', json(ret))
 	end
+	set_current_terminal(prev_term)
 end
 
---web api / client -----------------------------------------------------------
+--web api / client for cmdline API -------------------------------------------
 
 local function call_api(action, opt, ...)
-
 	local retval
-	local buffer = require'string.buffer'
-	local buf = buffer.new()
-	local chan, size
-	local function out_content(req, in_buf, sz)
-		check500(req.response.status == 200, 'http error: %d %s',
-			req.response.status, req.response.status_message) --bug?
-		buf:putcdata(in_buf, sz)
-		::again::
-		if not size and #buf >= 10 then
-			chan = buf:get(1)
-			size = assert(tonumber(buf:get(9), 16))
-		end
-		if size and #buf >= size then
-			local s = buf:get(size)
-			if chan == '1' then
-				io.stdout:write(s)
-				io.stdout:flush()
-			elseif chan == '2' or chan == 'N' then
-				io.stderr:write(s)
-				io.stderr:flush()
-			elseif chan == 'E' then
-				raise('mm_api', '%s', s)
-			elseif chan == 'R' then
-				retval = json_arg(s)
-			end
-			chan, size = nil
-			goto again
+	local term = cmdline_terminal()
+	function term:receive_on(chan, s)
+		if chan == 'e' then
+			error(s)
+		elseif chan == 'r' then
+			retval = json_arg(s)
+		else
+			assertf(false, 'invalid channel: "%s"', chan)
 		end
 	end
-
+	local write = streaming_terminal_reader(term)
+	local function receive_content(req, in_buf, sz)
+		write(in_buf, sz)
+	end
+	local function headers_received(res)
+		assertf(res.status == 200, 'http error: %d %s', res.status, res.status_message) --bug?
+	end
 	local ret, res = getpage{
 		host = config'mm_host',
 		uri = url{segments = {'', 'api.txt', action}},
@@ -428,11 +383,10 @@ local function call_api(action, opt, ...)
 		},
 		method = 'POST',
 		upload = {options = opt, args = pack_json(...)},
-		receive_content = out_content,
+		receive_content = receive_content,
+		headers_received = headers_received,
 	}
-	check500(ret ~= nil, '%s', res)
-	check500(res.status == 200, 'http error: %d %s', res.status, res.status_message)
-
+	assertf(ret ~= nil, '%s', res)
 	return retval
 end
 
@@ -456,9 +410,9 @@ local function call_json_api(opt, action, ...)
 		},
 		upload = opt.upload,
 	}
-	check500(ret ~= nil, '%s', res)
-	check500(res.status == 200, 'http error: %d %s', res.status, res.status_message)
-	check500(istab(ret), 'invalid JSON rsponse: %s', res.rawcontent)
+	assertf(ret ~= nil, '%s', res)
+	assertf(res.status == 200, 'http error: %d %s', res.status, res.status_message)
+	assertf(istab(ret), 'invalid JSON rsponse: %s', res.rawcontent)
 
 	return ret
 end
@@ -466,7 +420,7 @@ end
 --Lua+web+cmdline api generator ----------------------------------------------
 
 local function from_server()
-	return mm.conf.mm_host and not mm.server_running
+	return config'mm_host' and not server_running
 end
 
 local function pass_opt(opt, ...) --pass an optional options table at arg#1
@@ -489,7 +443,7 @@ end})
 
 local function wrap(fn)
 	return function(...)
-		local ok, ret = errors.pcall(fn, ...)
+		local ok, ret = pcall(fn, ...)
 		if ok then return ret end --handlers can return an explicit exit code.
 		die('%s', ret)
 	end
@@ -508,127 +462,39 @@ local cmd_tasks       = cmdsection('TASKS'             , wrap)
 
 --task system ----------------------------------------------------------------
 
-mm.tasks = {}
-mm.tasks_by_id = {}
-mm.tasks_by_name = {}
-local last_task_id = 0
-local task_events_thread
-
-local task = {}
-
-function mm.running_task(name)
-	local task = mm.tasks_by_name[name]
-	return task and task.keyed ~= false
-		and (task.status == 'new' or task.status == 'running') and task or nil
-end
-
 function mm.task(opt)
-	check500(not mm.running_task(opt.keyed ~= false and opt.name),
-		'task already running: %s', opt.name)
-	last_task_id = last_task_id + 1
-	local self = object(task, opt, {
-		id = last_task_id,
-		start_time = time(),
-		status = 'new',
-		errors = {},
-		_out = {},
-		_err = {},
-		_outerr = {}, --interleaved as they come
-		visible = opt.visible ~= false,
-	})
-	mm.tasks[self] = true
-	mm.tasks_by_id[self.id] = self
-	if self.name then
-		mm.tasks_by_name[self.name] = self
-	end
-	return self
-end
-
-function task:free()
-	self:finish()
-	mm.tasks[self] = nil
-	mm.tasks_by_id[self.id] = nil
-	if self.name then
-		mm.tasks_by_name[self.name] = nil
-	end
+	local task = task(opt)
 	if task.visible then
 		rowset_changed'running_tasks'
 	end
-end
-
-function task:changed()
-	if task.visible then
-		rowset_changed'running_tasks'
-	end
-end
-
-function task:setstatus(s)
-	self.status = s
-	self:changed()
-	if not self.nolog then
-		if not self.task_run then
-			self.task_run = insert_row('task_run', {
-				start_time = self.start_time,
-				name = self.name,
-				duration = self.duration,
-				stdin = self.stdin,
-				stdouterr = self:stdouterr(),
-				exit_code = self.exit_code,
-			}, nil, {quiet = true})
-		else
-			update_row('task_run', {
-				self.task_run,
-				duration = self.duration,
-				stdouterr = self:stdouterr(),
-				exit_code = self.exit_code,
-			}, nil, nil, {quiet = true})
+	task:on('event', function(self)
+		if self.visible then
+			rowset_changed'running_tasks'
 		end
-	end
+	end)
+	task:on('finish', function(self)
+		if not self.nolog then
+			if not self.task_run then
+				self.task_run = insert_row('task_run', {
+					start_time = self.start_time,
+					name = self.name,
+					duration = self.duration,
+					stdin = self.stdin,
+					stdouterr = self:stdouterr(),
+					exit_code = self.exit_code,
+				}, nil, {quiet = true})
+			else
+				update_row('task_run', {
+					self.task_run,
+					duration = self.duration,
+					stdouterr = self:stdouterr(),
+					exit_code = self.exit_code,
+				}, nil, nil, {quiet = true})
+			end
+		end
+	end)
+	return task
 end
-
-function task:finish(exit_code)
-	if self.duration then return end --already called.
-	self.duration = time() - self.start_time
-	self.exit_code = exit_code
-	self:setstatus(exit_code and 'finished' or 'killed')
-	local s = self:stdouterr()
-	if s ~= '' then
-		dbg('mm', 'taskout', '%s\n%s', self.name or self.id, s)
-	end
-	if self.on_finish then
-		self:on_finish()
-	end
-end
-
-function task:do_kill() NYI'do_kill' end --stub
-
-function task:kill()
-	self.killed = true
-	self:do_kill()
-	self:finish()
-end
-
-function task:logerror(event, ...)
-	add(self.errors, _(...))
-	logerror('mm', event, ...)
-	self:changed()
-end
-
-function task:out(s)
-	add(self._out, s)
-	add(self._outerr, s)
-	self:changed()
-end
-
-function task:err(s)
-	add(self._err, s)
-	add(self._outerr, s)
-	self:changed()
-end
-
-function task:stdout    () return cat(self._out) end
-function task:stderr    () return cat(self._err) end
-function task:stdouterr () return cat(self._outerr) end
 
 local function cmp_start_time(t1, t2)
 	return t1.start_time < t2.start_time
@@ -675,7 +541,7 @@ rowset.running_tasks = virtual_rowset(function(self)
 	function self:load_rows(rs, params)
 		local filter = params['param:filter']
 		rs.rows = {}
-		for task in sortedpairs(mm.tasks, cmp_start_time) do
+		for task in sortedpairs(tasks, cmp_start_time) do
 			if task.visible then
 				add(rs.rows, task_row(task))
 			end
@@ -683,19 +549,19 @@ rowset.running_tasks = virtual_rowset(function(self)
 	end
 
 	function self:load_row(row)
-		local task = mm.tasks_by_id[row['id:old']]
+		local task = tasks_by_id[row['id:old']]
 		return task and task_row(task)
 	end
 
 	function self:update_row(row)
-		local task = mm.tasks_by_id[row['id:old']]
+		local task = tasks_by_id[row['id:old']]
 		if not task then return end
 		task.pinned = row.pinned
 	end
 
 	function self:delete_row(row)
-		local task = mm.tasks_by_id[row['id:old']]
-		task:kill()
+		local task = tasks_by_id[row['id:old']]
+		assert(task:kill())
 	end
 
 end)
@@ -716,7 +582,7 @@ function mm.print_running_tasks()
 end
 
 function api.tail_running_task(opt, task_id)
-	local task = checkarg(mm.tasks_by_id[id_arg(task_id)], 'invalid task id: %s', task_id)
+	local task = checkarg(tasks_by_id[id_arg(task_id)], 'invalid task id: %s', task_id)
 	NYI'tail'
 end
 
@@ -747,26 +613,6 @@ rowset.task_runs = sql_rowset{
 }
 
 --scheduled tasks ------------------------------------------------------------
-
-mm.scheduled_tasks = {}
-
-function mm.set_scheduled_task(name, opt)
-	if not opt then
-		mm.scheduled_tasks[name] = nil
-	else
-		assert(opt.task_name)
-		assert(opt.action)
-		assert(opt.start_hours or opt.run_every)
-		assert(opt.machine or opt.deploy)
-		local sched = mm.scheduled_tasks[name]
-		if not sched then
-			sched = {sched_name = name, ctime = time(), active = true}
-			mm.scheduled_tasks[name] = sched
-		end
-		update(sched, opt)
-	end
-	rowset_changed'scheduled_tasks'
-end
 
 rowset.scheduled_tasks = virtual_rowset(function(self)
 
@@ -807,7 +653,7 @@ rowset.scheduled_tasks = virtual_rowset(function(self)
 
 	local function load_rows()
 		local rows = {}
-		for name, sched in sortedpairs(mm.scheduled_tasks, cmp_ctime) do
+		for name, sched in sortedpairs(scheduled_tasks, cmp_ctime) do
 			add(rows, sched_row(sched))
 		end
 		return rows
@@ -823,20 +669,20 @@ rowset.scheduled_tasks = virtual_rowset(function(self)
 
 	function self:load_row(row)
 		local name = row['sched_name:old']
-		local t = mm.scheduled_tasks[name]
+		local t = scheduled_tasks[name]
 		return t and sched_row(t)
 	end
 
 	function self:update_row(row)
 		local name = row['sched_name:old']
-		local t = mm.scheduled_tasks[name]
+		local t = scheduled_tasks[name]
 		if not t then return end
 		t.active = row.active
 	end
 
 	function self:delete_row(row)
 		local name = row['sched_name:old']
-		local t = mm.scheduled_tasks[name]
+		local t = scheduled_tasks[name]
 		if not t then return end
 		t.active = false
 	end
@@ -853,209 +699,20 @@ local function load_tasks_last_run()
 	for _, sched_name, last_run in each_row_vals[[
 		select sched_name, last_run from task_last_run
 	]] do
-		local t = mm.scheduled_tasks[sched_name]
+		local t = scheduled_tasks[sched_name]
 		if t then t.last_run = last_run end
 	end
 end
 
-local function run_tasks()
-	local now = time()
-	local today = glue.day(now)
-
-	for sched_name,t in pairs(mm.scheduled_tasks) do
-
-		if t.active then
-
-			local start_hours = t.start_hours
-			local last_run = t.last_run
-			local run_every = t.run_every
-			local action = t.action
-
-			local min_time = not start_hours and last_run and run_every
-				and last_run + run_every or -1/0
-
-			if start_hours and run_every then
-				local today_at = today + start_hours
-				local seconds_late = (now - today_at) % run_every --always >= 0
-				local last_sched_time = now - seconds_late
-				local already_run = last_run and last_run >= last_sched_time
-				local too_late = seconds_late > run_every / 2
-				if already_run or too_late then
-					min_time = 1/0
-				end
-			end
-
-			if now >= min_time and not mm.running_task(t.task_name) then
-				local rearm = run_every and true or false
-				note('mm', 'run-task', '%s', t.task_name)
-				t.last_run = now
-				insert_or_update_row('task_last_run', {
-					sched_name = sched_name,
-					last_run = now,
-				})
-				resume(thread(function()
-					local ok, err = errors.pcall(action)
-					if not ok then
-						logerror('mm', 'runtask', '%s: %s', sched_name, err)
-					end
-				end, 'run-task %s', t.task_name))
-			end
-
-		end
-	end
-end
-
---async exec tasks -----------------------------------------------------------
+--exec tasks -----------------------------------------------------------------
 
 function mm.exec(cmd, opt)
-
 	opt = opt or empty
-
-	local task = mm.task(update({cmd = cmd}, opt))
-
-	local out_stdout = opt.out_stdout ~= false
-	local out_stderr = opt.out_stderr ~= false
-	local capture_stdout = opt.capture_stdout ~= false
-	local capture_stderr = opt.capture_stderr ~= false
-
-	local env = opt.env and update(proc.env(), opt.env)
-
-	local p, err = proc.exec{
-		cmd = cmd,
-		env = env,
-		async = true,
-		autokill = true,
-		stdout = capture_stdout,
-		stderr = capture_stderr,
-		stdin = opt.stdin and true or false,
-	}
-
-	local wait
-
-	if not p then
-		task:logerror('exec', '%s', err)
-	else
-
-		task.process = p
-		task:setstatus'running'
-
-		if p.stdin then
-			resume(thread(function()
-				--dbg('mm', 'execin', '%s', opt.stdin)
-				local ok, err = p.stdin:write(opt.stdin)
-				if not ok then
-					task:logerror('stdinwr', '%s', err)
-				end
-				assert(p.stdin:close()) --signal eof
-			end, 'exec-stdin %s', p))
-		end
-
-		if p.stdout then
-			resume(thread(function()
-				local buf, sz = u8a(4096), 4096
-				while true do
-					local len, err = p.stdout:read(buf, sz)
-					if not len then
-						task:logerror('stdoutrd', '%s', err)
-						break
-					elseif len == 0 then
-						break
-					end
-					local s = ffi.string(buf, len)
-					task:out(s)
-					if out_stdout then
-						out_on('1', s)
-					end
-				end
-				p.stdout:close()
-			end, 'exec-stdout %s', p))
-		end
-
-		if p.stderr then
-			resume(thread(function()
-				local buf, sz = u8a(4096), 4096
-				while true do
-					local len, err = p.stderr:read(buf, sz)
-					if not len then
-						task:logerror('stderrrd', '%s', err)
-						break
-					elseif len == 0 then
-						break
-					end
-					local s = ffi.string(buf, len)
-					task:err(s)
-					if out_stderr then
-						out_on('2', s)
-					end
-				end
-				p.stderr:close()
-			end, 'exec-stderr %s', p))
-		end
-
+	if not opt.bg then
 		--release all db connections now in case this is a long running task.
 		release_dbs()
-
-		function wait()
-			local exit_code, err = p:wait()
-			if not exit_code then
-				if not (err == 'killed' and task.killed) then
-					task:logerror('procwait', '%s', err)
-				end
-			end
-			while not (
-					 (not p.stdin or p.stdin:closed())
-				and (not p.stdout or p.stdout:closed())
-				and (not p.stderr or p.stderr:closed())
-			) do
-				sleep(.1)
-			end
-			p:forget()
-			task:finish(exit_code)
-		end
-
-		function task:do_kill()
-			p:kill()
-		end
 	end
-
-	local function finish()
-		if opt and not mm.server_running then
-			task:free()
-		else
-			resume(thread(function()
-				sleep(10)
-				while task.pinned do
-					sleep(1)
-				end
-				task:free()
-			end, 'exec-zombie %s', p))
-		end
-		if #task.errors > 0 then
-			check500(false, cat(task.errors, '\n'))
-		end
-	end
-
-	if not p then
-		finish()
-	else
-		if opt.async then
-			resume(thread(function()
-				wait()
-				finish()
-			end, 'exec-wait %s', p))
-		else
-			wait()
-			finish()
-		end
-	end
-
-	if not opt.allow_fail and task.exit_code and task.exit_code ~= 0 then
-		local cmd_s = isstr(cmd) and cmd or proc.quote_args_unix(unpack(cmd))
-		check500(false, 'exec: %s\nEXIT CODE: %s\nSTDIN:\n%s\nENV:%s\n',
-			cms_s, task.exit_code, task.stdin, opt.env)
-	end
-
-	return task
+	return task_exec(cmd, opt)
 end
 
 --client rowset API ----------------------------------------------------------
@@ -1146,7 +803,7 @@ function sshcmd(cmd)
 end
 
 local function known_hosts_file()
-	return indir(mm.vardir, 'known_hosts')
+	return varpath'known_hosts'
 end
 function api.known_hosts_file_contents()
 	return load(known_hosts_file())
@@ -1218,7 +875,7 @@ end)
 --ssh / private keys ---------------------------------------------------------
 
 local function keyfile(machine, ext)
-	return indir(mm.vardir, 'mm'..(machine and '-'..machine or '')..'.'..(ext or 'key'))
+	return varpath('mm'..(machine and '-'..machine or '')..'.'..(ext or 'key'))
 end
 function api.keyfile_contents(opt, machine, ext)
 	return load(keyfile(machine, ext), false)
@@ -1288,7 +945,7 @@ end
 cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', mm.ssh_key_gen)
 
 function api.ssh_key_update(opt, machine)
-	note('mm', 'upd-key', '%s', machine)
+	log('note', 'mm', 'upd-key', '%s', machine)
 	local pubkey = mm.ssh_pubkey()
 	stored_pubkey = mm.ssh_sh(machine, [=[
 		#use ssh mysql user
@@ -1371,7 +1028,7 @@ function api.ssh_pubkey(opt, machine)
 	local s = mm.exec({
 		sshcmd'ssh-keygen', '-y', '-f', mm.keyfile(machine),
 	}, {
-		name = catargs(' ', 'ssh_pubkey ', machine), keyed = false, visible = false,
+		name = catany(' ', 'ssh_pubkey ', machine), keyed = false, visible = false,
 		out_stdout = false,
 	}):stdout():trim()
 	return (s:match('^[^%s]+%s+[^%s]+')..' mm')
@@ -1421,7 +1078,7 @@ end
 --shell scripts with preprocessor --------------------------------------------
 
 local function load_shfile(self, name)
-	local path = indir(mm.dir, 'shlib', name..'.sh')
+	local path = indir(scriptdir(), 'shlib', name..'.sh')
 	return load(path)
 end
 
@@ -1429,7 +1086,7 @@ mm.shlib = {} --{name->code}
 setmetatable(mm.shlib, {__index = load_shfile})
 
 function mm.sh_preprocess(vars)
-	return mustache.render(s, vars, nil, nil, nil, nil, proc.esc_unix)
+	return mustache.render(s, vars, nil, nil, nil, nil, cmdline_escape_unix)
 end
 
 function mm.sh_script(s, env, pp_env, included)
@@ -1467,7 +1124,7 @@ function mm.sh_script(s, env, pp_env, included)
 	end
 	s = s:gsub( '^[ \t]*#use[ \t]+([^#\r\n]+)', use)
 	s = s:gsub('\n[ \t]*#use[ \t]+([^#\r\n]+)', use_lf)
-	s = env and proc.quote_vars(env, nil, 'unix')..'\n'..s or s
+	s = env and cmdline_quote_vars(env, nil, 'unix')..'\n'..s or s
 	if pp_env then
 		return mm.sh_preprocess(s, pp_env)
 	else
@@ -1544,7 +1201,7 @@ function mm.ssh_cli(opt, mds, cmd, ...)
 		mds = words(checkarg(mds, 'machine or deploy required'):gsub(',', ' '))
 	end
 	local last_exit_code
-	local cmd = catargs(' ', cmd, ...)
+	local cmd = catany(' ', cmd, ...)
 	local bash_cmd = cmd and {'bash', '-c', "'"..cmd.."'"}
 	for _,md in ipairs(mds) do
 		local ip, m = mm.ip(md)
@@ -1584,7 +1241,7 @@ cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty',
 			VERBOSE = env'VERBOSE' or '',
 		}, git_hosting_vars(), deploy and deploy_vars(deploy))
 		local s = mm.sh_script(script:outdent(), script_env)
-		local s = catargs('\n',
+		local s = catany('\n',
 			'export MM_TMP_SH=/root/.mm.$$.sh',
 			'cat << \'EOFFF\' > $MM_TMP_SH',
 			'rm -f $MM_TMP_SH',
@@ -1601,7 +1258,7 @@ cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty',
 		end)
 		cmd = cmd..' -m '..cmdfile
 	end
-	proc.exec(cmd):forget()
+	exec(cmd):forget()
 end)
 
 cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
@@ -1637,7 +1294,7 @@ cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
 --TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
 function mm.tunnel(machine, ports, opt, rev)
 	local args = {'-N'}
-	if logging.debug then add(args, '-v') end
+	--if logging.debug then add(args, '-v') end
 	ports = checkarg(ports, 'ports expected')
 	local rports = {}
 	for ports in ports:gmatch'([^,]+)' do
@@ -1647,7 +1304,8 @@ function mm.tunnel(machine, ports, opt, rev)
 		add(args, rev and '-R' or '-L')
 		if rev then lport, rport = rport, lport end
 		add(args, '127.0.0.1:'..lport..':127.0.0.1:'..rport)
-		note('mm', 'tunnel', '%s:%s %s %s', machine, lport, rev and '->' or '<-', rport)
+		log('note', 'mm', 'tunnel', '%s:%s %s %s',
+			machine, lport, rev and '->' or '<-', rport)
 		add(rports, rport)
 	end
 	local on_finish
@@ -1656,6 +1314,7 @@ function mm.tunnel(machine, ports, opt, rev)
 			name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
 			type = 'long',
 			on_finish = on_finish,
+			out_stdout = false, --suppress copyright noise
 		}, opt))
 	end
 	function on_finish(task)
@@ -1687,7 +1346,7 @@ cmd_mysql('mysql DEPLOY|MACHINE [SQL]',
 		local ip, machine = mm.ip(md)
 		local deploy = machine ~= md and md
 		local args = {'mysql', '-h', 'localhost', '-u', 'root', deploy}
-		if sql then append(args, '-e', proc.quote_arg_unix(sql)) end
+		if sql then append(args, '-e', cmdline_quote_arg_unix(sql)) end
 		return mm.ssh(machine, args, {
 			tty = not sql,
 			capture_stdout = false,
@@ -1773,7 +1432,7 @@ function mm.rsync(opt, md1, md2)
 			..' -o PreferredAuthentications=publickey'
 			..' -o UserKnownHostsFile='..path.sep(mm.known_hosts_file(), nil, '/')
 			..' -i '..mm.keyfile(m1 or m2)
-			..' '..proc.quote_args_unix(ssh_control_opts(opt.tty))
+			..' '..cmdline_quote_args_unix(ssh_control_opts(opt.tty))
 		if m2 then --upload
 			local ip = mm.ip(m2)
 			out_on('2', _('Uploading %s to %s:%s ... \n', d1, m2, d2))
@@ -1923,7 +1582,7 @@ function api.update_machine_info(opt, machine)
 	t.ram = kbytes(t.ram, 1)
 	t.hdd = kbytes(t.hdd, 1)
 	for i,k in ipairs(t) do
-		outprint(_('%20s %s', k, t[k]))
+		task:print(_('%20s %s', k, t[k]))
 	end
 	notify('Machine info updated for %s.', machine)
 end
@@ -1945,14 +1604,14 @@ function api.prepare(opt, machine)
 	local vars = git_hosting_vars()
 	vars.MACHINE = machine
 	vars.MYSQL_ROOT_PASS = mm.mysql_root_pass(machine)
-	vars.DHPARAM = load(indir(mm.vardir, 'dhparam.pem'))
+	vars.DHPARAM = load(varpath'dhparam.pem')
 	mm.ssh_sh(machine, [=[
 		#use deploy
 		machine_prepare
 	]=], vars, {
 		name = 'prepare '..machine,
 	})
-	mm.rsync(indir(mm.vardir, '.acme.sh.etc/ca'), machine..':/root/.acme.sh.etc/ca')
+	mm.rsync(varpath'.acme.sh.etc/ca', machine..':/root/.acme.sh.etc/ca')
 	notify('Machine prepared: %s.', machine)
 end
 cmd_machines('prepare MACHINE', 'Prepare a new machine', mm.prepare)
@@ -1988,7 +1647,7 @@ function api.deploy_issue_cert(opt, deploy)
 
 	--save the cert locally so we can deploy on a diff. machine later.
 	mm.rsync(d.machine..':/root/.acme.sh.etc/'..d.domain,
-		':'..mm.vardir..'/.acme.sh.etc/'..d.domain)
+		':'..varpath('.acme.sh.etc', d.domain))
 end
 cmd_deploys('issue-ssl-cert DEPLOY',
 	'Issue SSL certificate for an app',
@@ -2073,7 +1732,7 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 	update(vars, git_hosting_vars())
 
 	if vars.DOMAIN then
-		mm.rsync(mm.vardir..'/.acme.sh.etc/'..vars.DOMAIN,
+		mm.rsync(varpath('.acme.sh.etc', vars.DOMAIN),
 			vars.MACHINE..':/root/.acme.sh.etc/'..vars.DOMAIN)
 	end
 
@@ -2194,7 +1853,7 @@ end
 
 function api.app(opt, deploy, ...)
 	local vars = deploy_vars(deploy)
-	local args = proc.quote_args_unix(...)
+	local args = cmdline_quote_args_unix(...)
 	local task_name = 'app '..deploy..' '..args
 	local task = mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
@@ -2237,7 +1896,7 @@ local log_server_chan = {} --{deploy->mess_channel}
 function queue_push(queues, k, msg)
 	local q = queues[k]
 	if not q then
-		q = queue.new(queues.queue_size)
+		q = queue(queues.queue_size)
 		q.next_id = 1
 		queues[k] = q
 	end
@@ -2271,57 +1930,72 @@ function mm.log_server(machine)
 	]], checkarg(machine, 'machine required'))
 	checkfound(lport, 'log_local_port not set for machine '..machine)
 
+	local action_thread
+	local function action()
+
+		local logserver = mess_listen('127.0.0.1', lport, function(mess, chan)
+
+			local deploy
+
+			resume(thread(function()
+				while not chan:closed() do
+					if deploy then
+						mm.log_server_rpc(deploy, 'get_procinfo')
+					end
+					chan:wait(1)
+				end
+			end, 'log-server-get-procinfo %s', machine))
+
+			chan:recvall(function(chan, msg)
+				if not deploy then --first message identifies the client.
+					deploy = msg.deploy
+					log_server_chan[deploy] = chan
+				end
+				msg.machine = machine
+				if msg.event == 'set' then
+					attr(mm.deploy_state_vars, deploy)[msg.k] = msg.v
+					if msg.k == 'livelist' then
+						rowset_changed'deploy_livelist'
+					elseif msg.k == 'procinfo' then
+						msg.v.time = msg.time
+						queue_push(mm.deploy_procinfo_logs, deploy, msg.v)
+						queue_push(mm.machine_procinfo_logs, machine, msg.v)
+						--TODO: filter this on deploy
+						rowset_changed('deploy_procinfo_log')
+						--TODO: filter this on machine
+						rowset_changed('machine_procinfo_log')
+					end
+				else
+					queue_push(mm.deploy_logs, deploy, msg)
+					rowset_changed'deploy_log'
+				end
+			end, function()
+				log_server_chan[deploy] = nil
+			end)
+
+			log_server_chan[deploy] = nil
+			resume(action_thread)
+
+		end, nil, 'log-server-'..machine)
+
+		action_thread = currentthread()
+		suspend()
+	end
+
 	local task = mm.task({
 		name = 'log_server '..machine,
 		machine = machine,
 		editable = false,
 		type = 'long',
+		action = action,
 	})
-
-	local logserver = mess.listen('127.0.0.1', lport, function(mess, chan)
-		local deploy
-		resume(thread(function()
-			while not chan:closed() do
-				if deploy then
-					mm.log_server_rpc(deploy, 'get_procinfo')
-				end
-				chan:sleep(1)
-			end
-		end, 'log-server-get-procinfo %s', machine))
-		chan:recvall(function(chan, msg)
-			if not deploy then --first message identifies the client.
-				deploy = msg.deploy
-				log_server_chan[deploy] = chan
-			end
-			msg.machine = machine
-			if msg.event == 'set' then
-				attr(mm.deploy_state_vars, deploy)[msg.k] = msg.v
-				if msg.k == 'livelist' then
-					rowset_changed'deploy_livelist'
-				elseif msg.k == 'procinfo' then
-					msg.v.time = msg.time
-					queue_push(mm.deploy_procinfo_logs, deploy, msg.v)
-					queue_push(mm.machine_procinfo_logs, machine, msg.v)
-					--TODO: filter this on deploy
-					rowset_changed('deploy_procinfo_log')
-					--TODO: filter this on machine
-					rowset_changed('machine_procinfo_log')
-				end
-			else
-				queue_push(mm.deploy_logs, deploy, msg)
-				rowset_changed'deploy_log'
-			end
-		end, function()
-			log_server_chan[deploy] = nil
-		end)
-		log_server_chan[deploy] = nil
-	end, nil, 'log-server-'..machine)
 
 	function task:do_kill()
 		logserver:stop()
 	end
 
-	task:setstatus'running'
+	task:start()
+
 	return task
 end
 
@@ -2982,7 +2656,7 @@ function api.machine_backup_copy(opt, src_mbk_copy, dest_machines)
 	else
 		local errs = {}
 		for _,dest_machine in ipairs(dm) do
-			local ok, err = errors.pcall(copy, src_mbk_copy, dest_machine)
+			local ok, err = pcall(copy, src_mbk_copy, dest_machine)
 			if not ok then add(errs, tostring(err)) end
 		end
 		check500(#errs == 0, cat(errs, '\n'))
@@ -3457,8 +3131,8 @@ cmd_dbk('dbk-restore COPY [DEPLOY_NAME]', 'Restore a deployment', mm.deploy_rest
 local function machine_set_scheduled_backup_tasks(machine, enable)
 
 	if not enable then
-		mm.set_scheduled_task('machine_full_backup '..machine, nil)
-		mm.set_scheduled_task('machine_incr_backup '..machine, nil)
+		set_scheduled_task('machine_full_backup '..machine, nil)
+		set_scheduled_task('machine_incr_backup '..machine, nil)
 		return
 	end
 
@@ -3475,7 +3149,7 @@ local function machine_set_scheduled_backup_tasks(machine, enable)
 		where machine = ?
 	]], machine)
 
-	mm.set_scheduled_task('machine_full_backup '..machine, row.active and row.full_backup_active and {
+	set_scheduled_task('machine_full_backup '..machine, row.active and row.full_backup_active and {
 		action = function()
 			mm.machine_backup(machine, 'scheduled full backup')
 		end,
@@ -3485,7 +3159,7 @@ local function machine_set_scheduled_backup_tasks(machine, enable)
 		run_every   = row.full_backup_run_every,
 	} or nil)
 
-	mm.set_scheduled_task('machine_incr_backup '..machine, row.active and row.incr_backup_active and {
+	set_scheduled_task('machine_incr_backup '..machine, row.active and row.incr_backup_active and {
 		action = function()
 			mm.machine_backup(machine, 'scheduled incremental backup', 'latest')
 		end,
@@ -3504,7 +3178,7 @@ end
 local function deploy_set_scheduled_backup_tasks(deploy, enable)
 
 	if not enable then
-		mm.set_scheduled_task('deploy_backup '..deploy, nil)
+		set_scheduled_task('deploy_backup '..deploy, nil)
 		return
 	end
 
@@ -3520,7 +3194,7 @@ local function deploy_set_scheduled_backup_tasks(deploy, enable)
 		where deploy = ?
 	]], deploy)
 
-	mm.set_scheduled_task('deploy_backup '..deploy,
+	set_scheduled_task('deploy_backup '..deploy,
 		d.active and d.machine and d.deployed_at and d.backup_active and {
 		action = function()
 			mm.deploy_backup(machine, 'scheduled backup')
@@ -3848,8 +3522,8 @@ rowset.deploys = sql_rowset{
 	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
 		local d1 = row.deploy
-		row.secret = b64(random_string(46)) --results in a 64 byte string
- 		row.mysql_pass = b64(random_string(23)) --results in a 32 byte string
+		row.secret = base64_encode(random_string(46)) --results in a 64 byte string
+ 		row.mysql_pass = base64_encode(random_string(23)) --results in a 32 byte string
  		self:insert_into('deploy', row, [[
 			deploy machine repo app wanted_app_version wanted_sdk_version
 			env domain http_port secret mysql_pass pos
@@ -3980,14 +3654,14 @@ local function start_tunnels_and_log_servers()
 		if log_local_port then
 			mm.rtunnel(machine, log_local_port..':'..mm.log_port, {
 				editable = false,
-				async = true,
+				bg = true,
 			})
 			mm.log_server(machine)
 		end
 		if mysql_local_port then
 			mm.tunnel(machine, mysql_local_port..':'..mm.mysql_port, {
 				editable = false,
-				async = true,
+				bg = true,
 			})
 			config(machine..'_db_host', '127.0.0.1')
 			config(machine..'_db_port', mysql_local_port)
@@ -4001,7 +3675,7 @@ end
 local run_server = mm.run_server
 function mm:run_server()
 
-	if false then
+	if true then
 
 		runevery(1, function()
 			if update_deploys_live_state() then
@@ -4015,7 +3689,7 @@ function mm:run_server()
 			machine_schedule_backup_tasks()
 			deploy_schedule_backup_tasks()
 			load_tasks_last_run()
-			runagainevery(60, run_tasks, 'run-tasks-every-60s')
+			--runagainevery(60, run_tasks, 'run-tasks-every-60s')
 		end, 'startup')
 
 	end
@@ -4023,4 +3697,10 @@ function mm:run_server()
 	run_server(self)
 end
 
+action['test.txt'] = function()
+	out'hello'
+	error'gone'
+end
+
+logging.filter.mysql = true
 return mm:run()
