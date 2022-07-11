@@ -97,11 +97,27 @@ machine_rename() { # OLD_MACHINE NEW_MACHINE
 deploy_nginx_config() { # DOMAIN= HTTP_PORT= $0
 	[ "$HTTP_PORT" -a "$DOMAIN" ] || return 0
 	checkvars HTTP_PORT DOMAIN
+
+	# acme thumbprint got with `acme.sh --register-account` (thumbprint is public).
+	local ACME_THUMBPRINT="Iqlo10aKd6rUBSkm5WQ36pBDaNAQ3wb9Q-RCejWJgbM"
+
+	acme_location= "\
+	location ~ ^/\.well-known/acme-challenge/([-_a-zA-Z0-9]+)$ {
+		default_type text/plain;
+		return 200 \"\$1.$ACME_THUMBPRINT\";
+	}
+"
+
 	save "\
 server {
 	listen 80;
 	server_name $DOMAIN;
-	return 301 https://$host$request_uri;
+
+	location / {
+		return 301 https://$host$request_uri;
+	}
+
+	$acme_location
 }
 
 server {
@@ -125,11 +141,7 @@ server {
 		proxy_pass http://127.0.0.1:$HTTP_PORT;
 	}
 
-	# acme thumbprint got with `acme.sh --register-account` (thumbprint is public).
-	location ~ ^/\.well-known/acme-challenge/([-_a-zA-Z0-9]+)$ {
-		default_type text/plain;
-		return 200 \"\$1.ba-H2X2peFTTxpFRtfM6Dk83qgbbkRvqY8hw6WPMpYc\";
-	}
+	$acme_location
 }
 " /etc/nginx/sites-enabled/$DOMAIN
 	must nginx -s reload

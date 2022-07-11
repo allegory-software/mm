@@ -210,6 +210,7 @@ mysql_gen_my_cnf() { # HOST USER PASS [DB]
 host=$host
 user=$user
 password=$pass
+protocol=TCP
 ${db:+database=$db}
 " $cnf $user
 }

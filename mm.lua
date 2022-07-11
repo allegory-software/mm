@@ -1,5 +1,5 @@
---go@ plink d10 -t -batch sdk/bin/linux/luajit mm/mm.lua -vv run
---go@ x:\sdk\bin\windows\luajit mm.lua -vv run
+--go@ plink d10 -t -batch sdk/bin/linux/luajit apps/mm/mm.lua -vv run
+--go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --[[
 
 	Many Machines, the independent man's SAAS provisioning tool.
@@ -255,21 +255,24 @@ end
 
 local xapp = require'xapp'
 
-config('multilang', false)
-config('allow_create_user', false)
-config('auto_create_user', false)
-
-local mm = xapp(...)
-
 require'base64'
 require'mustache'
 require'queue'
 require'mess'
 require'tasks'
 require'mysql_print'
+require'http_client'
+
+config('multilang', false)
+config('allow_create_user', false)
+config('auto_create_user', false)
+
+local mm = xapp(...)
+
+logging.filter.mysql = true
 
 mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
-mm.bindir   = indir(scriptdir(), 'bin', win and 'windiws' or 'linux')
+mm.bindir   = indir(scriptdir(), 'bin', win and 'windows' or 'linux')
 mm.sshdir   = mm.bindir
 
 config('page_title_suffix', 'Many Machines')
@@ -284,7 +287,7 @@ config('noreply_email', 'admin@bpnpart.com')
 
 --logging.filter[''] = true
 --config('http_debug', 'protocol stream')
-config('getpage_debug', 'stream')
+--config('getpage_debug', 'stream')
 
 --load_opensans()
 
@@ -306,7 +309,15 @@ cmd('install [forealz]', 'Install or migrate mm', function(opt, doit)
 	local dry = doit ~= 'forealz'
 	db():sync_schema(mm.schema, {dry = dry})
 	if not dry then
-		create_user()
+		insert_or_update_row('tenant', {
+			tenant = 1,
+			name = 'test',
+		})
+		usr_create_or_update{
+			tenant = 1,
+			email = config'dev_email',
+			roles = 'dev admin',
+		}
 	end
 	say'Install done.'
 end)
@@ -322,7 +333,7 @@ action['api.txt'] = function(action, ...)
 	--^^required so that each out() call is a HTTP chunk and there's no buffering.
 	setheader('content-type', 'application/octet-stream')
 	--^^the only way to make chrome fire onreadystatechange() for each chunk.
-	allow(admin())
+	allow(usr'roles'.admin)
 	checkarg(method'post', 'try POST')
 	local handler = checkfound(mm_api[action:gsub('-', '_')], 'action not found: %s', action)
 	local post = repl(post(), '')
@@ -342,12 +353,14 @@ action['api.txt'] = function(action, ...)
 	--multiple return values (you have to return arrays instead).
 	local args = extend(pack(...), post and post.args)
 	local opt = post and post.options or empty
+	ownthreadenv().debug   = opt.debug
+	ownthreadenv().verbose = opt.verbose
 	local prev_term = set_current_terminal(out_term)
 	local ok, ret = pcall(handler, opt, unpack(args))
 	if not ok then
 		out_term:send_on('e', tostring(ret))
 	elseif ret ~= nil then
-		out_term:send_on('r', json(ret))
+		out_term:send_on('r', json_encode(ret))
 	end
 	set_current_terminal(prev_term)
 end
@@ -356,33 +369,43 @@ end
 
 local function call_api(action, opt, ...)
 	local retval
-	local term = cmdline_terminal()
+	local term = null_terminal():pipe(current_terminal())
 	function term:receive_on(chan, s)
 		if chan == 'e' then
-			error(s)
+			raise('mm', '%s', s) --no stacktrace
 		elseif chan == 'r' then
-			retval = json_arg(s)
+			retval = json_decode(s)
 		else
 			assertf(false, 'invalid channel: "%s"', chan)
 		end
 	end
 	local write = streaming_terminal_reader(term)
 	local function receive_content(req, in_buf, sz)
-		write(in_buf, sz)
+		if not in_buf then --eof
+			--
+		else
+			write(in_buf, sz)
+		end
 	end
 	local function headers_received(res)
 		assertf(res.status == 200, 'http error: %d %s', res.status, res.status_message) --bug?
 	end
+	local opt = update({ --pass verbosity to server
+		debug   = repl(logging.debug  , false),
+		verbose = repl(logging.verbose, false),
+	}, opt)
 	local ret, res = getpage{
-		host = config'mm_host',
-		uri = url{segments = {'', 'api.txt', action}},
+		host  = config'mm_host',
+		port  = config'mm_port',
+		https = config'mm_https',
+		uri = url_format{segments = {'', 'api.txt', action}},
 		headers = {
 			cookie = {
 				session = config'session_cookie',
 			},
 		},
 		method = 'POST',
-		upload = {options = opt, args = pack_json(...)},
+		upload = {options = opt, args = json_pack(...)},
 		receive_content = receive_content,
 		headers_received = headers_received,
 	}
@@ -398,8 +421,10 @@ local function call_json_api(opt, action, ...)
 	opt = repl(opt, nil, empty)
 
 	local ret, res = getpage{
-		host = config'mm_host',
-		uri = url{
+		host  = config'mm_host',
+		port  = config'mm_port',
+		https = config'mm_https',
+		uri = url_format{
 			segments = {n = select('#', ...) + 2, '', action, ...},
 			args = opt.args,
 		},
@@ -719,7 +744,7 @@ end
 
 function mm.get_rowset(name, filter)
 	if from_server() then
-		local call_opt = filter and {args = {filter = json(filter)}}
+		local call_opt = filter and {args = {filter = json_encode(filter)}}
 		t = call_json_api(call_opt, 'rowset.json', name)
 	else
 		NYI'get_rowset'
@@ -734,7 +759,7 @@ function mm.print_rowset(opt, name, cols, filter)
 		return mm.print_rowset(nil, opt, name, cols, filter)
 	end
 	local t = mm.get_rowset(name or 'rowsets', filter)
-	outpqr(update({
+	mysql_print_result(update({
 		rows = t.rows, fields = t.fields,
 		showcols = cols and cols:gsub(',', ' '),
 	}, opt))
@@ -897,6 +922,11 @@ end
 function mm.ssh_key_fix_perms(opt, machine)
 	if not win then return end
 	local s = mm.keyfile(machine)
+	local function readpipe(...)
+		local p = exec(_(...))
+		p:wait()
+		p:forget()
+	end
 	readpipe('icacls %s /c /t /Inheritance:d', s)
 	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
 	readpipe('takeown /F %s', s)
@@ -1101,14 +1131,14 @@ function mm.sh_script(s, env, pp_env, included)
 	end
 	local function include(s)
 		local t = {}
-		for _,s in ipairs(words(s)) do
+		for s in words(s) do
 			include_one(s)
 		end
 		return cat(t, '\n')
 	end
 	local function use(s)
 		local t = {}
-		for _,s in ipairs(words(s)) do
+		for s in words(s) do
 			if not included[s] then
 				included[s] = true
 				add(t, include_one(s))
@@ -1142,14 +1172,14 @@ end
 function mm.ssh_sh(machine, script, script_env, opt)
 	opt = opt or {}
 	local script_env = update({
-		DEBUG   = env'DEBUG',
-		VERBOSE = env'VERBOSE',
+		DEBUG   = repl(threadenv().debug   , false),
+		VERBOSE = repl(threadenv().verbose , false),
 	}, script_env)
 	local script_s = script:outdent()
 	local s = mm.sh_script(script_s, script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
 	if logging.debug then
-		debug('mm', 'ssh-sh', '%s %s %s', machine, script_s:trim(), script_env)
+		log('', 'mm', 'ssh-sh', '%s %s %s', machine, script_s:trim(), script_env)
 	end
 	return mm.ssh(machine, {'bash', '-s'}, opt)
 end
@@ -1198,13 +1228,13 @@ function mm.ssh_cli(opt, mds, cmd, ...)
 		mds = mm.active_machines()
 		cmd = checkarg(cmd, 'command required')
 	else
-		mds = words(checkarg(mds, 'machine or deploy required'):gsub(',', ' '))
+		mds = collect(words(checkarg(mds, 'machine or deploy required'):gsub(',', ' ')))
 	end
 	local last_exit_code
 	local cmd = catany(' ', cmd, ...)
 	local bash_cmd = cmd and {'bash', '-c', "'"..cmd.."'"}
 	for _,md in ipairs(mds) do
-		local ip, m = mm.ip(md)
+			local ip, m = mm.ip(md)
 		if #mds > 1 then say('%s: `%s`', m, cmd) end
 		local task = mm.ssh(md, bash_cmd, {
 			allow_fail = true,
@@ -1237,7 +1267,7 @@ cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty',
 			#use deploy backup
 		]]
 		local script_env = update({
-			DEBUG   = env'DEBUG' or '',
+			DEBUG   = env'DEBUG'   or '',
 			VERBOSE = env'VERBOSE' or '',
 		}, git_hosting_vars(), deploy and deploy_vars(deploy))
 		local s = mm.sh_script(script:outdent(), script_env)
@@ -1264,7 +1294,7 @@ end)
 cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
 	function(opt, md_dir)
 		local md, dir = split(':', md_dir)
-		checkarg(md and dir, 'machine:dir expected')
+		assert(md and dir, 'machine:dir expected')
 		local args = {'ls', dir}
 		for k,v in pairs(opt) do
 			add(args, '-'..k)
@@ -1275,7 +1305,7 @@ cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
 cmd_files('cat MACHINE:FILE', 'Run `cat` on machine',
 	function(opt, md_file)
 		local md, file = split(':', md_file)
-		checkarg(md and file, 'machine:file expected')
+		assert(md and file, 'machine:file expected')
 		mm.ssh_cli(md, 'cat', file)
 	end)
 
@@ -1287,7 +1317,7 @@ cmd_files('mc MACHINE [DIR]', 'Run `mc` on machine',
 cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
 	function(opt, md_file)
 		local md, file = split(':', md_file)
-		checkarg(md and file, 'machine:file expected')
+		assert(md and file, 'machine:file expected')
 		mm.ssh_cli({tty = true}, md, 'mcedit', file)
 	end)
 
@@ -1368,12 +1398,12 @@ function mm.mount(opt, machine, rem_path, drive)
 			' -oidmap=user -ouid=-1 -ogid=-1 -oumask=000 -ocreate_umask=000'..
 			' -omax_readahead=1GB -oallow_other -olarge_read -okernel_cache -ofollow_symlinks'..
 			--only cygwin ssh works. the builtin Windows ssh doesn't, nor does our msys version.
-			' -ossh_command='..path.sep(indir(mm.sshfsdir, 'ssh'), nil, '/')..
+			' -ossh_command='..path_sep(indir(mm.sshfsdir, 'ssh'), nil, '/')..
 			' -oBatchMode=yes'..
 			' -oRequestTTY=no'..
 			' -oPreferredAuthentications=publickey'..
-			' -oUserKnownHostsFile='..path.sep(mm.known_hosts_file(), nil, '/')..
-			' -oIdentityFile='..path.sep(mm.keyfile(machine), nil, '/')
+			' -oUserKnownHostsFile='..path_sep(mm.known_hosts_file(), nil, '/')..
+			' -oIdentityFile='..path_sep(mm.keyfile(machine), nil, '/')
 		if opt.bg then
 			exec(cmd)
 		else
@@ -1430,12 +1460,12 @@ function mm.rsync(opt, md1, md2)
 		local ssh_cmd = 'ssh'
 			..' -q -o BatchMode=yes'
 			..' -o PreferredAuthentications=publickey'
-			..' -o UserKnownHostsFile='..path.sep(mm.known_hosts_file(), nil, '/')
+			..' -o UserKnownHostsFile='..path_sep(mm.known_hosts_file(), nil, '/')
 			..' -i '..mm.keyfile(m1 or m2)
 			..' '..cmdline_quote_args_unix(ssh_control_opts(opt.tty))
 		if m2 then --upload
 			local ip = mm.ip(m2)
-			out_on('2', _('Uploading %s to %s:%s ... \n', d1, m2, d2))
+			out_stderr(_('Uploading %s to %s:%s ... \n', d1, m2, d2))
 			mm.exec({
 				sshcmd'rsync', '--delete', '--timeout=5',
 				opt.progress and '--info=progress2' or nil,
@@ -1447,7 +1477,7 @@ function mm.rsync(opt, md1, md2)
 			})
 		elseif m1 then --download
 			local ip = mm.ip(m1)
-			out_on('2', _('Downloading %s:%s to %s ... \n', m1, d1, d2))
+			out_stderr(_('Downloading %s:%s to %s ... \n', m1, d1, d2))
 			mm.exec({
 				sshcmd'rsync', '--delete', '--timeout=5',
 				opt.progress and '--info=progress2' or nil,
@@ -1582,7 +1612,7 @@ function api.update_machine_info(opt, machine)
 	t.ram = kbytes(t.ram, 1)
 	t.hdd = kbytes(t.hdd, 1)
 	for i,k in ipairs(t) do
-		task:print(_('%20s %s', k, t[k]))
+		out_stdout(_('%20s %s\n', k, t[k]))
 	end
 	notify('Machine info updated for %s.', machine)
 end
@@ -2006,7 +2036,7 @@ function mm.log_server_rpc(deploy, cmd, ...)
 end
 
 function action.poll_livelist(deploy)
-	allow(admin())
+	allow(usr'roles'.admin)
 	mm.log_server_rpc(deploy, 'poll_livelist')
 end
 
@@ -2648,7 +2678,7 @@ function api.machine_backup_copy(opt, src_mbk_copy, dest_machines)
 
 		checkfound(#dm > 0, 'no copy machines for backups of machine: %s', machine)
 	else
-		dm = words(dest_machines:gsub(',', ' '))
+		dm = collect(words(dest_machines:gsub(',', ' ')))
 	end
 
 	if #dm == 1 then
@@ -2733,7 +2763,7 @@ function api.machine_backup_copy_remove(opt, mbk_copy)
 end
 cmd_mbk('mbk-remove COPY1[-COPY2],...', 'Remove machine backup copies', function(copies)
 	checkarg(copies, 'backup copy required')
-	for i,s in ipairs(words(copies:gsub(',', ' '))) do
+	for s in words(copies:gsub(',', ' ')) do
 		local mbk_copy1, mbk_copy2 = split(s:find'%-' and '-' or '..', s)
 		mbk_copy1 = checkarg(id_arg(mbk_copy1 or s), 'invalid backup copy')
 		mbk_copy2 = checkarg(id_arg(mbk_copy2 or s), 'invalid backup copy')
@@ -3072,7 +3102,7 @@ function api.deploy_backup_copy_remove(opt, dbk_copy)
 end
 cmd_dbk('dbk-remove COPY1[-COPY2],...', 'Remove deploy backup copies', function(copies)
 	checkarg(copies, 'copies required')
-	for i,s in ipairs(words(copies:gsub(',', ' '))) do
+	for s in words(copies:gsub(',', ' ')) do
 		local dbk_copy1, dbk_copy2 = split(s:find'%-' and '-' or '..', s)
 		dbk_copy1 = checkarg(id_arg(dbk_copy1 or s), 'invalid backup copy')
 		dbk_copy2 = checkarg(id_arg(dbk_copy2 or s), 'invalid backup copy')
@@ -3634,7 +3664,7 @@ rowset.config = virtual_rowset(function(self, ...)
 end)
 
 function action.live()
-	allow(admin())
+	allow(usr'roles'.admin)
 	setmime'txt'
 	logging.printlive(outprint)
 end
@@ -3702,5 +3732,4 @@ action['test.txt'] = function()
 	error'gone'
 end
 
-logging.filter.mysql = true
 return mm:run()
