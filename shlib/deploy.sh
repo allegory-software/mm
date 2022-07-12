@@ -27,6 +27,7 @@ acme_sh() {
 }
 
 acme_check() {
+	say "Checking SSL certificate with acme.sh ... "
 	acme_sh --cron
 }
 
@@ -63,8 +64,9 @@ machine_prepare() {
 
 	# install acme.sh to auto-renew SSL certs.
 	curl https://get.acme.sh | sh -s email=my@example.com --nocron --config-home /root/.acme.sh.etc
-	# do this if ZeroSSL ever gets funny...
-	#acme_sh --set-default-ca --server letsencrypt
+
+	# ZeroSSL is default but it's very slow, so we're switching back to LE.
+	acme_sh --set-default-ca --server letsencrypt
 
 	git_install_git_up
 	git_config_user "mm@allegory.ro" "Many Machines"
@@ -94,34 +96,60 @@ machine_rename() { # OLD_MACHINE NEW_MACHINE
 	machine_set_hostname "$NEW_MACHINE"
 }
 
-deploy_nginx_config() { # DOMAIN= HTTP_PORT= $0
-	[ "$HTTP_PORT" -a "$DOMAIN" ] || return 0
-	checkvars HTTP_PORT DOMAIN
+deploy_nginx_config() { # DOMAIN= HTTP_PORT= DEPLOY= APP= $0 [acme]
 
 	# acme thumbprint got with `acme.sh --register-account` (thumbprint is public).
-	local ACME_THUMBPRINT="Iqlo10aKd6rUBSkm5WQ36pBDaNAQ3wb9Q-RCejWJgbM"
+	local ACME_THUMBPRINT="gXTX0h3wk2OSU0eL5VoACugp_I4GFhFmRt8BcdhSOG4"
 
-	acme_location= "\
+	local acme_location="\
 	location ~ ^/\.well-known/acme-challenge/([-_a-zA-Z0-9]+)$ {
 		default_type text/plain;
 		return 200 \"\$1.$ACME_THUMBPRINT\";
 	}
 "
 
-	save "\
+	local nginx_conf
+
+	if [ "$1" == acme ]; then
+
+		checkvars DOMAIN
+
+		nginx_conf="\
+server {
+	listen 80;
+	server_name $DOMAIN;
+
+$acme_location
+}
+"
+	else
+
+		checkvars HTTP_PORT DOMAIN DEPLOY APP
+
+		cp_file /home/$DEPLOY/$APP/www/5xx.html /var/www/$DEPLOY/5xx.html
+
+		local error_page="\
+	error_page 502 503 504 /5xx.html;
+	location /5xx.html {
+		root /var/www/$DEPLOY;
+	}
+"
+
+		nginx_conf="\
 server {
 	listen 80;
 	server_name $DOMAIN;
 
 	location / {
-		return 301 https://$host$request_uri;
+		return 301 https://\$host\$request_uri;
 	}
 
-	$acme_location
+$error_page
+$acme_location
 }
 
 server {
-	listen 443 ssl http2;
+	listen 443 ssl;
 	server_name $DOMAIN;
 
 	ssl_protocols TLSv1.2 TLSv1.3;
@@ -139,21 +167,32 @@ server {
 
 	location / {
 		proxy_pass http://127.0.0.1:$HTTP_PORT;
+		proxy_set_header X-Forwarded-Host \$http_host;
+		proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Port \$server_port;
 	}
 
-	$acme_location
+$error_page
+$acme_location
 }
-" /etc/nginx/sites-enabled/$DOMAIN
+"
+
+fi
+
+	save "$nginx_conf" /etc/nginx/sites-enabled/$DOMAIN
+	say -n "Reloading nginx config... "
 	must nginx -s reload
+	say "OK"
 }
 
 deploy_issue_cert() { # DOMAIN
 	local DOMAIN="$1"
 	checkvars DOMAIN
 
-	say "Issuing SSL certificate for $DOMAIN ... "
-	acme_sh --issue -d $DOMAIN --stateless
+	say "Issuing SSL certificate for $DOMAIN with acme.sh ... "
 	local keyfile=/root/.acme.sh.etc/$DOMAIN/$DOMAIN.key
+	deploy_nginx_config acme
+	acme_sh --issue -d $DOMAIN --stateless
 	[ -f $keyfile ] || die "SSL certificate not created: $keyfile."
 }
 
@@ -170,8 +209,7 @@ deploy_setup() {
 	mysql_grant_user_db localhost $DEPLOY $DEPLOY
 	mysql_gen_my_cnf    localhost $DEPLOY $MYSQL_PASS $DEPLOY
 
-	[ "$DOMAIN" ] && deploy_issue_cert $DOMAIN
-	deploy_nginx_config
+	[ "$HTTP_PORT" -a "$DOMAIN" ] && deploy_nginx_config
 
 	say "Deploy setup done."
 }

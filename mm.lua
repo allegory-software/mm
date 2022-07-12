@@ -1294,7 +1294,7 @@ end)
 cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
 	function(opt, md_dir)
 		local md, dir = split(':', md_dir)
-		assert(md and dir, 'machine:dir expected')
+		checkarg(md and dir, 'machine:dir expected')
 		local args = {'ls', dir}
 		for k,v in pairs(opt) do
 			add(args, '-'..k)
@@ -1305,7 +1305,7 @@ cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
 cmd_files('cat MACHINE:FILE', 'Run `cat` on machine',
 	function(opt, md_file)
 		local md, file = split(':', md_file)
-		assert(md and file, 'machine:file expected')
+		checkarg(md and file, 'machine:file expected')
 		mm.ssh_cli(md, 'cat', file)
 	end)
 
@@ -1317,7 +1317,7 @@ cmd_files('mc MACHINE [DIR]', 'Run `mc` on machine',
 cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
 	function(opt, md_file)
 		local md, file = split(':', md_file)
-		assert(md and file, 'machine:file expected')
+		checkarg(md and file, 'machine:file expected')
 		mm.ssh_cli({tty = true}, md, 'mcedit', file)
 	end)
 
@@ -1465,7 +1465,7 @@ function mm.rsync(opt, md1, md2)
 			..' '..cmdline_quote_args_unix(ssh_control_opts(opt.tty))
 		if m2 then --upload
 			local ip = mm.ip(m2)
-			out_stderr(_('Uploading %s to %s:%s ... \n', d1, m2, d2))
+			out_stderr(_('Uploading\n\tsrc: %s\n\tdst: %s:%s ... \n', d1, m2, d2))
 			mm.exec({
 				sshcmd'rsync', '--delete', '--timeout=5',
 				opt.progress and '--info=progress2' or nil,
@@ -1678,6 +1678,7 @@ function api.deploy_issue_cert(opt, deploy)
 	--save the cert locally so we can deploy on a diff. machine later.
 	mm.rsync(d.machine..':/root/.acme.sh.etc/'..d.domain,
 		':'..varpath('.acme.sh.etc', d.domain))
+
 end
 cmd_deploys('issue-ssl-cert DEPLOY',
 	'Issue SSL certificate for an app',
@@ -1762,8 +1763,12 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 	update(vars, git_hosting_vars())
 
 	if vars.DOMAIN then
-		mm.rsync(varpath('.acme.sh.etc', vars.DOMAIN),
-			vars.MACHINE..':/root/.acme.sh.etc/'..vars.DOMAIN)
+		local cert_dir = varpath('.acme.sh.etc', vars.DOMAIN)
+		if exists(cert_dir) then
+			mm.rsync(cert_dir, vars.MACHINE..':/root/.acme.sh.etc/'..vars.DOMAIN)
+		else
+			mm.deploy_issue_cert(deploy)
+		end
 	end
 
 	local s = mm.ssh_sh(vars.MACHINE, [[
@@ -2459,12 +2464,15 @@ function api.print_machine_backups(opt, machine)
 			c.mbk_copy
 	]], {machine = machine})
 	checkfound(not machine or #rows > 0, 'machine not found: %s', machine)
-	outpqr(rows, cols, {
+	mysql_print_result{
+		rows = rows,
+		fields = cols,
 		size = 'sum',
 		made = 'max',
 		bkp_took = 'max',
 		copy_took = 'max',
-	})
+		print = out_stdout_print,
+	}
 end
 cmd_mbk('mbk|machine-backups MACHINE', 'Show machine backups', mm.print_machine_backups)
 
@@ -2864,12 +2872,15 @@ function api.print_deploy_backups(opt, deploy)
 		order by c.dbk_copy
 	]], {deploy = deploy})
 	checkfound(not deploy or #rows > 0, 'deploy not found')
-	outpqr(rows, cols, {
+	mysql_print_result{
+		rows = rows,
+		fields = cols,
 		size = 'sum',
 		made = 'max',
 		bkp_took = 'max',
 		copy_took = 'max',
-	})
+		print = out_stdout_print,
+	}
 end
 cmd_dbk('dbk|deploy-backups DEPLOY', 'Show deploy backups', mm.print_deploy_backups)
 

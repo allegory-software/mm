@@ -77,6 +77,24 @@ replace_lines() { # REGEX FILE
 }
 '
 
+cp_file() { # SRC DST [USER]
+	local src="$1"
+	local dst="$2"
+	local user="$3"
+	checkvars src dst
+	say -n "Copying file
+	src: $src
+	dst: $dst "
+	must mkdir -p `dirname $src`
+	must cp -f $src $dst
+	if [ "$user" ]; then
+		checkvars user
+		must chown $user:$user $dst
+		must chmod 600 $dst
+	fi
+	say "OK"
+}
+
 sync_dir() { # SRC_DIR= DST_DIR= [LINK_DIR=]
 	checkvars SRC_DIR DST_DIR
 	[ "$LINK_DIR" ] && {
