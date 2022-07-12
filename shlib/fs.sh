@@ -14,6 +14,33 @@ rm_dir() { # DIR
 	say OK
 }
 
+rm_file() { # FILE
+	local file="$1"
+	checkvars file
+	check_abs_filepath "$file"
+	say -n "Removing file $file ... "
+	[ "$DRY" ] || must rm -f "$file"
+	say OK
+}
+
+cp_file() { # SRC DST [USER]
+	local src="$1"
+	local dst="$2"
+	local user="$3"
+	checkvars src dst
+	say -n "Copying file
+	src: $src
+	dst: $dst "
+	must mkdir -p `dirname $dst`
+	must cp -f $src $dst
+	if [ "$user" ]; then
+		checkvars user
+		must chown $user:$user $dst
+		must chmod 600 $dst
+	fi
+	say "OK"
+}
+
 sha_dir() { # DIR
 	local dir="$1"
 	checkvars dir
@@ -76,24 +103,6 @@ replace_lines() { # REGEX FILE
 	fi
 }
 '
-
-cp_file() { # SRC DST [USER]
-	local src="$1"
-	local dst="$2"
-	local user="$3"
-	checkvars src dst
-	say -n "Copying file
-	src: $src
-	dst: $dst "
-	must mkdir -p `dirname $src`
-	must cp -f $src $dst
-	if [ "$user" ]; then
-		checkvars user
-		must chown $user:$user $dst
-		must chmod 600 $dst
-	fi
-	say "OK"
-}
 
 sync_dir() { # SRC_DIR= DST_DIR= [LINK_DIR=]
 	checkvars SRC_DIR DST_DIR

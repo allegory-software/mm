@@ -395,7 +395,7 @@ local function call_api(action, opt, ...)
 		verbose = repl(logging.verbose, false),
 	}, opt)
 	local ret, res = getpage{
-		host  = config'mm_host',
+		host  = config('mm_host', 'mm.allegory.ro'),
 		port  = config'mm_port',
 		https = config'mm_https',
 		uri = url_format{segments = {'', 'api.txt', action}},
@@ -1807,6 +1807,7 @@ function api.deploy_remove(opt, deploy)
 		deploy_remove "$DEPLOY"
 	]], {
 		DEPLOY = vars.DEPLOY,
+		DOMAIN = vars.DOMAIN,
 	}, {
 		name = 'deploy_remove '..deploy,
 	})

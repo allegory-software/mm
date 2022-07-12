@@ -96,7 +96,7 @@ machine_rename() { # OLD_MACHINE NEW_MACHINE
 	machine_set_hostname "$NEW_MACHINE"
 }
 
-deploy_nginx_config() { # DOMAIN= HTTP_PORT= DEPLOY= APP= $0 [acme]
+deploy_nginx_config() { # DOMAIN= HTTP_PORT= [ACME=1] $0
 
 	# acme thumbprint got with `acme.sh --register-account` (thumbprint is public).
 	local ACME_THUMBPRINT="gXTX0h3wk2OSU0eL5VoACugp_I4GFhFmRt8BcdhSOG4"
@@ -110,7 +110,7 @@ deploy_nginx_config() { # DOMAIN= HTTP_PORT= DEPLOY= APP= $0 [acme]
 
 	local nginx_conf
 
-	if [ "$1" == acme ]; then
+	if [ "$ACME" ]; then
 
 		checkvars DOMAIN
 
@@ -124,14 +124,12 @@ $acme_location
 "
 	else
 
-		checkvars HTTP_PORT DOMAIN DEPLOY APP
-
-		cp_file /home/$DEPLOY/$APP/www/5xx.html /var/www/$DEPLOY/5xx.html
+		checkvars HTTP_PORT DOMAIN
 
 		local error_page="\
 	error_page 502 503 504 /5xx.html;
 	location /5xx.html {
-		root /var/www/$DEPLOY;
+		root /var/www/$DOMAIN;
 	}
 "
 
@@ -185,13 +183,23 @@ fi
 	say "OK"
 }
 
+deploy_nginx_config_acme() {
+	ACME=1 deploy_nginx_config
+}
+
+deploy_nginx_config_remove() {
+	local DOMAIN="$1"
+	[ "$DOMAIN" ] || return 0
+	rm_file /etc/nginx/sites-enabled/$DOMAIN
+}
+
 deploy_issue_cert() { # DOMAIN
 	local DOMAIN="$1"
 	checkvars DOMAIN
 
 	say "Issuing SSL certificate for $DOMAIN with acme.sh ... "
 	local keyfile=/root/.acme.sh.etc/$DOMAIN/$DOMAIN.key
-	deploy_nginx_config acme
+	deploy_nginx_config_acme
 	acme_sh --issue -d $DOMAIN --stateless
 	[ -f $keyfile ] || die "SSL certificate not created: $keyfile."
 }
@@ -209,12 +217,10 @@ deploy_setup() {
 	mysql_grant_user_db localhost $DEPLOY $DEPLOY
 	mysql_gen_my_cnf    localhost $DEPLOY $MYSQL_PASS $DEPLOY
 
-	[ "$HTTP_PORT" -a "$DOMAIN" ] && deploy_nginx_config
-
 	say "Deploy setup done."
 }
 
-deploy_remove() { # DEPLOY
+deploy_remove() { # DEPLOY DOMAIN=
 	local DEPLOY="$1"
 	checkvars DEPLOY
 
@@ -222,6 +228,8 @@ deploy_remove() { # DEPLOY
 
 	mysql_drop_db $DEPLOY
 	mysql_drop_user localhost $DEPLOY
+
+	[ "$DOMAIN" ] && deploy_nginx_config_remove
 
 	say "Deploy removed."
 }
@@ -255,6 +263,11 @@ deploy() {
 		/home/$DEPLOY/$APP/sdk/bin/linux "$SDK_VERSION"
 
 	deploy_gen_conf
+
+	[ "$HTTP_PORT" -a "$DOMAIN" ] && {
+		cp_file /home/$DEPLOY/$APP/www/5xx.html /var/www/$DOMAIN/5xx.html
+		deploy_nginx_config
+	}
 
 	say "Installing the app..."
 	must app install forealz
