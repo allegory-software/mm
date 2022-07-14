@@ -43,11 +43,10 @@ textarea.x-editbox-input[console] {
 
 #mm_deploys_form.maxcols1 {
 	grid-template-areas:
-		"deploy      deploy               machine                machine"
+		"deploy      deploy               machine                active"
 		"app         env                  domain                 http_port"
-		"wanted_app_version    wanted_app_version   wanted_sdk_version    wanted_sdk_version"
-		"deployed_app_version  deployed_app_version deployed_sdk_version  deployed_sdk_version"
-		"deployed_app_commit   deployed_app_commit  deployed_sdk_commit   deployed_sdk_commit"
+		"wanted_app_version    deployed_app_version  deployed_app_commit deployed_app_commit"
+		"wanted_sdk_version    deployed_sdk_version  deployed_sdk_commit deployed_sdk_commit"
 		"deployed_at deployed_at          started_at             started_at"
 		"repo        repo                 repo                   repo   "
 		"secret      secret               mysql_pass             mysql_pass"
@@ -202,6 +201,7 @@ textarea.x-editbox-input[console] {
 							<x-form label="Deploy" id=mm_deploys_form nav_id=mm_deploys_grid grid>
 								<x-input col=deploy           ></x-input>
 								<x-input col=machine          ></x-input>
+								<x-input col=active           ></x-input>
 								<x-input col=app              ></x-input>
 								<x-input col=wanted_app_version    ></x-input>
 								<x-input col=deployed_app_version  ></x-input>

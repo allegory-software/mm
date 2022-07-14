@@ -285,6 +285,8 @@ config('smtp_host', 'mail.bpnpart.com')
 config('smtp_user', 'admin@bpnpart.com')
 config('noreply_email', 'admin@bpnpart.com')
 
+config('mm_host', 'mm.allegory.ro')
+
 --logging.filter[''] = true
 --config('http_debug', 'protocol stream')
 --config('getpage_debug', 'stream')
@@ -294,7 +296,7 @@ config('noreply_email', 'admin@bpnpart.com')
 mm.schema:import(mm_schema)
 
 local function NYI(event)
-	logerror('mm', event, 'NYI')
+	log('ERROR', 'mm', event, 'NYI')
 	error('NYI: '..event)
 end
 
@@ -395,7 +397,7 @@ local function call_api(action, opt, ...)
 		verbose = repl(logging.verbose, false),
 	}, opt)
 	local ret, res = getpage{
-		host  = config('mm_host', 'mm.allegory.ro'),
+		host  = config'mm_host',
 		port  = config'mm_port',
 		https = config'mm_https',
 		uri = url_format{segments = {'', 'api.txt', action}},
@@ -800,7 +802,8 @@ function api.deploy_info(opt, deploy)
 			deploy,
 			machine,
 			mysql_pass,
-			domain
+			domain,
+			app
 		from deploy where deploy = ?
 	]], checkarg(deploy, 'deploy required')), 'deploy not found')
 end
@@ -1253,35 +1256,46 @@ cmd_ssh('ssh ALL|MACHINE|DEPLOY,... [- CMD ...]', 'SSH to machine(s)', function(
 	return mm.ssh_cli(opt, mds, ...)
 end)
 
+local deploy_vars --fw. decl.
+
 --TIP: make a putty session called `mm` where you set the window size,
 --uncheck "warn on close" and whatever else you need to make worrking
 --with putty comfortable for you.
-cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty', function(opt, md)
+cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty',
+function(opt, md)
 	local ip, m = mm.ip(md)
 	local deploy = m ~= md and md or nil
 	local cmd = indir(mm.bindir, 'putty')..' -load mm -t -i '..mm.ppkfile(m)
 		..' root@'..ip
-	if opt.shlib then
-		local cmdfile = tmppath'puttycmd.txt'
-		local script = [[
-			#use deploy backup
-		]]
-		local script_env = update({
-			DEBUG   = env'DEBUG'   or '',
-			VERBOSE = env'VERBOSE' or '',
-		}, git_hosting_vars(), deploy and deploy_vars(deploy))
-		local s = mm.sh_script(script:outdent(), script_env)
+	if opt.shlib or deploy then
+		local script
+		if opt.shlib then
+			local s = catany('\n',
+				'#use deploy backup',
+				deploy and 'must cd /home/$DEPLOY/$APP',
+				deploy and 'VARS="DEBUG VERBOSE" run_as $DEPLOY bash'
+			)
+			local script_env = update({
+				DEBUG   = env'DEBUG'   or '',
+				VERBOSE = env'VERBOSE' or '',
+			}, git_hosting_vars(), deploy and deploy_vars(deploy))
+			script = mm.sh_script(s:outdent(), script_env)
+		else
+			local d = mm.deploy_info(deploy)
+			script = catany('\n',
+				deploy and 'cd /home/'..deploy..'/'..d.app..' || exit 1',
+				deploy and 'sudo -u '..deploy..' bash'
+			)
+		end
 		local s = catany('\n',
 			'export MM_TMP_SH=/root/.mm.$$.sh',
 			'cat << \'EOFFF\' > $MM_TMP_SH',
 			'rm -f $MM_TMP_SH',
-			s,
-			deploy and 'must cd /home/$DEPLOY/$APP',
-			deploy and 'VARS="DEBUG VERBOSE" run_as $DEPLOY bash',
-			--deploy and 'sudo -iu '..deploy..' bash',
+			script,
 			'EOFFF',
 			'exec bash --init-file $MM_TMP_SH'
 		)
+		local cmdfile = tmppath'puttycmd.txt'
 		save(cmdfile, s)
 		runafter(.5, function()
 			rm(cmdfile)
@@ -1703,7 +1717,7 @@ end)
 
 --deploy deploy --------------------------------------------------------------
 
-local function deploy_vars(deploy, new_deploy)
+--[[local]] function deploy_vars(deploy, new_deploy)
 
 	deploy = checkarg(deploy, 'deploy required')
 
@@ -1966,10 +1980,10 @@ function mm.log_server(machine)
 	]], checkarg(machine, 'machine required'))
 	checkfound(lport, 'log_local_port not set for machine '..machine)
 
-	local action_thread
+	local log_server, action_thread
 	local function action()
 
-		local logserver = mess_listen('127.0.0.1', lport, function(mess, chan)
+		log_server = mess_listen('127.0.0.1', lport, function(mess, chan)
 
 			local deploy
 
@@ -1983,9 +1997,13 @@ function mm.log_server(machine)
 			end, 'log-server-get-procinfo %s', machine))
 
 			chan:recvall(function(chan, msg)
+
+				pr(msg)
+
 				if not deploy then --first message identifies the client.
-					deploy = msg.deploy
+					deploy = msg.deploy or '<unknown>'
 					log_server_chan[deploy] = chan
+					log('note', 'mm', 'log-accpt', '%s', deploy)
 				end
 				msg.machine = machine
 				if msg.event == 'set' then
@@ -2005,12 +2023,10 @@ function mm.log_server(machine)
 					queue_push(mm.deploy_logs, deploy, msg)
 					rowset_changed'deploy_log'
 				end
-			end, function()
-				log_server_chan[deploy] = nil
+
 			end)
 
 			log_server_chan[deploy] = nil
-			resume(action_thread)
 
 		end, nil, 'log-server-'..machine)
 
@@ -2027,7 +2043,12 @@ function mm.log_server(machine)
 	})
 
 	function task:do_kill()
-		logserver:stop()
+		if log_server then
+			log_server:stop()
+		end
+		if action_thread then
+			resume(action_thread)
+		end
 	end
 
 	task:start()
@@ -3373,6 +3394,7 @@ rowset.machines = sql_rowset{
 			pos,
 			machine as refresh,
 			machine,
+			active,
 			0 as cpu_max,
 			0 as ram_free,
 			0 as hdd_free,
@@ -3439,7 +3461,7 @@ rowset.machines = sql_rowset{
 	insert_row = function(self, row)
 		local m1 = row.machine
 		self:insert_into('machine', row, [[
-			machine provider location cost_per_month cost_per_year
+			machine active provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
 
 			full_backup_active
@@ -3460,7 +3482,7 @@ rowset.machines = sql_rowset{
 		local m1 = row.machine
 		local m0 = row['machine:old']
 		self:update_into('machine', row, [[
-			machine provider location cost_per_month cost_per_year
+			machine active provider location cost_per_month cost_per_year
 			public_ip local_ip log_local_port mysql_local_port
 
 			full_backup_active
@@ -3478,7 +3500,7 @@ rowset.machines = sql_rowset{
 			if exists(mm.ppkfile(m0)) then mv(mm.ppkfile(m0), mm.ppkfile(m1)) end
 			machine_update(m0, true)
 		end
-		machine_update(m1)
+		machine_update(m1 or m0)
 	end,
 	delete_row = function(self, row)
 		local m0 = row['machine:old']
@@ -3530,6 +3552,7 @@ rowset.deploys = sql_rowset{
 			http_port,
 			secret,
 			mysql_pass,
+			active,
 			backup_active      ,
 			backup_start_hours ,
 			backup_run_every   ,
@@ -3567,7 +3590,7 @@ rowset.deploys = sql_rowset{
 		row.secret = base64_encode(random_string(46)) --results in a 64 byte string
  		row.mysql_pass = base64_encode(random_string(23)) --results in a 32 byte string
  		self:insert_into('deploy', row, [[
-			deploy machine repo app wanted_app_version wanted_sdk_version
+			deploy machine active repo app wanted_app_version wanted_sdk_version
 			env domain http_port secret mysql_pass pos
 			backup_active
 			backup_start_hours
@@ -3586,7 +3609,7 @@ rowset.deploys = sql_rowset{
 			end
 		end
 		self:update_into('deploy', row, [[
-			machine repo app wanted_app_version wanted_sdk_version
+			machine active repo app wanted_app_version wanted_sdk_version
 			domain http_port
 			backup_active
 			backup_start_hours
@@ -3739,9 +3762,6 @@ function mm:run_server()
 	run_server(self)
 end
 
-action['test.txt'] = function()
-	out'hello'
-	error'gone'
-end
+logging.filter.log = true
 
 return mm:run()

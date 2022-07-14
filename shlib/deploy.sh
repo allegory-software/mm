@@ -156,7 +156,7 @@ server {
 	ssl_session_cache shared:SSL:10m;
 	ssl_session_timeout 4h;
 	ssl_session_tickets on;
-	ssl_certificate      /root/.acme.sh.etc/$DOMAIN/$DOMAIN.cer;
+	ssl_certificate      /root/.acme.sh.etc/$DOMAIN/fullchain.cer;
 	ssl_certificate_key  /root/.acme.sh.etc/$DOMAIN/$DOMAIN.key;
 	ssl_dhparam          /etc/nginx/dhparam.pem;
 
@@ -295,7 +295,7 @@ ${HTTP_PORT:+http_port = $HTTP_PORT}
 ${SMTP_HOST:+smtp_host = '$SMTP_HOST'}
 ${SMTP_HOST:+smtp_user = '$SMTP_USER'}
 ${SMTP_HOST:+smtp_pass = '$SMTP_PASS'}
-${HOST:+host = '$HOST'}
+${DOMAIN:+host = '$DOMAIN'}
 ${NOREPLY_EMAIL:+noreply_email = '$NOREPLY_EMAIL'}
 ${DEV_EMAIL:+dev_email = '$DEV_EMAIL'}
 ${DEFAULT_COUNTRY:+default_country = '$DEFAULT_COUNTRY'}
