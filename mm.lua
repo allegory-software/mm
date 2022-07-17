@@ -1998,8 +1998,6 @@ function mm.log_server(machine)
 
 			chan:recvall(function(chan, msg)
 
-				pr(msg)
-
 				if not deploy then --first message identifies the client.
 					deploy = msg.deploy or '<unknown>'
 					log_server_chan[deploy] = chan
