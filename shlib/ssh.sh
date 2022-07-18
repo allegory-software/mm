@@ -42,25 +42,41 @@ ssh_key_update() { # keyname key
 	say "(*) SSH key updated."
 }
 
-ssh_host_key_update() { # host keyname key [unstable_ip]
+ssh_host_key_update() { # HOST KEYNAME KEY [unstable_ip]
 	ssh_key_update "$2" "$3"
 	ssh_host_update "$1" "$2" "$4"
 }
 
-ssh_update_pubkey() { # keyname key
-	say "Updating SSH public key '$1' ... (*)"
+ssh_pubkey_for_user() { # USER KEYNAME
+	checkvars USER KEYNAME
+	local HOME=/home/$USER; [ $USER == root ] && HOME=/root
+	cat $HOME/.ssh/authorized_keys | grep " $KEYNAME\$"
+}
+
+ssh_pubkey_update_for_user() { # USER KEYNAME KEY
+	checkvars USER KEYNAME KEY-
+	say "Updating SSH public key '$KEYNAME' for user '$USER' ... (*)"
+	local HOME=/home/$USER; [ $USER == root ] && HOME=/root
 	local ak=$HOME/.ssh/authorized_keys
 	must mkdir -p $HOME/.ssh
-	[ -f $ak ] && must sed -i "/ $1/d" $ak
+	[ -f $ak ] && must sed -i "/ $KEYNAME/d" $ak
 	local newline=$'\n'
-	must append "$2$newline" $ak
+	must append "$KEY$newline" $ak
 	must chmod 600 $ak
 	must chown $USER:$USER -R $HOME/.ssh
 	say "(*) SSH public key updated."
 }
 
-ssh_pubkey() { # keyname
-	cat $HOME/.ssh/authorized_keys | grep " $1\$"
+ssh_pubkey_update() {
+	checkvars KEYNAME KEY-
+	(
+	cd /home || exit 1
+	shopt -s nullglob
+	for USER in *; do
+		ssh_pubkey_update_for_user $USER $KEYNAME "$KEY"
+	done
+	ssh_pubkey_update_for_user root $KEYNAME
+	)
 }
 
 ssh_git_keys_update_for_user() { # USER
@@ -88,6 +104,7 @@ ssh_git_keys_update() {
 		ssh_host_key_update $HOST mm_$NAME "$SSH_KEY" unstable_ip
 
 		(
+		cd /home || exit 1
 		shopt -s nullglob
 		for USER in *; do
 			[ -d /home/$USER/.ssh ] && \

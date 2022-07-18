@@ -1,4 +1,4 @@
---go@ plink d10 -t -batch sdk/bin/linux/luajit apps/mm/mm.lua -vv run
+--go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --[[
 
@@ -892,7 +892,7 @@ function api.ssh_hostkey_sha(opt, machine)
 		stdin = key,
 		out_stdout = false,
 		name = 'ssh_hostkey_sha '..machine,
-		keyed = false, nolog = true,
+		nolog = true,
 	})
 	return (task:stdout():trim():match'%s([^%s]+)')
 end
@@ -952,7 +952,58 @@ function mm.ssh_key_gen_ppk(machine)
 	mm.exec(cmd, {
 		name = 'ssh_key_gen_ppk'..(machine and ' '..machine or ''),
 	})
-	notify'PPK file generated.'
+	notify('PPK file generated: %s', ppk)
+end
+
+function mm.putty_session_update(md)
+	if not win then return end
+	local ip, m = mm.ip(md)
+	local ppk = mm.ppkfile(m)
+	local deploy = m ~= md and md or nil
+	local hk, created = winapi.RegCreateKey('HKEY_CURRENT_USER',
+		[[SimonTatham\PuTTY\Sessions\\]]..md)
+	hk:set('HostName', (deploy or 'root')..'@'..ip)
+	hk:set('PublicKeyFile', ppk)
+	hk:close()
+	notify('Putty session %s: %s', created and 'created' or 'updated', md)
+end
+
+function mm.putty_session_deploy_update(deploy)
+	if not win then return end
+	local hk = winapi.RegCreateKey('HKEY_CURRENT_USER',
+		[[SimonTatham\PuTTY\Sessions\\]]..deploy)
+	hk:set('HostName', deploy..'@'..ip)
+	hk:set('PublicKeyFile', ppk)
+	hk:close()
+	notify('Putty session updated: %s', machine)
+end
+
+function mm.putty_session_exists(name)
+	if not win then return false end
+	local k, err = winapi.RegOpenKey('HKEY_CURRENT_USER',
+		[[SimonTatham\PuTTY\Sessions\\]]..name)
+	if k then k:close(); return true end
+	assert(err == 'not_found')
+	return false
+end
+
+function mm.putty_session_rename(old_name, new_name)
+	if not win then return end
+	if not mm.putty_session_exists(old_name) then return end
+	local hk = winapi.RegCreateKey('HKEY_CURRENT_USER',
+		[[SimonTatham\PuTTY\Sessions\\]])
+	hk:rename_key(old_name, new_name)
+	hk:close()
+	notify('Putty session renamed: %s -> %s', old_name, new_name)
+end
+
+function mm.putty_session_remove(machine)
+	if not win then return end
+	local hk = winapi.RegCreateKey('HKEY_CURRENT_USER',
+		[[SimonTatham\PuTTY\Sessions\\]])
+	hk:remve_key(machine)
+	hk:close()
+	notify('Putty session removed: %s', machine)
 end
 
 function api.ssh_key_gen()
@@ -986,9 +1037,9 @@ function api.ssh_key_update(opt, machine)
 			mysql_update_pass localhost root "$MYSQL_ROOT_PASS"
 			mysql_gen_my_cnf  localhost root "$MYSQL_ROOT_PASS"
 		}
-		ssh_update_pubkey mm "$PUBKEY"
+		ssh_pubkey_update mm "$PUBKEY"
 		user_lock_pass root
-		ssh_pubkey mm  # print it so we can check it
+		ssh_pubkey_for_user root mm  # print it so we can check it
 	]=], {
 		PUBKEY = pubkey,
 		MYSQL_ROOT_PASS = mm.mysql_root_pass(),
@@ -1001,6 +1052,7 @@ function api.ssh_key_update(opt, machine)
 	cp(mm.keyfile(), mm.keyfile(machine))
 	cp(mm.ppkfile(), mm.ppkfile(machine))
 	mm.ssh_key_fix_perms(machine)
+	mm.putty_session_update(machine)
 
 	update_row('machine', {machine, ssh_key_ok = true})
 	rowset_changed'machines'
@@ -1014,10 +1066,10 @@ end)
 function api.ssh_key_check(opt, machine)
 	local host_pubkey = mm.ssh_sh(machine, [[
 		#use ssh
-		ssh_pubkey mm
+		ssh_pubkey_for_user root mm
 	]], nil, {
 		name = 'ssh_key_check '..(machine or ''),
-		keyed = false, nolog = true,
+		nolog = true,
 		out_stdout = false,
 	}):stdout():trim()
 	local ok = host_pubkey == mm.ssh_pubkey()
@@ -1061,7 +1113,7 @@ function api.ssh_pubkey(opt, machine)
 	local s = mm.exec({
 		sshcmd'ssh-keygen', '-y', '-f', mm.keyfile(machine),
 	}, {
-		name = catany(' ', 'ssh_pubkey ', machine), keyed = false, visible = false,
+		name = catany(' ', 'ssh_pubkey ', machine), visible = false,
 		out_stdout = false,
 	}):stdout():trim()
 	return (s:match('^[^%s]+%s+[^%s]+')..' mm')
@@ -1265,8 +1317,13 @@ cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty',
 function(opt, md)
 	local ip, m = mm.ip(md)
 	local deploy = m ~= md and md or nil
-	local cmd = indir(mm.bindir, 'putty')..' -load mm -t -i '..mm.ppkfile(m)
-		..' root@'..ip
+	local cmd = _('%s -load %s -t -i %s %s@%s',
+		indir(mm.bindir, 'putty'),
+		mm.putty_session_exists(md) and md or 'mm',
+		mm.ppkfile(m),
+		deploy and md or 'root',
+		ip
+	)
 	if opt.shlib or deploy then
 		local script
 		if opt.shlib then
@@ -1352,21 +1409,12 @@ function mm.tunnel(machine, ports, opt, rev)
 			machine, lport, rev and '->' or '<-', rport)
 		add(rports, rport)
 	end
-	local on_finish
-	local function start_tunnel()
-		mm.ssh(machine, args, update({
-			name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
-			type = 'long',
-			on_finish = on_finish,
-			out_stdout = false, --suppress copyright noise
-		}, opt))
-	end
-	function on_finish(task)
-		if task.killed then return end
-		sleep(1)
-		start_tunnel()
-	end
-	start_tunnel()
+	mm.ssh(machine, args, update({
+		name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
+		type = 'long',
+		out_stdout = false, --suppress copyright noise
+		restart_after = 1,
+	}, opt))
 end
 function mm.rtunnel(machine, ports, opt)
 	return mm.tunnel(machine, ports, opt, true)
@@ -1467,7 +1515,7 @@ function mm.rsync(opt, md1, md2)
 			DST_DIR = d2,
 			PROGRESS = opt.progress and 1 or nil,
 		}, rsync_vars(m1, m2)), {
-			name = 'rsync '..m1..' '..m2, keyed = false,
+			name = 'rsync '..m1..' '..m2,
 			tty = opt.tty,
 		})
 	else
@@ -1521,7 +1569,7 @@ function api.sha(opt, machine, dir)
 		]], {
 			DIR = dir
 		}, {
-			name = 'sha '..machine, keyed = false,
+			name = 'sha '..machine,
 			out_stdout = false,
 		}
 	):stdout():trim()
@@ -1576,6 +1624,7 @@ function api.machine_rename(opt, old_machine, new_machine)
 	if exists(mm.ppkfile(old_machine)) then
 		mv(mm.ppkfile(old_machine), mm.ppkfile(new_machine))
 	end
+	mm.putty_session_rename(old_machine, new_machine)
 
 	update_row('machine', {old_machine, machine = new_machine})
 
@@ -1599,7 +1648,7 @@ function api.update_machine_info(opt, machine)
 		machine_info
 	]=], nil, {
 		name = 'update_machine_info '..(machine or ''),
-		keyed = false, nolog = true,
+		nolog = true,
 		out_stdout = false,
 	})
 	local stdout = task:stdout()
@@ -1703,8 +1752,10 @@ cmd_deploys('issue-ssl-cert DEPLOY',
 cmd_deploys('d|deploys', 'Show the list of deployments', function()
 	mm.print_rowset('deploys', [[
 		deploy
+		active
 		status
 		machine
+		cpu_max
 		active
 		app
 		env
@@ -1793,6 +1844,8 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 		out_stdout = false,
 	}):stdout()
 
+	mm.putty_session_update(deploy)
+
 	local app_commit = s:match'app_commit=([^%s]+)'
 	local sdk_commit = s:match'sdk_commit=([^%s]+)'
 	local now = time()
@@ -1815,6 +1868,7 @@ cmd_deploys('deploy DEPLOY [APP_VERSION] [SDK_VERSION]', 'Deploy an app',
 --deploy remove --------------------------------------------------------------
 
 function api.deploy_remove(opt, deploy)
+
 	local vars = deploy_vars(deploy)
 	mm.ssh_sh(vars.MACHINE, [[
 		#use deploy
@@ -1825,6 +1879,8 @@ function api.deploy_remove(opt, deploy)
 	}, {
 		name = 'deploy_remove '..deploy,
 	})
+
+	mm.putty_session_remove(deploy)
 
 	update_row('deploy', {
 		vars.DEPLOY,
@@ -1882,6 +1938,7 @@ function api.deploy_rename(opt, old_deploy, new_deploy)
 		}, vars), {
 			name = 'deploy_rename '..old_deploy,
 		})
+		mm.putty_session_rename(old_deploy, new_deploy)
 	end
 
 	update_row('deploy', {old_deploy, deploy = new_deploy})
@@ -1914,7 +1971,7 @@ function api.app(opt, deploy, ...)
 			args = args,
 		}, {
 			name = task_name,
-			--allow_fail = true,
+			allow_fail = true,
 		})
 	local ok = task.exit_code == 0
 	if ok then
@@ -2730,7 +2787,7 @@ function api.machine_backup_copy_check(opt, mbk_copy)
 	]], {
 		mbk = c.mbk,
 	}, {
-		name = 'machine_backup_info '..c.mbk_copy, keyed = false,
+		name = 'machine_backup_info '..c.mbk_copy,
 		out_stdout = false,
 	})
 	local size, checksum = parse_backup_info(task:stdout())
@@ -3089,7 +3146,7 @@ function api.deploy_backup_copy_check(opt, dbk_copy)
 	]], {
 		dbk = c.dbk,
 	}, {
-		name = 'deploy_backup_info '..c.dbk_copy, keyed = false,
+		name = 'deploy_backup_info '..c.dbk_copy,
 		out_stdout = false,
 	})
 	local size, checksum = parse_backup_info(task:stdout())
@@ -3474,6 +3531,7 @@ rowset.machines = sql_rowset{
 		]])
 		cp(mm.keyfile(), mm.keyfile(m1))
 		cp(mm.ppkfile(), mm.ppkfile(m1))
+		mm.putty_session_update(m1)
 		machine_update(m1)
 	end,
 	update_row = function(self, row)
@@ -3496,6 +3554,7 @@ rowset.machines = sql_rowset{
 		if m1 and m1 ~= m0 then
 			if exists(mm.keyfile(m0)) then mv(mm.keyfile(m0), mm.keyfile(m1)) end
 			if exists(mm.ppkfile(m0)) then mv(mm.ppkfile(m0), mm.ppkfile(m1)) end
+			mm.putty_session_rename(m0, m1)
 			machine_update(m0, true)
 		end
 		machine_update(m1 or m0)
@@ -3505,6 +3564,7 @@ rowset.machines = sql_rowset{
 		self:delete_from('machine', row)
 		rm(mm.keyfile(m0))
 		rm(mm.ppkfile(m0))
+		mm.putty_session_remove(m0)
 		machine_update(m0, true)
 	end,
 }
@@ -3537,8 +3597,10 @@ rowset.deploys = sql_rowset{
 		select
 			pos,
 			deploy,
+			active,
 			'' as status,
 			machine,
+			0 as cpu_max,
 			app,
 			wanted_app_version, deployed_app_version, deployed_app_commit,
 			wanted_sdk_version, deployed_sdk_version, deployed_sdk_commit,
@@ -3550,7 +3612,6 @@ rowset.deploys = sql_rowset{
 			http_port,
 			secret,
 			mysql_pass,
-			active,
 			backup_active      ,
 			backup_start_hours ,
 			backup_run_every   ,
@@ -3560,6 +3621,7 @@ rowset.deploys = sql_rowset{
 		from
 			deploy
 	]],
+	order_by = 'active desc, ctime',
 	pk = 'deploy',
 	name_col = 'deploy',
 	field_attrs = {
@@ -3572,7 +3634,22 @@ rowset.deploys = sql_rowset{
 				return vars and vars.live_now and 'live' or null
 			end,
 		},
+		cpu_max  = {readonly = true, w = 60, 'percent_int', align = 'right', text = 'CPU Max %', compute = compute_cpu_max},
 	},
+	compute_row_vals = function(self, vals)
+		vals.t1 = nil
+		vals.t0 = nil
+		local q = mm.deploy_procinfo_logs[vals.deploy]
+		local t1 = q and q:item_at(q:count())
+		local t0 = q and q:item_at(q:count() - 1)
+		if not (t1 and t0) then return end
+		local now = time()
+		if t1.time < now - 2 then
+			return
+		end
+		vals.t1 = t1
+		vals.t0 = t0
+	end,
 	ro_cols = [[
 		secret mysql_pass
 		deployed_app_version

@@ -133,6 +133,13 @@ $acme_location
 	}
 "
 
+		local proxy_options="
+		proxy_pass http://127.0.0.1:$HTTP_PORT;
+		proxy_set_header X-Forwarded-Host \$http_host;
+		proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Port \$server_port;
+"
+
 		nginx_conf="\
 server {
 	listen 80;
@@ -164,10 +171,19 @@ server {
 	add_header Strict-Transport-Security: \"max-age=63072000; includeSubDomains; preload\" always;
 
 	location / {
-		proxy_pass http://127.0.0.1:$HTTP_PORT;
-		proxy_set_header X-Forwarded-Host \$http_host;
-		proxy_set_header X-Forwarded-For  \$proxy_add_x_forwarded_for;
-		proxy_set_header X-Forwarded-Port \$server_port;
+		$proxy_options
+	}
+
+	location /xrowset.events {
+
+		# NOTE: nginx nested locations don't inherit proxy options, don't bother!
+		$proxy_options
+
+		proxy_set_header Connection '';
+		proxy_http_version 1.1;
+		chunked_transfer_encoding off;
+		proxy_buffering off;
+		proxy_cache off;
 	}
 
 $error_page
