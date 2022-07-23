@@ -1,4 +1,5 @@
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --[[
 
@@ -390,7 +391,8 @@ local function call_api(action, opt, ...)
 		end
 	end
 	local function headers_received(res)
-		assertf(res.status == 200, 'http error: %d %s', res.status, res.status_message) --bug?
+		check('mm', 'api-call', res.status == 200,
+			'http error: %d %s', res.status, res.status_message) --bug?
 	end
 	local opt = update({ --pass verbosity to server
 		debug   = repl(logging.debug  , false),
@@ -923,19 +925,22 @@ end
 
 --run this to avoid getting the incredibly stupid "perms are too open" error from ssh.
 function mm.ssh_key_fix_perms(opt, machine)
-	if not win then return end
 	local s = mm.keyfile(machine)
-	local function readpipe(...)
-		local p = exec(_(...))
-		p:wait()
-		p:forget()
+	if win then
+		local function readpipe(...)
+			local p = exec(_(...))
+			p:wait()
+			p:forget()
+		end
+		readpipe('icacls %s /c /t /Inheritance:d', s)
+		readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
+		readpipe('takeown /F %s', s)
+		readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
+		readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
+		readpipe('icacls %s', s)
+	else
+		chmod(s, '600')
 	end
-	readpipe('icacls %s /c /t /Inheritance:d', s)
-	readpipe('icacls %s /c /t /Grant %s:F', s, env'UserName')
-	readpipe('takeown /F %s', s)
-	readpipe('icacls %s /c /t /Grant:r %s:F', s, env'UserName')
-	readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
-	readpipe('icacls %s', s)
 	say'Perms fixed.'
 end
 cmd_ssh_keys('ssh-key-fix-perms [MACHINE]', 'Fix SSH key perms for VBOX',
@@ -1756,6 +1761,8 @@ cmd_deploys('d|deploys', 'Show the list of deployments', function()
 		status
 		machine
 		cpu_max
+		rss
+		lua_heap
 		active
 		app
 		env
@@ -2115,6 +2122,7 @@ function mm.log_server_rpc(deploy, cmd, ...)
 	local chan = log_server_chan[deploy]
 	if not chan then return end
 	chan:send(pack(cmd, ...))
+	return true
 end
 
 function action.poll_livelist(deploy)
@@ -2362,6 +2370,15 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 			end
 		end
 	end
+end)
+
+function api.deploy_http_kill_all(opt, deploy)
+	allow(usr'roles'.admin)
+	local ok = mm.log_server_rpc(deploy, 'close_all_sockets')
+	notify('HKA %s: %s', deploy, ok)
+end
+cmd_deploys('hka|http-kill-all DEPLOY', 'Kill all HTTP connections', function(opt, deploy)
+	mm.deploy_http_kill_all(deploy)
 end)
 
 --mysql monitoring -----------------------------------------------------------
@@ -3419,7 +3436,7 @@ local function compute_cpu_max(self, vals)
 		) * d
 		max_tp = max(max_tp, tp)
 	end
-	return max_tp
+	return max(0, max_tp)
 end
 
 local function compute_uptime(self, vals)
@@ -3591,6 +3608,14 @@ rowset.machine_backup_copy_machines = sql_rowset{
 	end,
 }
 
+local function compute_rss(self, vals)
+	return vals.t1 and vals.t1.rss
+end
+
+local function compute_lua_heap(self, vals)
+	return vals.t1 and vals.t1.lua_heap
+end
+
 rowset.deploys = sql_rowset{
 	allow = 'admin',
 	select = [[
@@ -3601,6 +3626,10 @@ rowset.deploys = sql_rowset{
 			'' as status,
 			machine,
 			0 as cpu_max,
+			0 as rss,
+			0 as lua_heap,
+			0 as ram_free,
+			0 as ram,
 			app,
 			wanted_app_version, deployed_app_version, deployed_app_commit,
 			wanted_sdk_version, deployed_sdk_version, deployed_sdk_commit,
@@ -3624,6 +3653,15 @@ rowset.deploys = sql_rowset{
 	order_by = 'active desc, ctime',
 	pk = 'deploy',
 	name_col = 'deploy',
+	rw_cols = [[
+		pos deploy active machine app wanted_app_version wanted_sdk_version
+		env repo domain http_port
+		backup_active
+		backup_start_hours
+		backup_run_every
+		backup_remove_older_than
+	]],
+	hide_cols = 'secret mysql_pass repo',
 	field_attrs = {
 		deploy = {
 			validate = validate_deploy,
@@ -3634,7 +3672,11 @@ rowset.deploys = sql_rowset{
 				return vars and vars.live_now and 'live' or null
 			end,
 		},
-		cpu_max  = {readonly = true, w = 60, 'percent_int', align = 'right', text = 'CPU Max %', compute = compute_cpu_max},
+		cpu_max  = {'percent_int', text = 'CPU Max %'               , compute = compute_cpu_max  , w = 60, align = 'right', },
+		rss      = {'filesize'   , text = 'RSS (Resident Set Size)' , compute = compute_rss      , filesize_magnitude = 'M'},
+		lua_heap = {'filesize'   , text = 'Lua Heap Size'           , compute = compute_lua_heap , filesize_magnitude = 'M'},
+		ram_free = {'filesize'   , text = 'RAM free (total)'        , compute = compute_ram_free , filesize_magnitude = 'M'},
+		ram      = {'filesize'   , text = 'RAM size'                , compute = compute_ram      , filesize_magnitude = 'M'},
 	},
 	compute_row_vals = function(self, vals)
 		vals.t1 = nil
@@ -3650,16 +3692,6 @@ rowset.deploys = sql_rowset{
 		vals.t1 = t1
 		vals.t0 = t0
 	end,
-	ro_cols = [[
-		secret mysql_pass
-		deployed_app_version
-		deployed_sdk_version
-		deployed_app_commit
-		deployed_sdk_commit
-		deployed_at
-		started_at
-	]],
-	hide_cols = 'secret mysql_pass repo',
 	insert_row = function(self, row)
 		local d1 = row.deploy
 		row.secret = base64_encode(random_string(46)) --results in a 64 byte string
@@ -3837,6 +3869,16 @@ function mm:run_server()
 	run_server(self)
 end
 
-logging.filter.log = true
+--logging.filter.log = true
+
+function api.test(opt, machine)
+	mm.ssh_sh(machine, [[
+		#use deploy
+		test_task
+	]], {}, {name = 'test_task'})
+end
+cmd_tasks('tt MACHINE', 'Test task', function(opt, machine)
+	mm.test(opt, machine)
+end)
 
 return mm:run()

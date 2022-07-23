@@ -74,6 +74,10 @@ machine_prepare() {
 
 	mysql_install
 	mysql_config "\
+# amazing that this is not the default...
+bind-address = 127.0.0.1
+mysqlx-bind-address = 127.0.0.1
+
 # our binlog is row-based, but we still get an error when creating procs.
 log_bin_trust_function_creators = 1
 "
@@ -140,6 +144,14 @@ $acme_location
 		proxy_set_header X-Forwarded-Port \$server_port;
 "
 
+		local proxy_nobuffer_options="
+		proxy_set_header Connection '';
+		proxy_http_version 1.1;
+		chunked_transfer_encoding off;
+		proxy_buffering off;
+		proxy_cache off;
+"
+
 		nginx_conf="\
 server {
 	listen 80;
@@ -170,20 +182,20 @@ server {
 	# HSTS with preloading to google. Another amazing tech from the web people.
 	add_header Strict-Transport-Security: \"max-age=63072000; includeSubDomains; preload\" always;
 
+	# NOTE: nginx nested locations don't inherit proxy options, so we copy-paste them!
+
 	location / {
 		$proxy_options
 	}
 
 	location /xrowset.events {
-
-		# NOTE: nginx nested locations don't inherit proxy options, don't bother!
 		$proxy_options
+		$proxy_nobuffer_options
+	}
 
-		proxy_set_header Connection '';
-		proxy_http_version 1.1;
-		chunked_transfer_encoding off;
-		proxy_buffering off;
-		proxy_cache off;
+	location /api.txt {
+		$proxy_options
+		$proxy_nobuffer_options
 	}
 
 $error_page
@@ -227,6 +239,7 @@ deploy_setup() {
 	user_lock_pass $DEPLOY
 
 	ssh_git_keys_update_for_user $DEPLOY
+	git_config_user "mm@allegory.ro" "Many Machines"
 
 	mysql_create_db     $DEPLOY
 	mysql_create_user   localhost $DEPLOY $MYSQL_PASS
@@ -347,4 +360,14 @@ deploy_status() {
 	[ -d /home/$DEPLOY/$APP/sdk/bin/linux ] || say "no sdk/bin/linux dir"
 	[ -f /home/$DEPLOY/$APP/${APP}.conf   ] || say "no ${APP}.conf"
 	app status
+}
+
+test_task() {
+	local n=0
+	while true; do
+		n=$((n+1))
+		say "Testing $n (E)"
+		echo "Testing $n (O)"
+		sleep .5
+	done
 }
