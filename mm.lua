@@ -1,4 +1,4 @@
---go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --[[
@@ -264,6 +264,11 @@ require'tasks'
 require'mysql_print'
 require'http_client'
 
+if win then
+	winapi = require'winapi'
+	require'winapi.registry'
+end
+
 config('multilang', false)
 config('allow_create_user', false)
 config('auto_create_user', false)
@@ -289,7 +294,7 @@ config('noreply_email', 'admin@bpnpart.com')
 config('mm_host', 'mm.allegory.ro')
 
 --logging.filter[''] = true
---config('http_debug', 'protocol stream')
+--config('http_debug', 'protocol')
 --config('getpage_debug', 'stream')
 
 --load_opensans()
@@ -491,42 +496,54 @@ local cmd_tasks       = cmdsection('TASKS'             , wrap)
 
 --task system ----------------------------------------------------------------
 
-function mm.task(opt)
-	local task = task(opt)
-	if task.visible then
+local function mm_task_init(self)
+	if self.visible then
 		rowset_changed'running_tasks'
 	end
-	task:on('event', function(self)
-		if self.visible then
-			rowset_changed'running_tasks'
-		end
+	self:on('event', function(self, ev, source_task, ...)
+		if source_task ~= self then return end
+		if not self.visible then return end
+		rowset_changed'running_tasks'
 	end)
-	task:on('finish', function(self)
-		if not self.nolog then
-			if not self.task_run then
-				self.task_run = insert_row('task_run', {
-					start_time = self.start_time,
-					name = self.name,
-					duration = self.duration,
-					stdin = self.stdin,
-					stdouterr = self:stdouterr(),
-					exit_code = self.exit_code,
-				}, nil, {quiet = true})
-			else
-				update_row('task_run', {
-					self.task_run,
-					duration = self.duration,
-					stdouterr = self:stdouterr(),
-					exit_code = self.exit_code,
-				}, nil, nil, {quiet = true})
+	self:on('setstatus', function(self, ev, source_task, status)
+		if source_task ~= self then return end
+		if not self.visible then return end
+		if status == 'finished' then
+			if not self.nolog then
+				if not self.task_run then
+					self.task_run = insert_row('task_run', {
+						start_time = self.start_time,
+						name = self.name,
+						duration = self.duration,
+						stdin = self.stdin,
+						stdouterr = self:stdouterr(),
+						exit_code = self.exit_code,
+					}, nil, {quiet = true})
+				else
+					update_row('task_run', {
+						self.task_run,
+						duration = self.duration,
+						stdouterr = self:stdouterr(),
+						exit_code = self.exit_code,
+					}, nil, nil, {quiet = true})
+				end
 			end
 		end
 	end)
-	return task
+	if not self.bg then
+		--release all db connections now in case this is a long running task.
+		release_dbs()
+	end
 end
 
+mm.task = task:subclass()
+mm.exec = exec_task:subclass()
+
+mm.task:after('init', mm_task_init)
+mm.exec:after('init', mm_task_init)
+
 local function cmp_start_time(t1, t2)
-	return t1.start_time < t2.start_time
+	return (t1.start_time or 0) < (t2.start_time or 0)
 end
 
 rowset.running_tasks = virtual_rowset(function(self)
@@ -536,7 +553,7 @@ rowset.running_tasks = virtual_rowset(function(self)
 		{name = 'id'        , 'id'},
 		{name = 'pinned'    , 'bool'},
 		{name = 'type'      , },
-		{name = 'name'      , },
+		{name = 'name'      , w = 200},
 		{name = 'machine'   , hint = 'Machine(s) that this task affects'},
 		{name = 'status'    , },
 		{name = 'start_time', 'time_timeago'},
@@ -545,7 +562,7 @@ rowset.running_tasks = virtual_rowset(function(self)
 		{name = 'stdin'     , hidden = true, maxlen = 16*1024^2},
 		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
 		{name = 'exit_code' , 'double', w = 20},
-		{name = 'errors'    , },
+		{name = 'notif'     , hidden = true, maxlen = 16*1024^2},
 	}
 	self.pk = 'id'
 	self.rw_cols = 'pinned'
@@ -563,7 +580,7 @@ rowset.running_tasks = virtual_rowset(function(self)
 			task.stdin,
 			task:stdouterr(),
 			task.exit_code,
-			concat(task.errors, '\n'),
+			cat(imap(task:notifications(), 'message'), '\n\n'),
 		}
 	end
 
@@ -731,17 +748,6 @@ local function load_tasks_last_run()
 		local t = scheduled_tasks[sched_name]
 		if t then t.last_run = last_run end
 	end
-end
-
---exec tasks -----------------------------------------------------------------
-
-function mm.exec(cmd, opt)
-	opt = opt or empty
-	if not opt.bg then
-		--release all db connections now in case this is a long running task.
-		release_dbs()
-	end
-	return task_exec(cmd, opt)
 end
 
 --client rowset API ----------------------------------------------------------
@@ -2174,7 +2180,7 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 		{name = 'deploy'},
 		{name = 'type'},
 		{name = 'id'},
-		{name = 'descr'},
+		{name = 'descr', w = 500},
 	}
 	self.pk = ''
 	function self:load_rows(rs, params)
@@ -2236,8 +2242,8 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 							local clock = t.time - now
 							if clock0 then
 								local dt = (clock - clock0)
-								local up = (t.utime - utime0) / dt
-								local sp = (t.stime - stime0) / dt
+								local up = max(0, (t.utime - utime0) / dt)
+								local sp = max(0, (t.stime - stime0) / dt)
 								add(rs.rows, {
 									deploy,
 									clock,
