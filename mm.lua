@@ -499,37 +499,41 @@ local cmd_tasks       = cmdsection('TASKS'             , wrap)
 local function mm_task_init(self)
 	if self.visible then
 		rowset_changed'running_tasks'
-	end
-	self:on('event', function(self, ev, source_task, ...)
-		if source_task ~= self then return end
-		if not self.visible then return end
-		rowset_changed'running_tasks'
-	end)
-	self:on('setstatus', function(self, ev, source_task, status)
-		if source_task ~= self then return end
-		if not self.visible then return end
-		if status == 'finished' then
-			if not self.nolog then
-				if not self.task_run then
-					self.task_run = insert_row('task_run', {
-						start_time = self.start_time,
-						name = self.name,
-						duration = self.duration,
-						stdin = self.stdin,
-						stdouterr = self:stdouterr(),
-						exit_code = self.exit_code,
-					}, nil, {quiet = true})
-				else
-					update_row('task_run', {
-						self.task_run,
-						duration = self.duration,
-						stdouterr = self:stdouterr(),
-						exit_code = self.exit_code,
-					}, nil, nil, {quiet = true})
+		self:on('event', function(self, ev, source, ...)
+			pr('tae', ev)
+			if source ~= self then return end
+			rowset_changed'running_tasks'
+		end)
+		self.terminal:on('event', function(self, ev, source, ...)
+			pr('tee', ev)
+			if source ~= self then return end
+			rowset_changed'running_tasks'
+		end)
+		self:on('setstatus', function(self, ev, source_task, status)
+			if source_task ~= self then return end
+			if status == 'finished' then
+				if not self.nolog then
+					if not self.task_run then
+						self.task_run = insert_row('task_run', {
+							start_time = self.start_time,
+							name = self.name,
+							duration = self.duration,
+							stdin = self.stdin,
+							stdouterr = self:stdouterr(),
+							exit_code = self.exit_code,
+						}, nil, {quiet = true})
+					else
+						update_row('task_run', {
+							self.task_run,
+							duration = self.duration,
+							stdouterr = self:stdouterr(),
+							exit_code = self.exit_code,
+						}, nil, nil, {quiet = true})
+					end
 				end
 			end
-		end
-	end)
+		end)
+	end
 	if not self.bg then
 		--release all db connections now in case this is a long running task.
 		release_dbs()
