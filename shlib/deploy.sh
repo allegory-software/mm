@@ -51,7 +51,7 @@ machine_prepare() {
 	must sed -i '/^proc/d' /etc/fstab
 	append "proc  /proc  proc  defaults,nosuid,nodev,noexec,relatime,hidepid=1  0  0" /etc/fstab
 
-	apt_get_install sudo htop mc git nginx gnupg2 lsb-release
+	apt_get_install sudo htop mc git nginx curl
 
 	tarantool_install
 

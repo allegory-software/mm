@@ -1,6 +1,6 @@
 #use die fs
 
-ssh_hostkey_update() { # HOST FINGERPRINT
+ssh_hostkey_update() { # HOST HOSTKEY
 	local host="$1"
 	local fp="$2"
 	checkvars host fp-
@@ -13,7 +13,7 @@ ssh_hostkey_update() { # HOST FINGERPRINT
 	say "(*) SSH host fingerprint updated."
 }
 
-ssh_host_update() { # host keyname [unstable_ip]
+ssh_host_update() { # HOST KEYNAME [unstable_ip]
 	local host="$1"
 	local keyname="$2"
 	checkvars host keyname
@@ -42,18 +42,23 @@ ssh_key_update() { # keyname key
 	say "(*) SSH key updated."
 }
 
-ssh_host_key_update() { # HOST KEYNAME KEY [unstable_ip]
+ssh_host_key_update() { # [HOME=] [USER=] HOST KEYNAME KEY [unstable_ip]
 	ssh_key_update "$2" "$3"
 	ssh_host_update "$1" "$2" "$4"
 }
 
-ssh_pubkey_for_user() { # USER KEYNAME
+ssh_pubkey_for_user() { # [USER=] USER KEYNAME
+	local USER="$1"
+	local KEYNAME="$2"
 	checkvars USER KEYNAME
 	local HOME=/home/$USER; [ $USER == root ] && HOME=/root
 	cat $HOME/.ssh/authorized_keys | grep " $KEYNAME\$"
 }
 
 ssh_pubkey_update_for_user() { # USER KEYNAME KEY
+	local USER="$1"
+	local KEYNAME="$2"
+	local KEY="$3"
 	checkvars USER KEYNAME KEY-
 	say "Updating SSH public key '$KEYNAME' for user '$USER' ... (*)"
 	local HOME=/home/$USER; [ $USER == root ] && HOME=/root
@@ -67,7 +72,9 @@ ssh_pubkey_update_for_user() { # USER KEYNAME KEY
 	say "(*) SSH public key updated."
 }
 
-ssh_pubkey_update() {
+ssh_pubkey_update() { # KEYNAME KEY
+	local KEYNAME="$1"
+	local KEY="$2"
 	checkvars KEYNAME KEY-
 	(
 	cd /home || exit 1
@@ -75,7 +82,7 @@ ssh_pubkey_update() {
 	for USER in *; do
 		ssh_pubkey_update_for_user $USER $KEYNAME "$KEY"
 	done
-	ssh_pubkey_update_for_user root $KEYNAME
+	ssh_pubkey_update_for_user root $KEYNAME "$KEY"
 	)
 }
 
@@ -100,7 +107,7 @@ ssh_git_keys_update() {
 		local -n SSH_KEY=${NAME^^}_SSH_KEY
 		checkvars HOST SSH_HOSTKEY- SSH_KEY-
 
-		ssh_hostkey_update  $HOST "$SSH_HOSTKEY"
+		ssh_hostkey_update $HOST "$SSH_HOSTKEY"
 		ssh_host_key_update $HOST mm_$NAME "$SSH_KEY" unstable_ip
 
 		(

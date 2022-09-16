@@ -3,13 +3,12 @@
 # percona install ------------------------------------------------------------
 
 mysql_install() {
-	local f=percona-release_latest.generic_all.deb
-	must wget -nv https://repo.percona.com/apt/$f
+	apt_get_install curl gnupg2 lsb-release
+	must wget -nv https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb -O percona.deb
 	export DEBIAN_FRONTEND=noninteractive
-	must dpkg -i $f
-	apt_get update
+	must dpkg -i percona.deb
 	apt_get install --fix-broken
-	must rm $f
+	must rm percona.deb
 	must percona-release setup -y pxc80
 	apt_get_install percona-xtradb-cluster percona-xtrabackup-80 qpress
 }

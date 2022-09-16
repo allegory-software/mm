@@ -15,6 +15,9 @@ git push
 '
 	must save "$s" $git_up
 	must chmod +x $git_up
+
+	# sneak that in here...
+	git config --global alias.st status
 }
 
 git_config_user() { # email name
@@ -35,7 +38,7 @@ git_clone_for() { # USER REPO DIR VERSION LABEL
 	must mkdir -p $DIR
 	must cd $DIR
 	[ -d .git ] || must git init -q
-	git ls-remote --exit-code origin && must git remote remove origin
+	git ls-remote --exit-code origin 2>/dev/null && must git remote remove origin
 	must git remote add origin $REPO
 	must git -c advice.objectNameWarning=false fetch --depth=1 -q origin "$VERSION:refs/remotes/origin/$VERSION"
 	must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"

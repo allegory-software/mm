@@ -17,10 +17,36 @@ A terse but more extensive list of features and limitations is currently
 ## Installing
 
 ```
-git clone https://github.com/allegory-software/mm
-git clone https://github.com/allegory-software/allegory-sdk mm/sdk
+git clone git@github.com:allegory-software/mm
+git clone git@github.com:allegory-software/allegory-sdk mm/sdk
 git clone git@github.com:allegory-software/allegory-sdk-bin-debian10  mm/sdk/bin/linux
 git clone git@github.com:allegory-software/allegory-sdk-bin-windows   mm/sdk/bin/windows
+```
+
+#### On a dev machine use the `dev` branch of the sdk...
+
+```
+(cd mm/sdk && git checkout dev)
+(cd mm/sdk/bin/linux && git checkout dev)
+```
+
+## Configuring
+
+Add to `mm.conf`:
+
+```
+db_host = '...' --ip of mysql server
+db_port =  ...  --if not 3306
+db_user = '...' --if not root
+db_pass = '...'
+smtp_pass  = '...' --for login
+
+--on a dev machine...
+http_port = 8080
+https_addr = false
+session_cookie_secure_flag = false
+
+deploy = '...' --name this mm deployment
 ```
 
 ## Using
@@ -33,11 +59,7 @@ $ ./mm
 ## Dependencies
 
 MySQL 8 (for now)
-Tarantool 2.8 (in the future)
-
-## Configuration
-
-I'll write it when it's stable.
+Tarantool 2.10 (in the future)
 
 ## Adding machines
 

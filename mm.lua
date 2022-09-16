@@ -1,5 +1,5 @@
---go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --[[
 
@@ -949,7 +949,7 @@ function mm.ssh_key_fix_perms(opt, machine)
 		readpipe('icacls %s /c /t /Remove:g "Authenticated Users" BUILTIN\\Administrators BUILTIN Everyone System Users', s)
 		readpipe('icacls %s', s)
 	else
-		chmod(s, '600')
+		chmod(s, '0600')
 	end
 	say'Perms fixed.'
 end
@@ -3720,7 +3720,10 @@ rowset.deploys = sql_rowset{
 		local d0 = row['deploy:old']
 		local d1 = row.deploy
 		if row.machine then
-			local m0 = first_row('select machine from deploy where deploy = ?', d0)
+			local m0 = first_row([[
+				select machine from deploy where deploy = ?
+				and deployed_app_commit is not null
+			]], d0)
 			if m0 then
 				raise('db', '%s', 'Remove the deploy from the machine first.')
 			end
