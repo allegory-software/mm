@@ -118,7 +118,7 @@ ssh_git_keys_update() {
 				HOME=/home/$USER USER=$USER ssh_host_key_update \
 					$HOST mm_$NAME "$SSH_KEY" unstable_ip
 		done
-		exit 0 # for some reason, for sets an exit code...
+		exit 0 # for some reason, the for loop sets an exit code...
 		) || exit
 	done
 }

@@ -493,12 +493,10 @@ local function mm_task_init(self)
 	if self.visible then
 		rowset_changed'running_tasks'
 		self:on('event', function(self, ev, source, ...)
-			pr('tae', ev)
 			if source ~= self then return end
 			rowset_changed'running_tasks'
 		end)
 		self.terminal:on('event', function(self, ev, source, ...)
-			pr('tee', ev)
 			if source ~= self then return end
 			rowset_changed'running_tasks'
 		end)
@@ -1826,6 +1824,11 @@ end)
 end
 
 function api.deploy(opt, deploy, app_ver, sdk_ver)
+
+	if config'deploy' == deploy then
+		notify_error'Cannot self-deploy'
+	end
+
 	if app_ver or sdk_ver then
 		update_row('deploy', {
 			deploy,

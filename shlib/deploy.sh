@@ -304,11 +304,12 @@ deploy() {
 }
 
 deploy_gen_conf() {
-	checkvars DEPLOY APP MYSQL_PASS SECRET
+	checkvars MACHINE DEPLOY APP MYSQL_PASS SECRET
 	local conf=/home/$DEPLOY/$APP/${APP}.conf
 	must save "\
 --deploy vars
 deploy = '$DEPLOY'
+machine = '$MACHINE'
 ${ENV:+env = '$ENV'}
 ${VERSION:+version = '$VERSION'}
 db_name = '$DEPLOY'
