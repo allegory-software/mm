@@ -1826,7 +1826,8 @@ end
 function api.deploy(opt, deploy, app_ver, sdk_ver)
 
 	if config'deploy' == deploy then
-		error'Cannot self-deploy'
+		notify_error'Cannot self-deploy'
+		return
 	end
 
 	if app_ver or sdk_ver then
