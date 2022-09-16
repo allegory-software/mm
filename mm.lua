@@ -844,7 +844,7 @@ end
 function mm.known_hosts_file()
 	local file = known_hosts_file()
 	if from_server() then
-		save(file, mm.known_hosts_file_contents())
+		save(file, mm.known_hosts_file_contents(), nil, '0600')
 	end
 	return file
 end
@@ -859,7 +859,7 @@ local function gen_known_hosts_file()
 	]] do
 		add(t, s)
 	end
-	save(mm.known_hosts_file(), concat(t, '\n'))
+	save(mm.known_hosts_file(), concat(t, '\n'), nil, '0600')
 end
 
 function api.ssh_hostkey_update(opt, machine)
@@ -918,7 +918,7 @@ function mm.keyfile(machine, ext) --`mm ssh ...` gets it from the server
 	if from_server() then
 		local s = checkfound(mm.keyfile_contents(machine, ext),
 			'SSH key file not found: %s', file)
-		save(file, s)
+		save(file, s, nil, '0600')
 	end
 	return file
 end
