@@ -54,12 +54,6 @@ local function mm_schema()
 
 	types.git_version = {strid, null_text = 'master'}
 
-	tables.config = {
-		config      , idpk,
-		ssh_key     , private_key,
-		ssh_pubkey  , public_key,
-	}
-
 	tables.git_hosting = {
 		name        , strpk,
 		host        , strid, not_null,
@@ -87,7 +81,6 @@ local function mm_schema()
 		active      , bool1, --enable/disable all automation
 		ssh_hostkey , public_key,
 		ssh_key     , private_key,
-		ssh_pubkey  , public_key,
 		ssh_key_ok  , bool,
 		admin_page  , url,
 		os_ver      , name,
