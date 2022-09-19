@@ -103,7 +103,7 @@ machine_rename() { # OLD_MACHINE NEW_MACHINE
 deploy_nginx_config() { # DOMAIN= HTTP_PORT= [ACME=1] $0
 
 	# acme thumbprint got with `acme.sh --register-account` (thumbprint is public).
-	local ACME_THUMBPRINT="gXTX0h3wk2OSU0eL5VoACugp_I4GFhFmRt8BcdhSOG4"
+	local ACME_THUMBPRINT="yWTiBNPg2BAKLxC66JgGTYG8IEGPTFxIe0V3qA5Jfd0"
 
 	local acme_location="\
 	location ~ ^/\.well-known/acme-challenge/([-_a-zA-Z0-9]+)$ {
