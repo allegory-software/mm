@@ -86,7 +86,7 @@ log_bin_trust_function_creators = 1
 	mysql_gen_my_cnf  localhost root $MYSQL_ROOT_PASS
 
 	# allow binding to ports < 1024 by any user.
-	must save 'net.ipv4.ip_unprivileged_port_start=0' \
+	save 'net.ipv4.ip_unprivileged_port_start=0' \
 		/etc/sysctl.d/50-unprivileged-ports.conf
 	must sysctl --system
 
@@ -272,13 +272,13 @@ app() {
 
 deploy() {
 	checkvars DEPLOY REPO APP DEPLOY_VARS-
-	say "Deploying APP=$APP ENV=$ENV VERSION=$VERSION SDK_VERSION=$SDK_VERSION..."
+	say "Deploying APP=$APP ENV=$ENV VERSION=$APP_VERSION SDK_VERSION=$SDK_VERSION..."
 
 	[ -d /home/$DEPLOY/$APP ] && app running && must app stop
 
 	deploy_setup
 
-	git_clone_for $DEPLOY $REPO /home/$DEPLOY/$APP "$VERSION" app
+	git_clone_for $DEPLOY $REPO /home/$DEPLOY/$APP "$APP_VERSION" app
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk \
@@ -291,7 +291,13 @@ deploy() {
 	deploy_gen_conf
 
 	[ "$HTTP_PORT" -a "$DOMAIN" ] && {
-		cp_file /home/$DEPLOY/$APP/www/5xx.html /var/www/$DOMAIN/5xx.html
+		local src=/home/$DEPLOY/$APP/www/5xx.html
+		local dst=/var/www/$DOMAIN/5xx.html
+		if [ -f "$src" ]; then
+			cp_file $src $dst
+		else
+			save "Server down!" $dst
+		fi
 		deploy_nginx_config
 	}
 
@@ -306,12 +312,12 @@ deploy() {
 deploy_gen_conf() {
 	checkvars MACHINE DEPLOY APP MYSQL_PASS SECRET
 	local conf=/home/$DEPLOY/$APP/${APP}.conf
-	must save "\
+	save "\
 --deploy vars
 deploy = '$DEPLOY'
 machine = '$MACHINE'
 ${ENV:+env = '$ENV'}
-${VERSION:+version = '$VERSION'}
+${APP_VERSION:+version = '$APP_VERSION'}
 db_name = '$DEPLOY'
 db_user = '$DEPLOY'
 db_pass = '$MYSQL_PASS'

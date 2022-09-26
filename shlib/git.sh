@@ -39,6 +39,7 @@ git_clone_for() { # USER REPO DIR VERSION LABEL
 	must cd $DIR
 	[ -d .git ] || must git init -q
 	git ls-remote --exit-code origin 2>/dev/null && must git remote remove origin
+	must git remote rm  origin 2>/dev/null
 	must git remote add origin $REPO
 	must git -c advice.objectNameWarning=false fetch --depth=1 -q origin "$VERSION:refs/remotes/origin/$VERSION"
 	must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"

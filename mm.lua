@@ -1526,6 +1526,24 @@ function mm.rsync(opt, md1, md2)
 			tty = opt.tty,
 		})
 	else
+		local function local_rsync_path(d, is_src_path)
+			if path_type(d) == 'rel' then --make path absolute
+				d = indir(startcwd(), d)
+			end
+			--tell rsync to not create the full source path in the dest. dir.
+			if is_src_path and file_is(d, 'dir') then
+				d = d .. '/./.'
+			else
+				d = path_dir(d) .. '/./' ..  path_file(d)
+			end
+			if win then --convert Windows path to cygwin path
+				local _, d_path, d_drive = path_parse(d)
+		 		assertf(d_drive, 'not a Windows path: %s', d)
+				d = path_normalize('/cygdrive/' .. d_drive .. d_path, nil,
+					{sep = '/', dot_dirs = 'leave'})
+			end
+			return d, is_dir
+		end
 		local ssh_cmd = 'ssh'
 			..' -q -o BatchMode=yes'
 			..' -o PreferredAuthentications=publickey'
@@ -1534,11 +1552,12 @@ function mm.rsync(opt, md1, md2)
 			..' '..cmdline_quote_args_unix(ssh_control_opts(opt.tty))
 		if m2 then --upload
 			local ip = mm.ip(m2)
+			d1 = local_rsync_path(d1, true)
 			out_stderr(_('Uploading\n\tsrc: %s\n\tdst: %s:%s ... \n', d1, m2, d2))
 			mm.exec({
 				sshcmd'rsync', '--delete', '--timeout=5',
 				opt.progress and '--info=progress2' or nil,
-				'-e', ssh_cmd, '-aHR', d1..'/./.', 'root@'..ip..':/'..d2,
+				'-e', ssh_cmd, '-aHR', d1, 'root@'..ip..':/'..d2,
 			}, {
 				name = 'rsync upload-to '..m2,
 				capture_stdout = not opt.tty,
@@ -1546,11 +1565,12 @@ function mm.rsync(opt, md1, md2)
 			})
 		elseif m1 then --download
 			local ip = mm.ip(m1)
+			d2 = local_rsync_path(d2)
 			out_stderr(_('Downloading %s:%s to %s ... \n', m1, d1, d2))
 			mm.exec({
 				sshcmd'rsync', '--delete', '--timeout=5',
 				opt.progress and '--info=progress2' or nil,
-				'-e', ssh_cmd, '-aHR', 'root@'..ip..':/'..d1..'/./.', '/'..d2,
+				'-e', ssh_cmd, '-aHR', 'root@'..ip..':/'..d1..'/./.', d2,
 			}, {
 				name = 'rsync download-from '..m1,
 				capture_stdout = not opt.tty,
