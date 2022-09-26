@@ -305,25 +305,6 @@ local function split(sep, s)
 	return repl(s1, ''), repl(s2, '')
 end
 
-cmd('install [forealz]', 'Install or migrate mm', function(opt, doit)
-	create_db()
-	local dry = doit ~= 'forealz'
-	db():sync_schema(mm.schema, {dry = dry})
-	if not dry then
-		insert_or_update_row('tenant', {
-			tenant = 1,
-			name = 'test',
-			host = config'host',
-		})
-		usr_create_or_update{
-			tenant = 1,
-			email = config'dev_email',
-			roles = 'dev admin',
-		}
-	end
-	say'Install done.'
-end)
-
 --web api / server -----------------------------------------------------------
 
 local mm_api = {} --{action->fn}
@@ -3694,6 +3675,7 @@ rowset.deploys = sql_rowset{
 		deploy = {
 			validate = validate_deploy,
 		},
+		domain = {type = 'url'},
 		status = {
 			compute = function(self, vals)
 				local vars = mm.deploy_state_vars[vals.deploy]
