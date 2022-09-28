@@ -1127,6 +1127,7 @@ end
 --make repeated SSH invocations faster by reusing connections.
 local function ssh_control_opts(tty)
 	if not Linux then return end
+	if not tty then return end --doesn't work when mm is daemonized!
 	return
 		'-o', 'ControlMaster=auto',
 		'-o', 'ControlPath=~/.ssh/control-%h-%p-%r'..(tty and '-tty' or ''),
@@ -1138,6 +1139,8 @@ function mm.ssh(md, cmd_args, opt)
 	opt.machine = machine
 	return mm.exec(extend({
 		sshcmd'ssh',
+		not opt.tty and '-n' or nil,
+		--^^prevent reading from stdin which doesn't work when mm is daemonized.
 		opt.tty and '-t' or '-T',
 		'-o', 'BatchMode=yes',
 		'-o', 'ConnectTimeout=3',
