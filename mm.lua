@@ -542,6 +542,7 @@ rowset.running_tasks = virtual_rowset(function(self)
 		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
 		{name = 'exit_code' , 'double', w = 20},
 		{name = 'notif'     , hidden = true, maxlen = 16*1024^2},
+		{name = 'cmd'       , hidden = true},
 	}
 	self.pk = 'id'
 	self.rw_cols = 'pinned'
@@ -560,6 +561,9 @@ rowset.running_tasks = virtual_rowset(function(self)
 			task:stdouterr(),
 			task.exit_code,
 			cat(imap(task:notifications(), 'message'), '\n\n'),
+			istab(task.cmd)
+				and cmdline_quote_args(nil, unpack(task.cmd))
+				or task.cmd,
 		}
 	end
 
