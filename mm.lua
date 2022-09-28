@@ -1,4 +1,4 @@
---go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --[[
@@ -268,7 +268,7 @@ config('auto_create_user', false)
 
 local mm = xapp(...)
 
-logging.filter.mysql = true
+--logging.filter.mysql = true
 
 mm.sshfsdir = [[C:\PROGRA~1\SSHFS-Win\bin]] --no spaces!
 mm.bindir   = indir(scriptdir(), 'bin', win and 'windows' or 'linux')
@@ -341,7 +341,9 @@ action['api.txt'] = function(action, ...)
 	local prev_term = set_current_terminal(out_term)
 	local ok, ret = pcall(handler, opt, unpack(args))
 	if not ok then
-		out_term:send_on('e', tostring(ret))
+		local ret = tostring(ret)
+		log('ERROR', 'mm', 'api', '%s', ret)
+		out_term:notify_error('%s', ret)
 	elseif ret ~= nil then
 		out_term:send_on('r', json_encode(ret))
 	end
@@ -1382,22 +1384,22 @@ cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
 --TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
 function mm.tunnel(machine, ports, opt, rev)
 	local args = {'-N'}
-	--if logging.debug then add(args, '-v') end
+	if logging.verbose then add(args, '-v') end
 	ports = checkarg(ports, 'ports expected')
-	local rports = {}
+	local ts = {}
 	for ports in ports:gmatch'([^,]+)' do
 		local lport, rport = split(':', ports)
 		rport = rport or ports
 		lport = lport or ports
+		local s = _('%s:%s %s %s', machine, rport, rev and '->' or '<-', lport)
+		add(ts, s)
 		add(args, rev and '-R' or '-L')
 		if rev then lport, rport = rport, lport end
 		add(args, '127.0.0.1:'..lport..':127.0.0.1:'..rport)
-		log('note', 'mm', 'tunnel', '%s:%s %s %s',
-			machine, lport, rev and '->' or '<-', rport)
-		add(rports, rport)
+		log('note', 'mm', 'tunnel', '%s', s)
 	end
 	mm.ssh(machine, args, update({
-		name = (rev and 'r' or '')..'tunnel'..' '..machine..' '..cat(rports, ','),
+		name = _('tunnel %s', cat(ts)),
 		type = 'long',
 		out_stdout = false, --suppress copyright noise
 		restart_after = 1,
