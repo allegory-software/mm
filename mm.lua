@@ -3857,6 +3857,7 @@ local function start_tunnels_and_log_servers()
 				bg = true,
 			})
 			config(machine..'_db_host', '127.0.0.1')
+			config(machine..'_db_user', 'root')
 			config(machine..'_db_port', mysql_local_port)
 			config(machine..'_db_pass', mm.mysql_root_pass(machine))
 			config(machine..'_db_name', 'performance_schema')
