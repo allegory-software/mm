@@ -542,7 +542,7 @@ rowset.running_tasks = virtual_rowset(function(self)
 		{name = 'out'       , hidden = true, maxlen = 16*1024^2},
 		{name = 'exit_code' , 'double', w = 20},
 		{name = 'notif'     , hidden = true, maxlen = 16*1024^2},
-		{name = 'cmd'       , hidden = true},
+		{name = 'cmd'       , hidden = true, maxlen = 16*1024^2},
 	}
 	self.pk = 'id'
 	self.rw_cols = 'pinned'
