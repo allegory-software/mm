@@ -1133,7 +1133,6 @@ function mm.ssh(md, cmd_args, opt)
 	return mm.exec(extend({
 		sshcmd'ssh',
 		opt.tty and '-t' or '-T',
-		'-q',
 		'-o', 'BatchMode=yes',
 		'-o', 'ConnectTimeout=3',
 		'-o', 'PreferredAuthentications=publickey',
