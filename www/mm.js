@@ -297,6 +297,7 @@ on('mm_deloy_profiler_record_button.init', function(e) {
 		e.xoff()
 		started = e.val('profiler_started')
 		e.icon = started ? 'fa fa-stop' : 'fa fa-circle'
+		e.disable('not_live', e.val('status') != 'live')
 		e.xon()
 	})
 })

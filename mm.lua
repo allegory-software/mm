@@ -2238,13 +2238,11 @@ rowset.deploy_profiler_output = virtual_rowset(function(self)
 	self.pk = 'deploy'
 	function self:load_rows(rs, params)
 		rs.rows = {}
-		local deploys = params['param:filter']
-		if deploys then
-			for _,deploy in ipairs(deploys) do
-				local vars = mm.deploy_state_vars[deploy]
-				local s = vars and vars.profiler_output
-				add(rs.rows, {deploy, s or ''})
-			end
+		local deploys = params['param:filter'] or {}
+		for _,deploy in ipairs(deploys) do
+			local vars = mm.deploy_state_vars[deploy]
+			local s = vars and vars.profiler_output
+			add(rs.rows, {deploy, s or ''})
 		end
 	end
 end)
