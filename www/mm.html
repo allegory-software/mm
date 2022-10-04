@@ -75,6 +75,10 @@ textarea.x-editbox-input[console] {
 	padding-right: 2px;
 }
 
+.mm-profiler-split > .x-split-pane-fixed {
+	justify-content: start;
+}
+
 </style>
 
 <x-if hidden global=signed_in>
@@ -284,7 +288,7 @@ textarea.x-editbox-input[console] {
 							</div>
 						</x-ct>
 						<x-grid label="Live Objects"
-							id=mm_deploy_livelist
+							id=mm_deploy_livelist_grid
 							rowset_name=deploy_livelist
 							param_nav_id=mm_deploys_grid params=deploy
 						>
@@ -296,6 +300,28 @@ textarea.x-editbox-input[console] {
 								param_nav_id=mm_deploys_grid params=deploy
 							></x-grid>
 							<x-textarea mono nav_id=mm_deploy_log_grid col=message></x-textarea>
+						</x-vsplit>
+						<x-vsplit label="Profiler"
+							fixed_side=first fixed_size=null resizeable=false
+							class=mm-profiler-split
+						>
+							<x-ct >
+								<x-button
+									bare
+									icon="fa fa-circle"
+									id=mm_deloy_profiler_record_button
+									nav_id=mm_deploys_grid
+									text="{{#profiler_started}}Stop{{/profiler_started}}{{^profiler_started}}Start{{/profiler_started}}"
+								></x-button>
+							</x-ct>
+							<x-ct>
+								<x-nav
+									id=mm_deploy_profiler_nav
+									rowset_name=deploy_profiler_output
+									param_nav_id=mm_deploys_grid params=deploy
+								></x-nav>
+								<x-textarea col=output nav_id=mm_deploy_profiler_nav></x-textarea>
+							</x-ct>
 						</x-vsplit>
 						<x-grid label="MySQL Stats"
 							rowset_name=deploy_mysql_stats

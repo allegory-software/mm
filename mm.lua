@@ -1,4 +1,4 @@
---go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
+--go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --[[
@@ -1391,7 +1391,7 @@ cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
 --TODO: accept NAME as in `[LPORT|NAME:][RPORT|NAME]`
 function mm.tunnel(machine, ports, opt, rev)
 	local args = {'-N'}
-	if logging.verbose then add(args, '-v') end
+	if logging.debug then add(args, '-v') end
 	ports = checkarg(ports, 'ports expected')
 	local ts = {}
 	for ports in ports:gmatch'([^,]+)' do
@@ -2097,6 +2097,11 @@ function mm.log_server(machine)
 						rowset_changed('deploy_procinfo_log')
 						--TODO: filter this on machine
 						rowset_changed('machine_procinfo_log')
+					elseif msg.k == 'profiler_started' then
+						rowset_changed'deploys'
+					elseif msg.k == 'profiler_output' then
+						--TODO: filter this on deploy
+						rowset_changed'deploy_profiler_output'
 					end
 				else
 					queue_push(mm.deploy_logs, deploy, msg)
@@ -2223,6 +2228,36 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 		end)
 	end
 end)
+
+rowset.deploy_profiler_output = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'deploy'},
+		{name = 'output'},
+	}
+	self.pk = 'deploy'
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local deploys = params['param:filter']
+		if deploys then
+			for _,deploy in ipairs(deploys) do
+				local vars = mm.deploy_state_vars[deploy]
+				local s = vars and vars.profiler_output
+				add(rs.rows, {deploy, s or ''})
+			end
+		end
+	end
+end)
+
+function action.start_profiler(deploy, mode)
+	allow(usr'roles'.admin)
+	mm.log_server_rpc(deploy, 'start_profiler', mode)
+end
+
+function action.stop_profiler(deploy)
+	allow(usr'roles'.admin)
+	mm.log_server_rpc(deploy, 'stop_profiler')
+end
 
 rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
@@ -3647,6 +3682,7 @@ rowset.deploys = sql_rowset{
 			0 as lua_heap,
 			0 as ram_free,
 			0 as ram,
+			0 as profiler_started,
 			app,
 			wanted_app_version, deployed_app_version, deployed_app_commit,
 			wanted_sdk_version, deployed_sdk_version, deployed_sdk_commit,
@@ -3695,6 +3731,12 @@ rowset.deploys = sql_rowset{
 		lua_heap = {'filesize'   , text = 'Lua Heap Size'           , compute = compute_lua_heap , filesize_magnitude = 'M'},
 		ram_free = {'filesize'   , text = 'RAM free (total)'        , compute = compute_ram_free , filesize_magnitude = 'M'},
 		ram      = {'filesize'   , text = 'RAM size'                , compute = compute_ram      , filesize_magnitude = 'M'},
+		profiler_started = {'bool',
+			compute = function(self, vals)
+				local vars = mm.deploy_state_vars[vals.deploy]
+				return vars and vars.profiler_started or false
+			end,
+		},
 	},
 	compute_row_vals = function(self, vals)
 		vals.t1 = nil

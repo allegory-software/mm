@@ -270,16 +270,33 @@ on('mm_backup_replicas_grid.init', function(e) {
 
 })
 
-on('mm_deploy_livelist.bind', function(e, on) {
+{
+let get_livelist_timer
+on('mm_deploy_livelist_grid.bind', function(e, on) {
 	if (on) {
-		e._get_livelist_timer = runagainevery(1, function get_livelist() {
+		get_livelist_timer = runagainevery(1, function get_livelist() {
 			let pv0 = e.param_vals && e.param_vals[0]
 			let deploy = pv0 && pv0.deploy
 			if (deploy)
 				post(['poll-livelist', deploy])
 		})
-	} else if (e._get_livelist_timer) {
-		clearInterval(e._get_livelist_timer)
-		e._get_livelist_timer = null
+	} else if (get_livelist_timer) {
+		clearInterval(get_livelist_timer)
+		get_livelist_timer = null
 	}
+})
+}
+
+on('mm_deloy_profiler_record_button.init', function(e) {
+	let started
+	e.action = function() {
+		let deploy = e.val('deploy')
+		post([started ? 'stop-profiler' : 'start-profiler', deploy, 'Fl'])
+	}
+	e.do_after('do_update_row', function(row) {
+		e.xoff()
+		started = e.val('profiler_started')
+		e.icon = started ? 'fa fa-stop' : 'fa fa-circle'
+		e.xon()
+	})
 })
