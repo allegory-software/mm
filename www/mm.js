@@ -55,30 +55,30 @@ mm_api = new Proxy(obj(), {
 // actions -------------------------------------------------------------------
 
 function ssh_key_gen() {
-	mm_api.ssh_key_gen(this)
+	mm_api.ssh_key_gen()
 }
 
 function ssh_key_update() {
-	mm_api.ssh_key_update(this)
+	mm_api.ssh_key_update()
 }
 
 function machine_backup() {
-	mm_api.machine_backup(this, this.val('machine'))
+	mm_api.machine_backup(this.val('machine'))
 }
 
-function deploy_action(btn, action, ...args) {
+function deploy_action(action, ...args) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
-	mm_api[action](btn, deploy, ...args)
+	mm_api[action](deploy, ...args)
 	return false
 }
-function deploy_start   () { return deploy_action(this, 'app', 'start') }
-function deploy_stop    () { return deploy_action(this, 'app', 'stop') }
-function deploy_restart () { return deploy_action(this, 'app', 'restart') }
-function deploy_deploy  () { return deploy_action(this, 'deploy') }
-function deploy_remove  () { return deploy_action(this, 'deploy-remove') }
+function deploy_start   () { return deploy_action('app', 'start') }
+function deploy_stop    () { return deploy_action('app', 'stop') }
+function deploy_restart () { return deploy_action('app', 'restart') }
+function deploy_deploy  () { return deploy_action('deploy') }
+function deploy_remove  () { return deploy_action('deploy-remove') }
 
 function deploy_backup() {
-	mm_api.backup(this, this.val('deploy'))
+	mm_api.backup(this.val('deploy'))
 }
 
 // wiring --------------------------------------------------------------------
@@ -211,7 +211,7 @@ on('mm_machine_backup_copies_grid.init', function(e) {
 				action: function() {
 					let parent_mbk_copy = e.focused_row_cell_val('mbk_copy')
 					let machine = e.focused_row_cell_val('machine')
-					mm_api.machine_backup(this, machine, parent_mbk_copy)
+					mm_api.machine_backup(machine, parent_mbk_copy)
 				},
 			},
 		])
