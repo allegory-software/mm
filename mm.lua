@@ -1585,7 +1585,7 @@ function api.sha(opt, machine, dir)
 		]], {
 			DIR = dir
 		}, {
-			name = 'sha '..machine,
+			name = 'sha '..(machine or ''),
 			out_stdout = false,
 		}
 	):stdout():trim()
