@@ -287,7 +287,7 @@ on('mm_deploy_livelist_grid.bind', function(e, on) {
 })
 }
 
-on('mm_deloy_profiler_record_button.init', function(e) {
+on('mm_deploy_profiler_record_button.init', function(e) {
 	let started
 	e.action = function() {
 		let deploy = e.val('deploy')
@@ -301,3 +301,8 @@ on('mm_deloy_profiler_record_button.init', function(e) {
 		e.xon()
 	})
 })
+
+mm_deploy_collectgarbage_button_action = function() {
+	let deploy = this.val('deploy')
+	post(['collectgarbage', deploy])
+}

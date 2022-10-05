@@ -2257,6 +2257,11 @@ function action.stop_profiler(deploy)
 	mm.log_server_rpc(deploy, 'stop_profiler')
 end
 
+function action.collectgarbage(deploy)
+	allow(usr'roles'.admin)
+	mm.log_server_rpc(deploy, 'collectgarbage')
+end
+
 rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
