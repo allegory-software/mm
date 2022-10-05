@@ -1,6 +1,6 @@
 --go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
---go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
+--go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --[[
 
 	Many Machines, the independent man's SAAS provisioning tool.
@@ -1025,7 +1025,7 @@ cmd_ssh_keys('ssh-key-gen', 'Generate a new SSH key', mm.ssh_key_gen)
 function api.ssh_key_update(opt, machine)
 	log('note', 'mm', 'upd-key', '%s', machine)
 	local pubkey = mm.ssh_pubkey()
-	stored_pubkey = mm.ssh_sh(machine, [=[
+	local stored_pubkey = mm.ssh_sh(machine, [=[
 		#use ssh mysql user
 		has_mysql && {
 			mysql_update_pass localhost root "$MYSQL_ROOT_PASS"
@@ -1137,9 +1137,11 @@ function mm.ssh(md, cmd_args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
 	opt.machine = machine
+	assert(not daemonized or (not opt.tty and not opt.stdin),
+		'cannot use stdin while daemnoized')
 	return mm.exec(extend({
 		sshcmd'ssh',
-		not opt.tty and '-n' or nil,
+		daemonized and '-n' or nil,
 		--^^prevent reading from stdin which doesn't work when mm is daemonized.
 		opt.tty and '-t' or '-T',
 		'-o', 'BatchMode=yes',
