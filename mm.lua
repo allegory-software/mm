@@ -1137,8 +1137,7 @@ function mm.ssh(md, cmd_args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
 	opt.machine = machine
-	assert(not daemonized or (not opt.tty and not opt.stdin),
-		'cannot use stdin while daemnoized')
+	assert(not daemonized or not opt.tty, 'cannot use stdin while daemnoized')
 	return mm.exec(extend({
 		sshcmd'ssh',
 		daemonized and '-n' or nil,
