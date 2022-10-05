@@ -1137,10 +1137,12 @@ function mm.ssh(md, cmd_args, opt)
 	opt = opt or {}
 	local ip, machine = mm.ip(md)
 	opt.machine = machine
-	assert(not daemonized or not opt.tty, 'cannot use stdin while daemnoized')
+	if daemonized then
+		assert(not opt.tty, 'cannot use tty while daemnoized')
+	end
 	return mm.exec(extend({
 		sshcmd'ssh',
-		daemonized and '-n' or nil,
+		daemonized and not opt.stdin and '-n' or nil,
 		--^^prevent reading from stdin which doesn't work when mm is daemonized.
 		opt.tty and '-t' or '-T',
 		'-o', 'BatchMode=yes',
