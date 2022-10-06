@@ -325,6 +325,7 @@ secret = '$SECRET'
 
 --custom vars
 ${HTTP_PORT:+http_port = $HTTP_PORT}
+${HTTP_COMPRESS:+http_compress = $HTTP_COMPRESS}
 ${SMTP_HOST:+smtp_host = '$SMTP_HOST'}
 ${SMTP_HOST:+smtp_user = '$SMTP_USER'}
 ${SMTP_HOST:+smtp_pass = '$SMTP_PASS'}
