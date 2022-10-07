@@ -2074,7 +2074,7 @@ function mm.log_server(machine)
 			resume(thread(function()
 				while not chan:closed() do
 					if deploy then
-						mm.log_server_rpc(deploy, 'get_procinfo')
+						mm.deploy_rpc(deploy, 'get_procinfo')
 					end
 					chan:wait(1)
 				end
@@ -2102,6 +2102,8 @@ function mm.log_server(machine)
 						rowset_changed('machine_procinfo_log')
 					elseif msg.k == 'profiler_started' then
 						rowset_changed'deploys'
+					elseif msg.k == 'jit_on' then
+						rowset_changed'deploys'
 					elseif msg.k == 'profiler_output' then
 						--TODO: filter this on deploy
 						rowset_changed'deploy_profiler_output'
@@ -2110,7 +2112,6 @@ function mm.log_server(machine)
 					queue_push(mm.deploy_logs, deploy, msg)
 					rowset_changed'deploy_log'
 				end
-
 			end)
 
 			log_server_chan[deploy] = nil
@@ -2143,16 +2144,19 @@ function mm.log_server(machine)
 	return task
 end
 
-function mm.log_server_rpc(deploy, cmd, ...)
+function api.deploy_rpc(opt, deploy, ...)
 	local chan = log_server_chan[deploy]
-	if not chan then return end
-	chan:send(pack(cmd, ...))
+	if not chan then
+		notify_error('Deployment not live: %s', deploy)
+		return
+	end
+	chan:send(pack(...))
 	return true
 end
 
 function action.poll_livelist(deploy)
 	allow(usr'roles'.admin)
-	mm.log_server_rpc(deploy, 'poll_livelist')
+	mm.deploy_rpc(deploy, 'poll_livelist')
 end
 
 rowset.deploy_log = virtual_rowset(function(self)
@@ -2249,21 +2253,6 @@ rowset.deploy_profiler_output = virtual_rowset(function(self)
 		end
 	end
 end)
-
-function action.start_profiler(deploy, mode)
-	allow(usr'roles'.admin)
-	mm.log_server_rpc(deploy, 'start_profiler', mode)
-end
-
-function action.stop_profiler(deploy)
-	allow(usr'roles'.admin)
-	mm.log_server_rpc(deploy, 'stop_profiler')
-end
-
-function action.collectgarbage(deploy)
-	allow(usr'roles'.admin)
-	mm.log_server_rpc(deploy, 'collectgarbage')
-end
 
 rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
@@ -2431,8 +2420,7 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 end)
 
 function api.deploy_http_kill_all(opt, deploy)
-	allow(usr'roles'.admin)
-	local ok = mm.log_server_rpc(deploy, 'close_all_sockets')
+	local ok = mm.deploy_rpc(deploy, 'close_all_sockets')
 	notify('HKA %s: %s', deploy, ok)
 end
 cmd_deploys('hka|http-kill-all DEPLOY', 'Kill all HTTP connections', function(opt, deploy)
@@ -3674,6 +3662,13 @@ local function compute_lua_heap(self, vals)
 	return vals.t1 and vals.t1.lua_heap
 end
 
+local function deploy_state_var_compute_func(var_name, default)
+	return function(self, vals)
+		local vars = mm.deploy_state_vars[vals.deploy]
+		return vars and vars[var_name] or repl(default, nil, null)
+	end
+end
+
 rowset.deploys = sql_rowset{
 	allow = 'admin',
 	select = [[
@@ -3689,6 +3684,7 @@ rowset.deploys = sql_rowset{
 			0 as ram_free,
 			0 as ram,
 			0 as profiler_started,
+			0 as jit_on,
 			app,
 			wanted_app_version, deployed_app_version, deployed_app_commit,
 			wanted_sdk_version, deployed_sdk_version, deployed_sdk_commit,
@@ -3738,10 +3734,10 @@ rowset.deploys = sql_rowset{
 		ram_free = {'filesize'   , text = 'RAM free (total)'        , compute = compute_ram_free , filesize_magnitude = 'M'},
 		ram      = {'filesize'   , text = 'RAM size'                , compute = compute_ram      , filesize_magnitude = 'M'},
 		profiler_started = {'bool',
-			compute = function(self, vals)
-				local vars = mm.deploy_state_vars[vals.deploy]
-				return vars and vars.profiler_started or false
-			end,
+			compute = deploy_state_var_compute_func'profiler_started',
+		},
+		jit_on = {'bool',
+			compute = deploy_state_var_compute_func'jit_on',
 		},
 	},
 	compute_row_vals = function(self, vals)

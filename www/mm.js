@@ -75,11 +75,8 @@ function deploy_start   () { return deploy_action('app', 'start') }
 function deploy_stop    () { return deploy_action('app', 'stop') }
 function deploy_restart () { return deploy_action('app', 'restart') }
 function deploy_deploy  () { return deploy_action('deploy') }
-function deploy_remove  () { return deploy_action('deploy-remove') }
-
-function deploy_backup() {
-	mm_api.backup(this.val('deploy'))
-}
+function deploy_remove  () { return deploy_action('deploy_remove') }
+function deploy_backup  () { return deploy_action('backup') }
 
 // wiring --------------------------------------------------------------------
 
@@ -287,11 +284,10 @@ on('mm_deploy_livelist_grid.bind', function(e, on) {
 })
 }
 
-on('mm_deploy_profiler_record_button.init', function(e) {
+on('mm_deploy_profiler_start_button.init', function(e) {
 	let started
 	e.action = function() {
-		let deploy = e.val('deploy')
-		post([started ? 'stop-profiler' : 'start-profiler', deploy, 'Fl'])
+		deploy_action('deploy_rpc', started ? 'stop_profiler' : 'start_profiler', 'Fl')
 	}
 	e.do_after('do_update_row', function(row) {
 		e.xoff()
@@ -302,7 +298,26 @@ on('mm_deploy_profiler_record_button.init', function(e) {
 	})
 })
 
+on('mm_deploy_collectgarbage_button.init', function(e) {
+	e.do_after('do_update_row', function(row) {
+		e.disable('not_live', e.val('status') != 'live')
+	})
+})
+
 mm_deploy_collectgarbage_button_action = function() {
-	let deploy = this.val('deploy')
-	post(['collectgarbage', deploy])
+	deploy_action('deploy_rpc', 'collectgarbage')
 }
+
+on('mm_deploy_jit_onoff_button.init', function(e) {
+	let jit_on
+	e.action = function() {
+		deploy_action('deploy_rpc', 'jit_onoff', !jit_on)
+	}
+	e.do_after('do_update_row', function(row) {
+		e.xoff()
+		jit_on = e.val('jit_on')
+		e.icon = jit_on ? 'fa-solid fa-gauge-high' : 'fa-solid fa-gauge'
+		e.disable('not_live', e.val('status') != 'live')
+		e.xon()
+	})
+})
