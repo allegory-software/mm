@@ -226,7 +226,7 @@ deploy_issue_cert() { # DOMAIN
 	local keyfile=/root/.acme.sh.etc/$DOMAIN/$DOMAIN.key
 	deploy_nginx_config_acme
 	acme_sh --issue -d $DOMAIN --stateless
-	[ -f $keyfile ] || die "SSL certificate not created: $keyfile."
+	[ -f $keyfile ] || die "SSL certificate was NOT created: $keyfile."
 }
 
 deploy_setup() {

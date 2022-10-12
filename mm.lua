@@ -262,7 +262,6 @@ if win then
 	require'winapi.registry'
 end
 
-config('multilang', false)
 config('allow_create_user', false)
 config('auto_create_user', false)
 
@@ -1223,7 +1222,7 @@ end
 --that only bash could have: sh reads its input one-byte-at-a-time and
 --stops reading exactly after the `exit` command, not one byte later, so
 --we can feed in stdin right after that. worse-is-better at its finest.
-function mm.ssh_sh(machine, script, script_env, opt)
+function mm.ssh_sh(md, script, script_env, opt)
 	opt = opt or {}
 	local script_env = update({
 		DEBUG   = repl(threadenv().debug   , false),
@@ -1233,9 +1232,9 @@ function mm.ssh_sh(machine, script, script_env, opt)
 	local s = mm.sh_script(script_s, script_env, opt.pp_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
 	if logging.debug then
-		log('', 'mm', 'ssh-sh', '%s %s %s', machine, script_s:trim(), script_env)
+		log('', 'mm', 'ssh-sh', '%s %s %s', md, script_s:trim(), script_env)
 	end
-	return mm.ssh(machine, {'bash', '-s'}, opt)
+	return mm.ssh(md, {'bash', '-s'}, opt)
 end
 
 --machine git keys update ----------------------------------------------------
@@ -1838,7 +1837,7 @@ end
 
 function api.deploy(opt, deploy, app_ver, sdk_ver)
 
-	if config'deploy' == deploy then
+	if config'deploy' == deploy and server_running then
 		notify_error'Cannot self-deploy'
 		return
 	end
@@ -2163,11 +2162,11 @@ rowset.deploy_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'id'      , hidden = true},
-		{name = 'time'    , 'time', max_w = 100},
-		{name = 'deploy'  , max_w =  80},
-		{name = 'severity', max_w =  60},
-		{name = 'module'  , max_w =  60},
-		{name = 'event'   , max_w =  60},
+		{name = 'time'    , 'time'},
+		{name = 'deploy'  },
+		{name = 'severity'},
+		{name = 'module'  },
+		{name = 'event'   },
 		{name = 'message' , maxlen = 16 * 1024^2},
 		{name = 'env'     , hidden = true},
 	}

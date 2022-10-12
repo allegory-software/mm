@@ -249,6 +249,7 @@ textarea.x-editbox-input[console] {
 								<x-input col=mtime                 ></x-input>
 							</x-form>
 							<x-grid
+								id=mm_deploy_vars_grid
 								label="Custom Vars"
 								param_nav_id=mm_deploys_grid params=deploy
 								rowset_name=deploy_vars
@@ -451,25 +452,28 @@ textarea.x-editbox-input[console] {
 					</x-tabs>
 				</x-split>
 			</x-split>
-			<div action=config class="x-container" style="justify-content: center">
-				<x-nav id=mm_config_nav rowset_name=config></x-nav>
-				<x-form nav_id=mm_config_nav id=mm_config_form grid>
-					<h2 area=h1>SSH</h2>
-					<x-textarea mono rows=12 col=mm_pubkey infomode=under
-						info="This is the SSH key used to log in as root on all machines.">
-					</x-textarea>
-					<x-button danger action_name=ssh_key_gen style="grid-area: ssh_key_gen_button"
-						text="Generate new key" icon="fa fa-key">
-					</x-button>
-					<x-button danger action_name=ssh_key_update style="grid-area: ssh_key_update_button"
-						text="Upload key to all machines" icon="fa fa-upload">
-					</x-button>
-					<div area=h2><hr><h2>MySQL</h2></div>
-					<x-passedit col=mysql_root_pass copy
-						info="Derived from the SSH Key. When updating the SSH key
-							the MySQL root password is updated too."></x-passedit>
-				</x-form>
-			</div>
+			<x-tabs>
+				<div label="SSH Master Key" action=config class="x-container" style="justify-content: center">
+					<x-nav id=mm_config_nav rowset_name=config></x-nav>
+					<x-form nav_id=mm_config_nav id=mm_config_form grid>
+						<h2 area=h1>SSH</h2>
+						<x-textarea mono rows=12 col=mm_pubkey infomode=under
+							info="This is the SSH key used to log in as root on all machines.">
+						</x-textarea>
+						<x-button danger action_name=ssh_key_gen style="grid-area: ssh_key_gen_button"
+							text="Generate new key" icon="fa fa-key">
+						</x-button>
+						<x-button danger action_name=ssh_key_update style="grid-area: ssh_key_update_button"
+							text="Upload key to all machines" icon="fa fa-upload">
+						</x-button>
+						<div area=h2><hr><h2>MySQL</h2></div>
+						<x-passedit col=mysql_root_pass copy
+							info="Derived from the SSH Key. When updating the SSH key
+								the MySQL root password is updated too."></x-passedit>
+					</x-form>
+				</div>
+				<x-grid label="Languages" rowset_name=lang></x-grid>
+			</x-tabs>
 		</x-switcher>
 		<x-tabs>
 			<x-split label="Running Tasks" fixed_side=second fixed_size=900>
