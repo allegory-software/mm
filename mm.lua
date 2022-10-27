@@ -1,5 +1,5 @@
+--go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -v run
 --go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
---go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -vv run
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --[[
 
@@ -1838,7 +1838,7 @@ end
 function api.deploy(opt, deploy, app_ver, sdk_ver)
 
 	if config'deploy' == deploy and server_running then
-		notify_error'Cannot self-deploy'
+		notify_error'Cannot self-deploy from server. Use command line.'
 		return
 	end
 
@@ -2204,7 +2204,7 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 		{name = 'id'},
 		{name = 'descr', w = 500},
 	}
-	self.pk = ''
+	self.pk = 'deploy id'
 	function self:load_rows(rs, params)
 		rs.rows = {}
 		local deploys = params['param:filter']
@@ -2264,7 +2264,7 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 		{name = 'ram_free' , 'filesize'   , text = 'RAM free (total)', filesize_magnitude = 'M'},
 		{name = 'ram_size' , 'filesize'   , text = 'RAM size', hidden = true},
 	}
-	self.pk = ''
+	self.pk = 'deploy clock'
 	function self:load_rows(rs, params)
 		rs.rows = {}
 		local deploys = params['param:filter']
@@ -2319,7 +2319,7 @@ rowset.machine_procinfo_log = virtual_rowset(function(self)
 		{name = 'ram_size'     , 'filesize'   , filesize_magnitude = 'M', text = 'RAM Size'},
 		{name = 'hdd_size'     , 'filesize'   , filesize_magnitude = 'M', text = 'Disk Size'},
 	}
-	self.pk = ''
+	self.pk = 'machine clock'
 	function self:load_rows(rs, params)
 		rs.rows = {}
 		local machines = params['param:filter']
@@ -2387,7 +2387,7 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 		{name = 'machine'},
 		{name = 'clock'},
 	}
-	self.pk = ''
+	self.pk = 'machine clock'
 	function self:load_rows(rs, params)
 		rs.rows = {}
 		local machines = params['param:filter']
@@ -3546,6 +3546,7 @@ rowset.machines = sql_rowset{
 	pk = 'machine',
 	order_by = 'pos, ctime',
 	field_attrs = {
+		refresh     = {hidden = true},
 		cpu_max     = {readonly = true, w = 60, 'percent_int', align = 'right', text = 'CPU Max %', compute = compute_cpu_max},
 		ram_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, text = 'Free RAM', compute = compute_ram_free},
 		hdd_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, text = 'Free Disk', compute = compute_hdd_free},

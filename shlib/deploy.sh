@@ -177,7 +177,7 @@ server {
 	ssl_dhparam          /etc/nginx/dhparam.pem;
 
 	# HSTS with preloading to google. Another amazing tech from the web people.
-	add_header Strict-Transport-Security: \"max-age=63072000; includeSubDomains; preload\" always;
+	add_header Strict-Transport-Security \"max-age=63072000; includeSubDomains; preload\" always;
 
 	# NOTE: nginx nested locations don't inherit proxy options, so we copy-paste them!
 

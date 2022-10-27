@@ -87,7 +87,7 @@ textarea.x-editbox-input[console] {
 </style>
 
 <x-if hidden global=signed_in>
-<x-split fixed_size=140>
+<x-split fixed_size=140 id=mm_main_menu_split>
 	<div theme=dark vflex>
 		<div class=header>
 			<div><b><img src=/favicon1.ico class=mm-logo> MANY MACHINES</b></div>
@@ -101,7 +101,7 @@ textarea.x-editbox-input[console] {
 			<div action=config>Configuration</div>
 		</x-listbox>
 	</div>
-	<x-vsplit fixed_side=second fixed_size=360>
+	<x-vsplit fixed_side=second fixed_size=360 id=mm_main_split>
 		<x-switcher nav_id=mm_actions_listbox>
 			<x-split action=git_hosting fixed_size=300>
 				<x-grid id=mm_git_hosting_grid rowset_name=git_hosting></x-grid>
@@ -113,7 +113,7 @@ textarea.x-editbox-input[console] {
 				</x-form>
 			</x-split>
 			<x-grid action=providers id=mm_providers_grid rowset_name=providers></x-grid>
-			<x-split action=machines fixed_side=second fixed_size=1000>
+			<x-split action=machines fixed_side=second fixed_size=1000 id=mm_machines_split>
 				<x-tabs>
 					<x-grid vertical label="Machines"
 						id=mm_machines_grid rowset_name=machines></x-grid>
@@ -200,7 +200,7 @@ textarea.x-editbox-input[console] {
 				</x-tabs>
 			</x-tabs>
 			</x-split>
-			<x-split action=deploys fixed_size=400>
+			<x-split action=deploys fixed_size=400 id=mm_deploys_split>
 				<x-tabs>
 					<x-grid label=Deployments id=mm_deploys_grid rowset_name=deploys></x-grid>
 				</x-tabs>
