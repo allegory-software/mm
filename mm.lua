@@ -470,6 +470,11 @@ local cmd_mbk         = cmdsection('MACHINE-LEVEL BACKUP & RESTORE', wrap)
 local cmd_dbk         = cmdsection('DEPLOYMENT-LEVEL BACKUP & RESTORE', wrap)
 local cmd_tasks       = cmdsection('TASKS'             , wrap)
 
+cmdhelp(function()
+	local server = config'mm_host'
+	say('MM SERVER: %s', server or 'none')
+end)
+
 --task system ----------------------------------------------------------------
 
 local function mm_task_init(self)
