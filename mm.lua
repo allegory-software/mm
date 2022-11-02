@@ -796,6 +796,7 @@ function api.deploy_info(opt, deploy)
 		select
 			deploy,
 			machine,
+			active,
 			mysql_pass,
 			domain,
 			app
