@@ -71,6 +71,19 @@ textarea.x-editbox-input[console] {
 	;
 }
 
+#mm_deploy_procinfo_log_charts {
+	align-content: stretch;
+	align-items: stretch;
+}
+
+#mm_deploy_procinfo_log_charts.maxcols1 {
+	grid-template-areas:
+		"cpu      cpu    ram             ram"
+		"strings  tables cdata           threads"
+		"udata    traces aborted_traces  mcode_size"
+	;
+}
+
 .mm-logo {
 	max-width: 18px;
 	display: inline;
@@ -295,22 +308,81 @@ textarea.x-editbox-input[console] {
 								param_nav_id=mm_deploys_grid params=deploy
 							>
 							</x-nav>
-							<div flex>
+							<x-form grid
+								id=mm_deploy_procinfo_log_charts
+								nav_id=mm_deploy_procinfo_log
+								>
 								<x-chart
-									nav_id=mm_deploy_procinfo_log
+									text="CPU"
+									style="grid-area: cpu"
 									shape=area sum_cols="cpu_sys cpu" group_cols=clock
 									min_sum=0 max_sum=1
 									min_val=-60 max_val=0
-								>
-								</x-chart>
+								></x-chart>
 								<x-chart
-									nav_id=mm_deploy_procinfo_log
+									text="RAM"
+									style="grid-area: ram"
 									shape=area sum_cols="rss ram_free..ram_size" group_cols=clock
 									min_sum=0
 									min_val=-60 max_val=0
-								>
-								</x-chart>
-							</div>
+								></x-chart>
+								<x-chart
+									text="Strings"
+									style="grid-area: strings"
+									shape=area sum_cols="strings" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+								<x-chart
+									text="Tables"
+									style="grid-area: tables"
+									shape=area sum_cols="tables" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+								<x-chart
+									text="Cdata"
+									style="grid-area: cdata"
+									shape=area sum_cols="cdata" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+								<x-chart
+									text="Threads"
+									style="grid-area: threads"
+									shape=area sum_cols="threads" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+								<x-chart
+									text="Userdata"
+									style="grid-area: udata"
+									shape=area sum_cols="udata" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+								<x-chart
+									text="Traces"
+									style="grid-area: traces"
+									shape=area sum_cols="traces" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+								<x-chart
+									text="Aborted Traces"
+									style="grid-area: aborted_traces"
+									shape=area sum_cols="aborted_traces" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+								<x-chart
+									text="MCode Size"
+									style="grid-area: mcode_size"
+									shape=area sum_cols="mcode_size" group_cols=clock
+									min_sum=0
+									min_val=-60 max_val=0
+								></x-chart>
+							</x-form>
 						</x-ct>
 						<x-grid label="Live Objects"
 							id=mm_deploy_livelist_grid

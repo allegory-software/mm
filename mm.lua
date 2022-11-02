@@ -1,5 +1,5 @@
---go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -v run
 --go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -v run
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --[[
 
@@ -2262,12 +2262,26 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'deploy'},
-		{name = 'clock'    , 'double'     , },
-		{name = 'cpu'      , 'percent_int', text = 'CPU'},
-		{name = 'cpu_sys'  , 'percent_int', text = 'CPU (kernel)'},
-		{name = 'rss'      , 'filesize'   , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
-		{name = 'ram_free' , 'filesize'   , text = 'RAM free (total)', filesize_magnitude = 'M'},
-		{name = 'ram_size' , 'filesize'   , text = 'RAM size', hidden = true},
+		{name = 'clock'          , 'double'     , },
+		{name = 'cpu'            , 'percent_int', text = 'CPU'},
+		{name = 'cpu_sys'        , 'percent_int', text = 'CPU (kernel)'},
+		{name = 'rss'            , 'filesize'   , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
+		{name = 'ram_free'       , 'filesize'   , text = 'RAM free (total)', filesize_magnitude = 'M'},
+		{name = 'ram_size'       , 'filesize'   , text = 'RAM size', hidden = true},
+		{name = 'lua_heap'       , 'filesize'   , text = 'Lua Heap Size'},
+		--debug.counts
+		{name = 'lua_total'      , 'filesize'   , },
+		{name = 'lua_freed'      , 'filesize'   , },
+		{name = 'lua_allocated'  , 'filesize'   , },
+		{name = 'strings'        , 'uint52'     , },
+		{name = 'tables'         , 'uint52'     , },
+		{name = 'threads'        , 'uint52'     , },
+		{name = 'udata'          , 'uint52'     , },
+		{name = 'cdata'          , 'uint52'     , },
+		{name = 'traces'         , 'uint52'     , },
+		{name = 'snap_restores'  , 'uint52'     , },
+		{name = 'aborted_traces' , 'uint52'     , },
+		{name = 'mcode_size'     , 'filesize'   , },
 	}
 	self.pk = 'deploy clock'
 	function self:load_rows(rs, params)
@@ -2297,6 +2311,20 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 									t.rss,
 									t.ram_free + t.rss,
 									t.ram_size,
+									t.lua_heap       ,
+									--debug.counts
+									t.lua_total      ,
+									t.lua_freed      ,
+									t.lua_allocated  ,
+									t.strings        ,
+									t.tables         ,
+									t.threads        ,
+									t.udata          ,
+									t.cdata          ,
+									t.traces         ,
+									t.snap_restores  ,
+									t.aborted_traces ,
+									t.mcode_size     ,
 								})
 							end
 							utime0 = t.utime
