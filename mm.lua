@@ -2088,6 +2088,11 @@ function mm.log_server(machine)
 
 				if not deploy then --first message identifies the client.
 					deploy = msg.deploy or '<unknown>'
+					local d = mm.deploy_info(deploy)
+					if not d.active then
+						chan:close()
+						return
+					end
 					log_server_chan[deploy] = chan
 					log('note', 'mm', 'log-accpt', '%s', deploy)
 				end
