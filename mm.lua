@@ -167,6 +167,14 @@ local function mm_schema()
 		message  , text,
 	}
 
+	tables.script = {
+		script   , strpk,
+		code     , longtext,
+		ctime    , ctime,
+		mtime    , mtime,
+		pos      , pos,
+	}
+
 	--machine backups: ideally backups should be per-deployment, not per-machine.
 	--but mysql only supports incremental backups for the entire server instance
 	--not per schema, so the idea of "machine backups" come from this limitation.
@@ -2117,9 +2125,13 @@ function mm.log_server(machine)
 					elseif msg.k == 'profiler_output' then
 						--TODO: filter this on deploy
 						rowset_changed'deploy_profiler_output'
+					elseif msg.k == 'eval_result' then
+						--TODO: filter this on deploy
+						rowset_changed'deploy_eval_result'
 					end
 				else
 					queue_push(mm.deploy_logs, deploy, msg)
+					--TODO: filter this on deploy
 					rowset_changed'deploy_log'
 				end
 			end)
@@ -2164,9 +2176,9 @@ function api.deploy_rpc(opt, deploy, ...)
 	return true
 end
 
-function action.poll_livelist(deploy)
+function action.log_livelist(deploy)
 	allow(usr'roles'.admin)
-	mm.deploy_rpc(deploy, 'poll_livelist')
+	mm.deploy_rpc(deploy, 'log_livelist')
 end
 
 rowset.deploy_log = virtual_rowset(function(self)
@@ -2246,23 +2258,28 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 	end
 end)
 
-rowset.deploy_profiler_output = virtual_rowset(function(self)
-	self.allow = 'admin'
-	self.fields = {
-		{name = 'deploy'},
-		{name = 'output'},
-	}
-	self.pk = 'deploy'
-	function self:load_rows(rs, params)
-		rs.rows = {}
-		local deploys = params['param:filter'] or {}
-		for _,deploy in ipairs(deploys) do
-			local vars = mm.deploy_state_vars[deploy]
-			local s = vars and vars.profiler_output
-			add(rs.rows, {deploy, s or ''})
+local function deploy_state_var_rowset(varname)
+	return virtual_rowset(function(self)
+		self.allow = 'admin'
+		self.fields = {
+			{name = 'deploy'},
+			{name = varname},
+		}
+		self.pk = 'deploy'
+		function self:load_rows(rs, params)
+			rs.rows = {}
+			local deploys = params['param:filter'] or {}
+			for _,deploy in ipairs(deploys) do
+				local vars = mm.deploy_state_vars[deploy]
+				local s = vars and vars[varname]
+				add(rs.rows, {deploy, s or ''})
+			end
 		end
-	end
-end)
+	end)
+end
+
+rowset.deploy_profiler_output = deploy_state_var_rowset'profiler_output'
+rowset.deploy_eval_result     = deploy_state_var_rowset'eval_result'
 
 rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
@@ -2456,6 +2473,31 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 		end
 	end
 end)
+
+rowset.scripts = sql_rowset{
+	select = [[
+		select
+			s.script,
+			s.code,
+			s.ctime,
+			s.mtime,
+			s.pos
+		from
+			script s
+	]],
+	order_by = 's.pos, s.script',
+	pk = 'script',
+	cols = 'script',
+	insert_row = function(self, row)
+		self:insert_into('script', row, 'script code pos')
+	end,
+	update_row = function(self, row)
+		self:update_into('script', row, 'script code pos')
+	end,
+	delete_row = function(self, row)
+		self:delete_from('script', row)
+	end,
+}
 
 function api.deploy_http_kill_all(opt, deploy)
 	local ok = mm.deploy_rpc(deploy, 'close_all_sockets')

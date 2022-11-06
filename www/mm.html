@@ -218,7 +218,7 @@ textarea.x-editbox-input[console] {
 					<x-grid label=Deployments id=mm_deploys_grid rowset_name=deploys></x-grid>
 				</x-tabs>
 				<x-split fixed_size=400>
-					<x-vsplit fixed_side=second fixed_size=57 resizeable=false>
+					<div vflex>
 						<x-tabs>
 							<x-form label="Deploy"
 								id=mm_deploys_form
@@ -299,229 +299,271 @@ textarea.x-editbox-input[console] {
 								text="Deploy"
 							></x-button>
 						</x-form>
-					</x-vsplit>
-					<x-tabs>
-						<x-ct label="CPU & RAM">
-							<x-nav
-								id=mm_deploy_procinfo_log
-								rowset_name=deploy_procinfo_log
+					</div>
+					<div vflex>
+						<x-tabs>
+							<x-ct label="CPU & RAM">
+								<x-nav
+									id=mm_deploy_procinfo_log
+									rowset_name=deploy_procinfo_log
+									param_nav_id=mm_deploys_grid params=deploy
+								>
+								</x-nav>
+								<x-form grid
+									id=mm_deploy_procinfo_log_charts
+									nav_id=mm_deploy_procinfo_log
+									>
+									<x-chart
+										text="CPU"
+										style="grid-area: cpu"
+										shape=area sum_cols="cpu_sys cpu" group_cols=clock
+										min_sum=0 max_sum=1
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="RAM"
+										style="grid-area: ram"
+										shape=area sum_cols="rss ram_free..ram_size" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Strings"
+										style="grid-area: strings"
+										shape=area sum_cols="strings" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Tables"
+										style="grid-area: tables"
+										shape=area sum_cols="tables" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Cdata"
+										style="grid-area: cdata"
+										shape=area sum_cols="cdata" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Threads"
+										style="grid-area: threads"
+										shape=area sum_cols="threads" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Userdata"
+										style="grid-area: udata"
+										shape=area sum_cols="udata" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Traces"
+										style="grid-area: traces"
+										shape=area sum_cols="traces" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Aborted Traces"
+										style="grid-area: aborted_traces"
+										shape=area sum_cols="aborted_traces" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="MCode Size"
+										style="grid-area: mcode_size"
+										shape=area sum_cols="mcode_size" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+								</x-form>
+							</x-ct>
+							<x-grid label="Live Objects"
+								id=mm_deploy_livelist_grid
+								rowset_name=deploy_livelist
 								param_nav_id=mm_deploys_grid params=deploy
 							>
-							</x-nav>
-							<x-form grid
-								id=mm_deploy_procinfo_log_charts
-								nav_id=mm_deploy_procinfo_log
-								>
-								<x-chart
-									text="CPU"
-									style="grid-area: cpu"
-									shape=area sum_cols="cpu_sys cpu" group_cols=clock
-									min_sum=0 max_sum=1
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="RAM"
-									style="grid-area: ram"
-									shape=area sum_cols="rss ram_free..ram_size" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="Strings"
-									style="grid-area: strings"
-									shape=area sum_cols="strings" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="Tables"
-									style="grid-area: tables"
-									shape=area sum_cols="tables" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="Cdata"
-									style="grid-area: cdata"
-									shape=area sum_cols="cdata" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="Threads"
-									style="grid-area: threads"
-									shape=area sum_cols="threads" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="Userdata"
-									style="grid-area: udata"
-									shape=area sum_cols="udata" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="Traces"
-									style="grid-area: traces"
-									shape=area sum_cols="traces" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="Aborted Traces"
-									style="grid-area: aborted_traces"
-									shape=area sum_cols="aborted_traces" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-								<x-chart
-									text="MCode Size"
-									style="grid-area: mcode_size"
-									shape=area sum_cols="mcode_size" group_cols=clock
-									min_sum=0
-									min_val=-60 max_val=0
-								></x-chart>
-							</x-form>
-						</x-ct>
-						<x-grid label="Live Objects"
-							id=mm_deploy_livelist_grid
-							rowset_name=deploy_livelist
-							param_nav_id=mm_deploys_grid params=deploy
-						>
-						</x-grid>
-						<x-vsplit fixed_side=second label="Live Log">
-							<x-grid
-								id=mm_deploy_log_grid
-								rowset_name=deploy_log
-								param_nav_id=mm_deploys_grid params=deploy
-							></x-grid>
-							<x-textarea mono nav_id=mm_deploy_log_grid col=message></x-textarea>
-						</x-vsplit>
-						<x-vsplit label="Profiler"
-							fixed_side=first fixed_size=null resizeable=false
-							class=mm-profiler-split
-						>
-							<x-ct>
-								<x-button
-									bare
-									icon="fa fa-circle"
-									id=mm_deploy_profiler_start_button
-									nav_id=mm_deploys_grid
-									text="{{#profiler_started}}Stop{{/profiler_started}}{{^profiler_started}}Start{{/profiler_started}}"
-								></x-button>
-								<x-button
-									bare
-									icon="fa-solid fa-gauge-high"
-									id=mm_deploy_jit_onoff_button
-									nav_id=mm_deploys_grid
-									text="{{#jit_on}}JIT off{{/jit_on}}{{^jit_on}}JIT on{{/jit_on}}"
-									title="Turn JIT on and off"
-								></x-button>
-								<x-button
-									bare
-									icon="fa fa-recycle"
-									id=mm_deploy_collectgarbage_button
-									nav_id=mm_deploys_grid
-									text="GC"
-									title="Do a Full Garbage Collection Sweep"
-								></x-button>
-							</x-ct>
-							<x-ct>
-								<x-nav
-									id=mm_deploy_profiler_nav
-									rowset_name=deploy_profiler_output
+							</x-grid>
+							<x-vsplit fixed_side=second label="Live Log">
+								<x-grid
+									id=mm_deploy_log_grid
+									rowset_name=deploy_log
 									param_nav_id=mm_deploys_grid params=deploy
-								></x-nav>
-								<x-textarea col=output nav_id=mm_deploy_profiler_nav></x-textarea>
-							</x-ct>
-						</x-vsplit>
-						<x-grid label="MySQL Stats"
-							rowset_name=deploy_mysql_stats
-							param_nav_id=mm_deploys_grid params=deploy
-						>
-						</x-grid>
-						<x-tabs label="Deploy Backups">
-							<x-vsplit label="Backups" fixed_side=second>
-								<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
-									<x-grid
-										id=mm_deploy_backups_grid
-										rowset_name=deploy_backups
-										param_nav_id=mm_deploys_grid params=deploy
-									></x-grid>
-									<x-form>
-										<x-button icon="fa fa-compact-disc"
-											action_name=deploy_backup
-											nav_id=mm_deploys_grid
-											text="Backup {{deploy}}"
-										></x-button>
-									</x-form>
-								</x-vsplit>
-								<x-tabs>
-									<x-grid label="Backup Copies"
-										id=mm_deploy_backup_copies_grid
-										rowset_name=deploy_backup_copies
-										param_nav_id=mm_deploy_backups_grid params=dbk
-									></x-grid>
-								</x-tabs>
+								></x-grid>
+								<x-textarea mono nav_id=mm_deploy_log_grid col=message></x-textarea>
 							</x-vsplit>
-							<x-form id=mm_deploy_backups_scheduling_form nav_id=mm_deploys_grid label="Scheduling" grid>
-								<x-input col=backup_active       ></x-input>
-								<x-input col=backup_start_hours  ></x-input>
-								<x-input col=backup_run_every    ></x-input>
-								<x-input col=backup_remove_older_than ></x-input>
-							</x-form>
-							<x-grid
-								label="Keeping Copies"
-								rowset_name=deploy_backup_copy_machines
+							<x-vsplit label="Profiler"
+								fixed_side=first fixed_size=null resizeable=false
+								class=mm-profiler-split
+							>
+								<x-ct>
+									<x-button
+										bare
+										icon="fa fa-circle"
+										id=mm_deploy_profiler_start_button
+										nav_id=mm_deploys_grid
+										text="{{#profiler_started}}Stop{{/profiler_started}}{{^profiler_started}}Start{{/profiler_started}}"
+									></x-button>
+								</x-ct>
+								<x-ct>
+									<x-nav
+										id=mm_deploy_profiler_output_nav
+										rowset_name=deploy_profiler_output
+										param_nav_id=mm_deploys_grid params=deploy
+									></x-nav>
+									<x-textarea col=profiler_output nav_id=mm_deploy_profiler_output_nav></x-textarea>
+								</x-ct>
+							</x-vsplit>
+							<x-split label="Scripts" id=mm_scripts_split>
+								<x-grid
+									id=mm_scripts_grid
+									rowset_name=scripts
+									header_visible=false
+									auto_cols_w=true
+								>
+								</x-grid>
+								<x-vsplit
+									fixed_side=first fixed_size=null resizeable=false
+									id=mm_script_output_split
+									class=mm-profiler-split
+								>
+									<x-ct>
+										<x-button
+											bare
+											icon="fa fa-play"
+											id=mm_deploy_eval_button
+											nav_id=mm_scripts_grid
+											text="Run"
+										></x-button>
+										<x-mu nav_id=mm_deploys_grid>
+											on {{deploy}}
+										</x-mu>
+									</x-ct>
+									<x-ct>
+										<x-textarea mono nav_id=mm_scripts_grid col=code
+											id=mm_deploy_eval_script_textarea></x-textarea>
+										<x-nav
+											id=mm_deploy_eval_result_nav
+											rowset_name=deploy_eval_result
+											param_nav_id=mm_deploys_grid params=deploy
+										>
+										</x-nav>
+										<x-textarea mono col=eval_result nav_id=mm_deploy_eval_result_nav></x-textarea>
+									</x-ct>
+								</x-vsplit>
+							</x-split>
+							<x-grid label="MySQL Stats"
+								rowset_name=deploy_mysql_stats
 								param_nav_id=mm_deploys_grid params=deploy
-							></x-grid>
+							>
+							</x-grid>
+							<x-tabs label="Deploy Backups">
+								<x-vsplit label="Backups" fixed_side=second>
+									<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
+										<x-grid
+											id=mm_deploy_backups_grid
+											rowset_name=deploy_backups
+											param_nav_id=mm_deploys_grid params=deploy
+										></x-grid>
+										<x-form>
+											<x-button icon="fa fa-compact-disc"
+												action_name=deploy_backup
+												nav_id=mm_deploys_grid
+												text="Backup {{deploy}}"
+											></x-button>
+										</x-form>
+									</x-vsplit>
+									<x-tabs>
+										<x-grid label="Backup Copies"
+											id=mm_deploy_backup_copies_grid
+											rowset_name=deploy_backup_copies
+											param_nav_id=mm_deploy_backups_grid params=dbk
+										></x-grid>
+									</x-tabs>
+								</x-vsplit>
+								<x-form id=mm_deploy_backups_scheduling_form nav_id=mm_deploys_grid label="Scheduling" grid>
+									<x-input col=backup_active       ></x-input>
+									<x-input col=backup_start_hours  ></x-input>
+									<x-input col=backup_run_every    ></x-input>
+									<x-input col=backup_remove_older_than ></x-input>
+								</x-form>
+								<x-grid
+									label="Keeping Copies"
+									rowset_name=deploy_backup_copy_machines
+									param_nav_id=mm_deploys_grid params=deploy
+								></x-grid>
+							</x-tabs>
+							<x-split label="Ops" style="max-width: 600px">
+								<x-listbox id=mm_ops_listbox>
+									<div action=remove_deploy>Remove deployment</div>
+									<div action=rename_deploy>Rename deployment</div>
+								</x-listbox>
+								<x-switcher nav_id=mm_ops_listbox>
+									<div action=remove_deploy class="x-container x-form" style="padding: 0 1em 1em 1em">
+										<h2>Remove Deployment</h2>
+										<p>
+											Remove the deployment from the machine completely.
+											The deployment remains in the database so the app can be
+											redeployed again on the same machine or on a different one,
+											and the app data can be restored from a backup.
+											You do have a backup, right?
+										</p>
+										<x-button icon="fa fa-trash" area=remdep danger
+											action_name=deploy_remove
+											text="Remove Deployment"
+											confirm="Are you sure you want to remove the deployment?"
+										></x-button>
+									</div>
+									<div action=rename_deploy class="x-container x-form" style="padding: 0 1em 1em 1em">
+										<h2>Rename Deployment</h2>
+										<p>
+											Renaming a deployment is a complex operation,
+											involving renaming
+											the Linux user account the deployment is on and also the
+											MySQL database which is itself a complex operation.
+											None of this is transactional, so if anything breaks
+											in the middle, you're left to pick up the pieces.
+											Also, you need to stop the app first, and restart it
+											after the renaming is done. Oh, and you can't mess with
+											the server while the rename is in progress, obviously.
+											The good news is, this should only take a few seconds
+											since all the tables and files are moved, not copied.
+										</p>
+										<x-textedit id=deploy_rename_new_name_edit nav_id=mm_deploys_grid col=deploy></x-textedit>
+										<x-button area=rendep danger action_name=deploy_rename
+											text="Rename Deployment"
+											confirm="Are you sure you want to rename the deployment?"
+										></x-button>
+									</div>
+								</x-switcher>
+							</x-split>
 						</x-tabs>
-						<x-split label="Ops" style="max-width: 600px">
-							<x-listbox id=mm_ops_listbox>
-								<div action=remove_deploy>Remove deployment</div>
-								<div action=rename_deploy>Rename deployment</div>
-							</x-listbox>
-							<x-switcher nav_id=mm_ops_listbox>
-								<div action=remove_deploy class="x-container x-form" style="padding: 0 1em 1em 1em">
-									<h2>Remove Deployment</h2>
-									<p>
-										Remove the deployment from the machine completely.
-										The deployment remains in the database so the app can be
-										redeployed again on the same machine or on a different one,
-										and the app data can be restored from a backup.
-										You do have a backup, right?
-									</p>
-									<x-button icon="fa fa-trash" area=remdep danger
-										action_name=deploy_remove
-										text="Remove Deployment"
-										confirm="Are you sure you want to remove the deployment?"
-									></x-button>
-								</div>
-								<div action=rename_deploy class="x-container x-form" style="padding: 0 1em 1em 1em">
-									<h2>Rename Deployment</h2>
-									<p>
-										Renaming a deployment is a complex operation,
-										involving renaming
-										the Linux user account the deployment is on and also the
-										MySQL database which is itself a complex operation.
-										None of this is transactional, so if anything breaks
-										in the middle, you're left to pick up the pieces.
-										Also, you need to stop the app first, and restart it
-										after the renaming is done. Oh, and you can't mess with
-										the server while the rename is in progress, obviously.
-										The good news is, this should only take a few seconds
-										since all the tables and files are moved, not copied.
-									</p>
-									<x-textedit id=deploy_rename_new_name_edit nav_id=mm_deploys_grid col=deploy></x-textedit>
-									<x-button area=rendep danger action_name=deploy_rename
-										text="Rename Deployment"
-										confirm="Are you sure you want to rename the deployment?"
-									></x-button>
-								</div>
-							</x-switcher>
-						</x-split>
-					</x-tabs>
+						<div flex style="border-top: 1px solid var(--x-border-light);">
+							<x-button
+								bare
+								icon="fa-solid fa-gauge-high"
+								id=mm_deploy_jit_onoff_button
+								nav_id=mm_deploys_grid
+								text="{{#jit_on}}JIT off{{/jit_on}}{{^jit_on}}JIT on{{/jit_on}}"
+								title="Turn JIT on and off"
+							></x-button>
+							<x-button
+								bare
+								icon="fa fa-recycle"
+								id=mm_deploy_collectgarbage_button
+								nav_id=mm_deploys_grid
+								text="GC"
+								title="Do a Full Garbage Collection Sweep"
+							></x-button>
+						</div>
+					</div>
 				</x-split>
 			</x-split>
 			<x-tabs>

@@ -68,6 +68,7 @@ function machine_backup() {
 
 function deploy_action(action, ...args) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
+	pr(deploy, action, ...args)
 	mm_api[action](deploy, ...args)
 	return false
 }
@@ -275,7 +276,7 @@ on('mm_deploy_livelist_grid.bind', function(e, on) {
 			let pv0 = e.param_vals && e.param_vals[0]
 			let deploy = pv0 && pv0.deploy
 			if (deploy)
-				post(['poll-livelist', deploy])
+				post(['log-livelist', deploy])
 		})
 	} else if (get_livelist_timer) {
 		clearInterval(get_livelist_timer)
@@ -291,16 +292,16 @@ on('mm_deploy_profiler_start_button.init', function(e) {
 	}
 	e.do_after('do_update_row', function(row) {
 		e.xoff()
-		started = e.val('profiler_started')
+		started = row && e.val('profiler_started')
 		e.icon = started ? 'fa fa-stop' : 'fa fa-circle'
-		e.disable('not_live', e.val('status') != 'live')
+		e.disable('not_live', !row || e.val('status') != 'live')
 		e.xon()
 	})
 })
 
 on('mm_deploy_collectgarbage_button.init', function(e) {
 	e.do_after('do_update_row', function(row) {
-		e.disable('not_live', e.val('status') != 'live')
+		e.disable('not_live', !row || e.val('status') != 'live')
 	})
 })
 
@@ -315,9 +316,14 @@ on('mm_deploy_jit_onoff_button.init', function(e) {
 	}
 	e.do_after('do_update_row', function(row) {
 		e.xoff()
-		jit_on = e.val('jit_on')
+		jit_on = row && e.val('jit_on')
 		e.icon = jit_on ? 'fa-solid fa-gauge-high' : 'fa-solid fa-gauge'
-		e.disable('not_live', e.val('status') != 'live')
+		e.disable('not_live', !row || e.val('status') != 'live')
 		e.xon()
 	})
 })
+
+function mm_deploy_eval_button_action() {
+	let s = mm_deploy_eval_script_textarea.input_val
+	deploy_action('deploy_rpc', 'eval', s)
+}
