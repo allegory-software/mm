@@ -5,7 +5,7 @@
 	border-bottom: 1px solid var(--x-smoke);
 	align-items: center;
 	justify-content: space-between;
-	padding: 0 .5em;
+	padding: .5em;
 	min-height: calc(var(--x-grid-header-height) + 1px);
 }
 
@@ -399,6 +399,11 @@ textarea.x-editbox-input[console] {
 								></x-grid>
 								<x-textarea mono nav_id=mm_deploy_log_grid col=message></x-textarea>
 							</x-vsplit>
+							<x-grid label="Env Vars"
+								id=mm_deploy_env_grid
+								param_nav_id=mm_deploys_grid params=deploy
+								rowset_name=deploy_env
+							></x-grid>
 							<x-vsplit label="Profiler"
 								fixed_side=first fixed_size=null resizeable=false
 								class=mm-profiler-split

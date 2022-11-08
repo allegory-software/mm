@@ -68,7 +68,6 @@ function machine_backup() {
 
 function deploy_action(action, ...args) {
 	let deploy = mm_deploys_grid.focused_row_cell_val('deploy')
-	pr(deploy, action, ...args)
 	mm_api[action](deploy, ...args)
 	return false
 }
@@ -276,7 +275,7 @@ on('mm_deploy_livelist_grid.bind', function(e, on) {
 			let pv0 = e.param_vals && e.param_vals[0]
 			let deploy = pv0 && pv0.deploy
 			if (deploy)
-				post(['log-livelist', deploy])
+				mm_api.deploy_rpc(deploy, 'get_livelist')
 		})
 	} else if (get_livelist_timer) {
 		clearInterval(get_livelist_timer)
@@ -321,6 +320,19 @@ on('mm_deploy_jit_onoff_button.init', function(e) {
 		e.disable('not_live', !row || e.val('status') != 'live')
 		e.xon()
 	})
+})
+
+function deploy_env_grid_params_changed() {
+	let pv = this.param_vals
+	let deploy = pv && pv[0] && pv[0].deploy
+	if (deploy)
+		mm_api.deploy_rpc(deploy, 'get_env')
+}
+
+on('mm_deploy_env_grid.bind', function(e, on) {
+	e.on('params_changed', deploy_env_grid_params_changed, on)
+	if (on)
+		deploy_env_grid_params_changed.call(e)
 })
 
 function mm_deploy_eval_button_action() {

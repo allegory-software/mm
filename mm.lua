@@ -152,7 +152,7 @@ local function mm_schema()
 		synced       , bool0,
 	}
 
-	tables.deploy_vars = {
+	tables.deploy_vars = { --env vars
 		deploy , strid, not_null,
 		name   , strid, not_null, pk,
 		val    , text, not_null,
@@ -1182,19 +1182,12 @@ end
 mm.shlib = {} --{name->code}
 setmetatable(mm.shlib, {__index = load_shfile})
 
-function mm.sh_preprocess(vars)
-	return mustache.render(s, vars, nil, nil, nil, nil, cmdline_escape_unix)
-end
-
-function mm.sh_script(s, env, pp_env, included)
+function mm.sh_script(s, env, included)
 	included = included or {}
-	if type(s) == 'function' then
-		s = s(env)
-	end
-	s = s:gsub('\r\n', '\n')
+	s = call(s):gsub('\r\n', '\n')
 	local function include_one(s)
 		local s = assertf(mm.shlib[s], 'no script: %s', s)
-		return mm.sh_script(s, nil, pp_env, included)
+		return mm.sh_script(s, nil, included)
 	end
 	local function include(s)
 		local t = {}
@@ -1222,11 +1215,7 @@ function mm.sh_script(s, env, pp_env, included)
 	s = s:gsub( '^[ \t]*#use[ \t]+([^#\r\n]+)', use)
 	s = s:gsub('\n[ \t]*#use[ \t]+([^#\r\n]+)', use_lf)
 	s = env and cmdline_quote_vars(env, nil, 'unix')..'\n'..s or s
-	if pp_env then
-		return mm.sh_preprocess(s, pp_env)
-	else
-		return s
-	end
+	return s
 end
 
 --remote sh scripts with stdin injection -------------------------------------
@@ -1243,7 +1232,7 @@ function mm.ssh_sh(md, script, script_env, opt)
 		VERBOSE = repl(threadenv().verbose , false),
 	}, script_env)
 	local script_s = script:outdent()
-	local s = mm.sh_script(script_s, script_env, opt.pp_env)
+	local s = mm.sh_script(script_s, script_env)
 	opt.stdin = '{\n'..s..'\n}; exit'..(opt.stdin or '')
 	if logging.debug then
 		log('', 'mm', 'ssh-sh', '%s %s %s', md, script_s:trim(), script_env)
@@ -2128,6 +2117,9 @@ function mm.log_server(machine)
 					elseif msg.k == 'eval_result' then
 						--TODO: filter this on deploy
 						rowset_changed'deploy_eval_result'
+					elseif msg.k == 'env' then
+						--TODO: filter this on deploy
+						rowset_changed'deploy_env'
 					end
 				else
 					queue_push(mm.deploy_logs, deploy, msg)
@@ -2174,11 +2166,6 @@ function api.deploy_rpc(opt, deploy, ...)
 	end
 	chan:send(pack(...))
 	return true
-end
-
-function action.log_livelist(deploy)
-	allow(usr'roles'.admin)
-	mm.deploy_rpc(deploy, 'log_livelist')
 end
 
 rowset.deploy_log = virtual_rowset(function(self)
@@ -2258,7 +2245,7 @@ rowset.deploy_livelist = virtual_rowset(function(self)
 	end
 end)
 
-local function deploy_state_var_rowset(varname)
+local function deploy_state_var_rowset(varname, transform)
 	return virtual_rowset(function(self)
 		self.allow = 'admin'
 		self.fields = {
@@ -2272,19 +2259,21 @@ local function deploy_state_var_rowset(varname)
 			for _,deploy in ipairs(deploys) do
 				local vars = mm.deploy_state_vars[deploy]
 				local s = vars and vars[varname]
-				add(rs.rows, {deploy, s or ''})
+				add(rs.rows, {deploy, s and transform(s) or ''})
 			end
 		end
 	end)
 end
 
-rowset.deploy_profiler_output = deploy_state_var_rowset'profiler_output'
-rowset.deploy_eval_result     = deploy_state_var_rowset'eval_result'
+rowset.deploy_profiler_output = deploy_state_var_rowset('profiler_output', pass)
+rowset.deploy_eval_result     = deploy_state_var_rowset('eval_result', function(t)
+	return cat(imap(t, tostring), '\n\n')
+end)
 
 rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
-		{name = 'deploy'},
+		{name = 'deploy'         , 'strid'      , },
 		{name = 'clock'          , 'double'     , },
 		{name = 'cpu'            , 'percent_int', text = 'CPU'},
 		{name = 'cpu_sys'        , 'percent_int', text = 'CPU (kernel)'},
@@ -2354,6 +2343,32 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 							stime0 = t.stime
 							clock0 = clock
 						end
+					end
+				end
+			end
+		end
+	end
+end)
+
+rowset.deploy_env = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'deploy'         , 'strid'      , },
+		{name = 'name'           , 'text'       , },
+		{name = 'val'            , 'text'       , },
+	}
+	self.pk = 'deploy name'
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local deploys = params['param:filter']
+		if deploys then
+			local now = time()
+			for _, deploy in ipairs(deploys) do
+				local vars = mm.deploy_state_vars[deploy]
+				local env = vars and vars.env
+				if env then
+					for k,v in sortedpairs(env) do
+						add(rs.rows, {deploy, k, v})
 					end
 				end
 			end
