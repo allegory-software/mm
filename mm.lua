@@ -2249,8 +2249,8 @@ local function deploy_state_var_rowset(varname, transform)
 	return virtual_rowset(function(self)
 		self.allow = 'admin'
 		self.fields = {
-			{name = 'deploy'},
-			{name = varname},
+			{name = 'deploy', 'strid' , },
+			{name = varname , 'text'  , },
 		}
 		self.pk = 'deploy'
 		function self:load_rows(rs, params)
