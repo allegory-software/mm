@@ -78,9 +78,11 @@ textarea.x-editbox-input[console] {
 
 #mm_deploy_procinfo_log_charts.maxcols1 {
 	grid-template-areas:
-		"cpu      cpu    ram             ram"
-		"strings  tables cdata           threads"
-		"udata    traces aborted_traces  mcode_size"
+	/*  123456789012345-123456789012345-123456789012345-123456789012345- */
+		"cpu             cpu             ram             lua_heap        "
+		"lua_freed       lua_allocated   strings         tables          "
+		"functions       cdata           threads         udata           "
+		"traces          aborted_traces  snap_restores   mcode_size      "
 	;
 }
 
@@ -328,6 +330,27 @@ textarea.x-editbox-input[console] {
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
+										text="Lua Heap"
+										style="grid-area: lua_heap"
+										shape=area sum_cols="lua_heap" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Lua Freed"
+										style="grid-area: lua_freed"
+										shape=area sum_cols="lua_freed" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Lua Allocated"
+										style="grid-area: lua_allocated"
+										shape=area sum_cols="lua_allocated" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
 										text="Strings"
 										style="grid-area: strings"
 										shape=area sum_cols="strings" group_cols=clock
@@ -338,6 +361,13 @@ textarea.x-editbox-input[console] {
 										text="Tables"
 										style="grid-area: tables"
 										shape=area sum_cols="tables" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Functions"
+										style="grid-area: functions"
+										shape=area sum_cols="functions" group_cols=clock
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
@@ -373,6 +403,13 @@ textarea.x-editbox-input[console] {
 										text="Aborted Traces"
 										style="grid-area: aborted_traces"
 										shape=area sum_cols="aborted_traces" group_cols=clock
+										min_sum=0
+										min_val=-60 max_val=0
+									></x-chart>
+									<x-chart
+										text="Snapshot Restores"
+										style="grid-area: snap_restores"
+										shape=area sum_cols="snap_restores" group_cols=clock
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
@@ -444,7 +481,7 @@ textarea.x-editbox-input[console] {
 											bare
 											icon="fa fa-play"
 											id=mm_deploy_eval_button
-											nav_id=mm_scripts_grid
+											nav_id=mm_deploys_grid
 											text="Run"
 										></x-button>
 										<x-mu nav_id=mm_deploys_grid>
@@ -566,6 +603,14 @@ textarea.x-editbox-input[console] {
 								nav_id=mm_deploys_grid
 								text="GC"
 								title="Do a Full Garbage Collection Sweep"
+							></x-button>
+							<x-button
+								bare
+								icon="fa fa-0"
+								id=mm_deploy_reset_counts_button
+								nav_id=mm_deploys_grid
+								text="Reset Counts"
+								title="Reset Counts"
 							></x-button>
 						</div>
 					</div>

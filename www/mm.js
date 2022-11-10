@@ -322,20 +322,30 @@ on('mm_deploy_jit_onoff_button.init', function(e) {
 	})
 })
 
-function deploy_env_grid_params_changed() {
+on('mm_deploy_reset_counts_button.init', function(e, on) {
+	e.do_after('do_update_row', function(row) {
+		e.disable('not_live', !(row && e.val('status') == 'live'))
+	})
+})
+function mm_deploy_reset_counts_button_action() {
+	mm_api.deploy_rpc(this.val('deploy'), 'reset_counts')
+}
+
+function mm_deploy_env_grid_params_changed() {
 	let pv = this.param_vals
 	let deploy = pv && pv[0] && pv[0].deploy
 	if (deploy)
 		mm_api.deploy_rpc(deploy, 'get_env')
 }
-
 on('mm_deploy_env_grid.bind', function(e, on) {
-	e.on('params_changed', deploy_env_grid_params_changed, on)
+	e.on('params_changed', mm_deploy_env_grid_params_changed, on)
 	if (on)
 		deploy_env_grid_params_changed.call(e)
 })
 
 function mm_deploy_eval_button_action() {
 	let s = mm_deploy_eval_script_textarea.input_val
-	deploy_action('deploy_rpc', 'eval', s)
+	let deploy = this.val('deploy')
+	if (s)
+		mm_api.deploy_rpc(deploy, 'eval', s)
 }
