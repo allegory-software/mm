@@ -26,10 +26,15 @@ FEATURES
 	- machine prepare script (one-time install script for a new machine).
 	- scheduled tasks.
 	- app control: deploy, start, stop, restart.
-	- remote logging with:
-		- log capturing,
-		- live objects list,
-		- CPU/RAM monitoring.
+	- live monitoring:
+		- CPU, RAM, Lua allocations and object counts
+		- log capturing
+		- live objects list
+		- env vars list
+		- Lua profiler
+		- running Lua scripts
+		- MySQL stats
+		- controlling Lua JIT and GC.
 	- db & file backups:
 		- MySQL: incremental, per-server, with xtrabackup.
 		- MySQL: non-incremental, per-db, with mysqldump.
@@ -40,7 +45,7 @@ FEATURES
 	- https proxy with automatic SSL certificate issuing and updating.
 
 LIMITATIONS
-	- the machines need to run Linux (Debian 10) and have a public IP.
+	- the machines need to run Linux (Debian 10+) and have a public IP.
 	- single shared MySQL server instance for all deployments on a machine.
 	- one MySQL DB per deployment.
 	- one global SSH key for root access on all machines.
@@ -486,6 +491,9 @@ end)
 --task system ----------------------------------------------------------------
 
 local function mm_task_init(self)
+	if not server_running then
+		self.free_after = 0
+	end
 	if self.visible then
 		rowset_changed'running_tasks'
 		self:on('event', function(self, ev, source, ...)
