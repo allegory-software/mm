@@ -1,4 +1,4 @@
---go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -v run
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --[[
@@ -157,10 +157,22 @@ local function mm_schema()
 		synced       , bool0,
 	}
 
-	tables.deploy_vars = { --env vars
-		deploy , strid, not_null,
-		name   , strid, not_null, pk,
-		val    , text, not_null,
+	tables.env_var = {
+		tag     , strid, not_null,
+		env_var , strid, not_null, pk,
+		val     , text , not_null,
+	}
+
+	tables.deploy_env_var = { aka'deploy_vars',
+		deploy  , strid, not_null, fk,
+		env_var , strid, not_null, pk, aka'name',
+		val     , text , not_null,
+	}
+
+	tables.deploy_env_var_tag = {
+		deploy  , strid, not_null, fk,
+		tag     , strid, not_null, pk,
+		pos     , pos  , not_null,
 	}
 
 	tables.deploy_log = {
@@ -331,7 +343,7 @@ action['api.txt'] = function(action, ...)
 	allow(usr'roles'.admin)
 	checkarg(method'post', 'try POST')
 	local handler = checkfound(mm_api[action:gsub('-', '_')], 'action not found: %s', action)
-	local post = repl(post(), '')
+	local post = repl(repl_nulls(post()), '')
 	checkarg(post == nil or istab(post))
 	--Args are passed to the API handler as `getarg1, ..., postarg1, ...`
 	--so you can pass args as GET or POST or a combination, the API won't know.
@@ -354,9 +366,10 @@ action['api.txt'] = function(action, ...)
 	local ok, ret = pcall(handler, opt, unpack(args))
 	if not ok then
 		local ret = tostring(ret)
-		log('ERROR', 'mm', 'api', '%s', ret)
-		out_term:notify_error('%s', ret)
+		log('ERROR', 'mm', 'api', '%s %s %s -> ERROR %s', action, opt, args, ret)
+		out_term:send_on('e', ret)
 	elseif ret ~= nil then
+		log('', 'mm', 'api', '%s %s %s -> %s', action, opt, args, ret)
 		out_term:send_on('r', json_encode(ret))
 	end
 	set_current_terminal(prev_term)
@@ -1298,7 +1311,7 @@ function mm.ssh_cli(opt, mds, cmd, ...)
 	local cmd = catany(' ', cmd, ...)
 	local bash_cmd = cmd and {'bash', '-c', "'"..cmd.."'"}
 	for _,md in ipairs(mds) do
-			local ip, m = mm.ip(md)
+		local ip, m = mm.ip(md)
 		if #mds > 1 then say('%s: `%s`', m, cmd) end
 		local task = mm.ssh(md, bash_cmd, {
 			allow_fail = true,
@@ -1804,6 +1817,42 @@ end)
 	deploy = checkarg(deploy, 'deploy required')
 
 	local vars = {}
+	local rows = {}
+
+	local function add_var(k, v, tag)
+		if vars[k] == nil then
+			vars[k] = v
+			add(rows, {deploy, k, v, tag})
+		end
+	end
+
+	for _,k,v in each_row_vals([[
+		select
+			env_var, val
+		from
+			deploy_env_var
+		where
+			deploy = ?
+	]], deploy) do
+		add_var(k, v, 'custom')
+	end
+
+	for _,k,v,tag in each_row_vals([[
+		select
+			v.env_var,
+			v.val,
+			v.tag
+		from
+			deploy_env_var_tag dt
+			inner join env_var v on v.tag = dt.tag
+		where
+			deploy = ?
+		order by
+			dt.pos
+	]], deploy) do
+		add_var(k, v, tag)
+	end
+
 	for k,v in pairs(checkfound(first_row([[
 		select
 			d.machine,
@@ -1822,28 +1871,15 @@ end)
 		where
 			deploy = ?
 	]], deploy), 'invalid deploy "%s"', deploy)) do
-		vars[k:upper()] = v
+		add_var(k:upper(), v, 'built-in')
 	end
 
 	new_deploy = new_deploy or deploy
-	vars.DEPLOY = new_deploy
-
 	checkarg(vars.MACHINE, 'Machine not set for deploy: %s', new_deploy)
+	add_var('DEPLOY', new_deploy, 'built-in')
+	add_var('DEPLOY_VARS', cat(keys(vars, true), ' '), 'built-in')
 
-	for _, name, val in each_row_vals([[
-		select
-			name, val
-		from
-			deploy_vars
-		where
-			deploy = ?
-	]], deploy) do
-		vars[name] = val
-	end
-
-	vars.DEPLOY_VARS = cat(keys(vars, true), ' ')
-
-	return vars, d
+	return vars, rows
 end
 
 function api.deploy(opt, deploy, app_ver, sdk_ver)
@@ -2282,7 +2318,7 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'deploy'         , 'strid'      , },
-		{name = 'clock'          , 'duration'   , },
+		{name = 'at'             , 'duration'   , },
 		{name = 'cpu'            , 'percent_int', text = 'CPU'},
 		{name = 'cpu_sys'        , 'percent_int', text = 'CPU (kernel)'},
 		{name = 'rss'            , 'filesize'   , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
@@ -2388,7 +2424,7 @@ rowset.machine_procinfo_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'machine'},
-		{name = 'clock'        , 'double'     , },
+		{name = 'at'           , 'double'     , },
 		{name = 'max_cpu'      , 'percent_int', text = 'Max CPU'},
 		{name = 'max_cpu_sys'  , 'percent_int', text = 'Max CPU (kernel)'},
 		{name = 'avg_cpu'      , 'percent_int', text = 'Avg CPU'},
@@ -2464,7 +2500,7 @@ rowset.machine_ram_log = virtual_rowset(function(self)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'machine'},
-		{name = 'clock'},
+		{name = 'at'},
 	}
 	self.pk = 'machine clock'
 	function self:load_rows(rs, params)
@@ -3911,29 +3947,120 @@ rowset.deploys = sql_rowset{
 	end,
 }
 
-rowset.deploy_vars = sql_rowset{
+rowset.env_vars = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			tag,
+			env_var,
+			val
+		from
+			env_var
+	]],
+	pk = 'tag env_var',
+	insert_row = function(self, row)
+		self:insert_into('env_var', row, 'tag env_var val')
+		rowset_changed'deploy_env_vars'
+	end,
+	update_row = function(self, row)
+		self:update_into('env_var', row, 'tag env_var val')
+		rowset_changed'deploy_env_vars'
+	end,
+	delete_row = function(self, row)
+		self:delete_from('env_var', row)
+		rowset_changed'deploy_env_vars'
+	end,
+}
+
+rowset.env_var_tags = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select tag from env_var group by tag
+	]],
+	pk = 'tag',
+}
+
+rowset.deploy_env_var_tags = sql_rowset{
 	allow = 'admin',
 	select = [[
 		select
 			deploy,
-			name,
+			tag,
+			pos
+		from
+			deploy_env_var_tag
+	]],
+	field_attrs = {
+		tag = {
+			lookup_rowset_name = 'env_var_tags',
+			lookup_cols = 'tag',
+		},
+	},
+	hide_cols = 'deploy',
+	where_all = 'deploy in (:param:filter)',
+	pk = 'deploy tag',
+	insert_row = function(self, row)
+		self:insert_into('deploy_env_var_tag', row, 'deploy tag pos')
+		rowset_changed'deploy_env_vars'
+	end,
+	update_row = function(self, row)
+		self:update_into('deploy_env_var_tag', row, 'tag pos')
+		rowset_changed'deploy_env_vars'
+	end,
+	delete_row = function(self, row)
+		self:delete_from('deploy_env_var_tag', row)
+		rowset_changed'deploy_env_vars'
+	end,
+}
+
+rowset.deploy_custom_env_vars = sql_rowset{
+	allow = 'admin',
+	select = [[
+		select
+			deploy,
+			env_var,
 			val
 		from
-			deploy_vars
+			deploy_env_var
 	]],
 	hide_cols = 'deploy',
 	where_all = 'deploy in (:param:filter)',
-	pk = 'deploy name',
+	pk = 'deploy env_var',
 	insert_row = function(self, row)
-		self:insert_into('deploy_vars', row, 'deploy name val')
+		self:insert_into('deploy_env_var', row, 'deploy env_var val')
+		rowset_changed'deploy_env_vars'
 	end,
 	update_row = function(self, row)
-		self:update_into('deploy_vars', row, 'name val')
+		self:update_into('deploy_env_var', row, 'env_var val')
+		rowset_changed'deploy_env_vars'
 	end,
 	delete_row = function(self, row)
-		self:delete_from('deploy_vars', row)
+		self:delete_from('deploy_env_var', row)
+		rowset_changed'deploy_env_vars'
 	end,
 }
+
+rowset.deploy_env_vars = virtual_rowset(function(self)
+	self.allow = 'admin'
+	self.fields = {
+		{name = 'deploy' , },
+		{name = 'env_var', },
+		{name = 'val'    , },
+		{name = 'source' , },
+	}
+	self.pk = 'deploy env_var'
+	self.hide_cols = 'deploy'
+	function self:load_rows(rs, params)
+		rs.rows = {}
+		local deploys = params['param:filter']
+		if deploys then
+			for _, deploy in ipairs(deploys) do
+				local _,rows = deploy_vars(deploy)
+				extend(rs.rows, rows)
+			end
+		end
+	end
+end)
 
 rowset.deploy_backup_copy_machines = sql_rowset{
 	allow = 'admin',

@@ -112,12 +112,16 @@ textarea.x-editbox-input[console] {
 			<div action=deploys>Deployments</div>
 			<div action=machines>Machines</div>
 			<div action=providers>VPS Hosting</div>
+			<div action=env_vars>Env Vars</div>
 			<div action=git_hosting>Git Hosting</div>
 			<div action=config>Configuration</div>
 		</x-listbox>
 	</div>
 	<x-vsplit fixed_side=second fixed_size=360 id=mm_main_split>
 		<x-switcher nav_id=mm_actions_listbox>
+			<x-grid action=env_vars
+				id=mm_env_vars_grid rowset_name=env_vars
+			></x-grid>
 			<x-split action=git_hosting fixed_size=300>
 				<x-grid id=mm_git_hosting_grid rowset_name=git_hosting></x-grid>
 				<x-form nav_id=mm_git_hosting_grid id=mm_git_hosting_form>
@@ -144,21 +148,21 @@ textarea.x-editbox-input[console] {
 						<div flex>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
-								shape=area sum_cols="max_cpu_sys max_cpu avg_cpu_sys avg_cpu" group_cols=clock
+								shape=area sum_cols="max_cpu_sys max_cpu avg_cpu_sys avg_cpu" group_cols=at
 								min_sum=0 max_sum=1
 								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
-								shape=area sum_cols="ram_used ram_size" group_cols=clock
+								shape=area sum_cols="ram_used ram_size" group_cols=at
 								min_sum=0 max_sum=4294967296
 								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
 								nav_id=mm_machine_procinfo_log_nav
-								shape=area sum_cols="hdd_used hdd_size" group_cols=clock
+								shape=area sum_cols="hdd_used hdd_size" group_cols=at
 								min_sum=0 max_sum=107374182400
 								min_val=-60 max_val=0
 							>
@@ -263,12 +267,34 @@ textarea.x-editbox-input[console] {
 								<x-input col=ctime                 ></x-input>
 								<x-input col=mtime                 ></x-input>
 							</x-form>
-							<x-grid
-								id=mm_deploy_vars_grid
-								label="Custom Vars"
-								param_nav_id=mm_deploys_grid params=deploy
-								rowset_name=deploy_vars
-							></x-grid>
+							<x-vsplit label="Env Vars">
+								<x-split fixed_size=120>
+									<x-tabs>
+										<x-grid
+											id=mm_deploy_env_var_tags_grid
+											label="Env Var Tags"
+											param_nav_id=mm_deploys_grid params=deploy
+											rowset_name=deploy_env_var_tags
+										></x-grid>
+									</x-tabs>
+									<x-tabs>
+										<x-grid
+											id=mm_deploy_custom_vars_grid
+											label="Custom Env Vars"
+											param_nav_id=mm_deploys_grid params=deploy
+											rowset_name=deploy_custom_env_vars
+										></x-grid>
+									</x-tabs>
+								</x-split>
+								<x-tabs>
+									<x-grid
+										id=mm_deploy_vars_grid
+										label="Final Env Vars"
+										param_nav_id=mm_deploys_grid params=deploy
+										rowset_name=deploy_env_vars
+									></x-grid>
+								</x-tabs>
+							</x-vsplit>
 						</x-tabs>
 						<x-form id=mm_deploy_buttons_form grid>
 							<x-button
@@ -318,105 +344,105 @@ textarea.x-editbox-input[console] {
 									<x-chart
 										text="CPU"
 										style="grid-area: cpu"
-										shape=area sum_cols="cpu_sys cpu" group_cols=clock
+										shape=area sum_cols="cpu_sys cpu" group_cols=at
 										min_sum=0 max_sum=1
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="RAM"
 										style="grid-area: ram"
-										shape=area sum_cols="rss ram_free..ram_size" group_cols=clock
+										shape=area sum_cols="rss ram_free..ram_size" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Lua Heap"
 										style="grid-area: lua_heap"
-										shape=area sum_cols="lua_heap" group_cols=clock
+										shape=area sum_cols="lua_heap" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Lua Freed"
 										style="grid-area: lua_freed"
-										shape=area sum_cols="lua_freed" group_cols=clock
+										shape=area sum_cols="lua_freed" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Lua Allocated"
 										style="grid-area: lua_allocated"
-										shape=area sum_cols="lua_allocated" group_cols=clock
+										shape=area sum_cols="lua_allocated" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Strings"
 										style="grid-area: strings"
-										shape=area sum_cols="strings" group_cols=clock
+										shape=area sum_cols="strings" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Tables"
 										style="grid-area: tables"
-										shape=area sum_cols="tables" group_cols=clock
+										shape=area sum_cols="tables" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Functions"
 										style="grid-area: functions"
-										shape=area sum_cols="functions" group_cols=clock
+										shape=area sum_cols="functions" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Cdata"
 										style="grid-area: cdata"
-										shape=area sum_cols="cdata" group_cols=clock
+										shape=area sum_cols="cdata" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Threads"
 										style="grid-area: threads"
-										shape=area sum_cols="threads" group_cols=clock
+										shape=area sum_cols="threads" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Userdata"
 										style="grid-area: udata"
-										shape=area sum_cols="udata" group_cols=clock
+										shape=area sum_cols="udata" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Traces"
 										style="grid-area: traces"
-										shape=area sum_cols="traces" group_cols=clock
+										shape=area sum_cols="traces" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Aborted Traces"
 										style="grid-area: aborted_traces"
-										shape=area sum_cols="aborted_traces" group_cols=clock
+										shape=area sum_cols="aborted_traces" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="Snapshot Restores"
 										style="grid-area: snap_restores"
-										shape=area sum_cols="snap_restores" group_cols=clock
+										shape=area sum_cols="snap_restores" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
 									<x-chart
 										text="MCode Size"
 										style="grid-area: mcode_size"
-										shape=area sum_cols="mcode_size" group_cols=clock
+										shape=area sum_cols="mcode_size" group_cols=at
 										min_sum=0
 										min_val=-60 max_val=0
 									></x-chart>
@@ -617,7 +643,7 @@ textarea.x-editbox-input[console] {
 				</x-split>
 			</x-split>
 			<x-tabs>
-				<div label="SSH Master Key" action=config class="x-container" style="justify-content: center">
+				<div label="SSH Master Key" action=config class="x-container" style="margin-left: 2em">
 					<x-nav id=mm_config_nav rowset_name=config></x-nav>
 					<x-form nav_id=mm_config_nav id=mm_config_form grid>
 						<h2 area=h1>SSH</h2>
