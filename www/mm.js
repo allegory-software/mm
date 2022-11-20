@@ -340,7 +340,7 @@ function mm_deploy_env_grid_params_changed() {
 on('mm_deploy_env_grid.bind', function(e, on) {
 	e.on('params_changed', mm_deploy_env_grid_params_changed, on)
 	if (on)
-		deploy_env_grid_params_changed.call(e)
+		mm_deploy_env_grid_params_changed.call(e)
 })
 
 function mm_deploy_eval_button_action() {
