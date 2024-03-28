@@ -118,50 +118,50 @@ textarea.x-editbox-input[console] {
 		</x-listbox>
 	</div>
 	<x-vsplit fixed_side=second fixed_size=360 id=mm_main_split>
-		<x-switcher nav_id=mm_actions_listbox>
+		<x-switcher nav=mm_actions_listbox>
 			<x-grid action=env_vars
-				id=mm_env_vars_grid rowset_name=env_vars
+				id=mm_env_vars_grid rowset=env_vars
 			></x-grid>
 			<x-split action=git_hosting fixed_size=300>
-				<x-grid id=mm_git_hosting_grid rowset_name=git_hosting></x-grid>
-				<x-form nav_id=mm_git_hosting_grid id=mm_git_hosting_form>
+				<x-grid id=mm_git_hosting_grid rowset=git_hosting></x-grid>
+				<x-form nav=mm_git_hosting_grid id=mm_git_hosting_form>
 					<x-split fixed_size=400>
 						<x-input col=ssh_hostkey></x-input>
 						<x-input col=ssh_key></x-input>
 					</x-split>
 				</x-form>
 			</x-split>
-			<x-grid action=providers id=mm_providers_grid rowset_name=providers></x-grid>
+			<x-grid action=providers id=mm_providers_grid rowset=providers></x-grid>
 			<x-split action=machines fixed_side=second fixed_size=1000 id=mm_machines_split>
 				<x-tabs>
 					<x-grid vertical label="Machines"
-						id=mm_machines_grid rowset_name=machines></x-grid>
+						id=mm_machines_grid rowset=machines></x-grid>
 				</x-tabs>
 				<x-tabs>
 					<x-ct label="CPU / RAM / Disk">
 						<x-nav
 							id=mm_machine_procinfo_log_nav
-							rowset_name=machine_procinfo_log
-							param_nav_id=mm_machines_grid params=machine
+							rowset=machine_procinfo_log
+							param_nav=mm_machines_grid params=machine
 						>
 						</x-nav>
 						<div flex>
 							<x-chart
-								nav_id=mm_machine_procinfo_log_nav
+								nav=mm_machine_procinfo_log_nav
 								shape=area sum_cols="max_cpu_sys max_cpu avg_cpu_sys avg_cpu" group_cols=at
 								min_sum=0 max_sum=1
 								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
-								nav_id=mm_machine_procinfo_log_nav
+								nav=mm_machine_procinfo_log_nav
 								shape=area sum_cols="ram_used ram_size" group_cols=at
 								min_sum=0 max_sum=4294967296
 								min_val=-60 max_val=0
 							>
 							</x-chart>
 							<x-chart
-								nav_id=mm_machine_procinfo_log_nav
+								nav=mm_machine_procinfo_log_nav
 								shape=area sum_cols="hdd_used hdd_size" group_cols=at
 								min_sum=0 max_sum=107374182400
 								min_val=-60 max_val=0
@@ -170,8 +170,8 @@ textarea.x-editbox-input[console] {
 						</div>
 					</x-ct>
 					<x-grid label="MySQL Stats"
-						rowset_name=machine_mysql_stats
-						param_nav_id=mm_machines_grid params=machine
+						rowset=machine_mysql_stats
+						param_nav=mm_machines_grid params=machine
 					>
 					</x-grid>
 					<x-tabs label="Machine Backups">
@@ -179,30 +179,30 @@ textarea.x-editbox-input[console] {
 							<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
 								<x-grid
 									id=mm_machine_backups_grid
-									rowset_name=machine_backups
-									param_nav_id=mm_machines_grid params=machine
+									rowset=machine_backups
+									param_nav=mm_machines_grid params=machine
 								></x-grid>
 								<x-form>
 									<x-button icon="fa fa-compact-disc"
-										action_name=machine_backup
-										nav_id=mm_machines_grid
+										action=machine_backup
+										nav=mm_machines_grid
 										text="Backup {{machine}}"
 									></x-button>
 								</x-form>
 							</x-vsplit>
 							<x-tabs>
 								<x-grid label="Backup Contents"
-									rowset_name=machine_backup_deploys
-									param_nav_id=mm_machine_backups_grid params=mbk
+									rowset=machine_backup_deploys
+									param_nav=mm_machine_backups_grid params=mbk
 								></x-grid>
 								<x-grid label="Backup Copies"
 									id=mm_machine_backup_copies_grid
-									rowset_name=machine_backup_copies
-									param_nav_id=mm_machine_backups_grid params=mbk
+									rowset=machine_backup_copies
+									param_nav=mm_machine_backups_grid params=mbk
 								></x-grid>
 							</x-tabs>
 						</x-vsplit>
-						<x-form label="Scheduling" id=mm_machine_backups_scheduling_form nav_id=mm_machines_grid grid>
+						<x-form label="Scheduling" id=mm_machine_backups_scheduling_form nav=mm_machines_grid grid>
 							<x-input col=full_backup_active       ></x-input>
 							<x-input col=full_backup_start_hours  ></x-input>
 							<x-input col=full_backup_run_every    ></x-input>
@@ -212,8 +212,8 @@ textarea.x-editbox-input[console] {
 							<x-input col=backup_remove_older_than ></x-input>
 						</x-form>
 						<x-grid label="Keeping Copies"
-							rowset_name=machine_backup_copy_machines
-							param_nav_id=mm_machines_grid params=machine
+							rowset=machine_backup_copy_machines
+							param_nav=mm_machines_grid params=machine
 						></x-grid>
 					</x-tabs>
 				</x-tabs>
@@ -221,14 +221,14 @@ textarea.x-editbox-input[console] {
 			</x-split>
 			<x-split action=deploys fixed_size=400 id=mm_deploys_split>
 				<x-tabs>
-					<x-grid label=Deployments id=mm_deploys_grid rowset_name=deploys></x-grid>
+					<x-grid label=Deployments id=mm_deploys_grid rowset=deploys></x-grid>
 				</x-tabs>
 				<x-split fixed_size=400>
 					<div vflex>
 						<x-tabs>
 							<x-form label="Deploy"
 								id=mm_deploys_form
-								nav_id=mm_deploys_grid
+								nav=mm_deploys_grid
 								grid baseline
 							>
 								<x-label col=deploy></x-label>
@@ -273,16 +273,16 @@ textarea.x-editbox-input[console] {
 										<x-grid
 											id=mm_deploy_env_var_tags_grid
 											label="Env Var Tags"
-											param_nav_id=mm_deploys_grid params=deploy
-											rowset_name=deploy_env_var_tags
+											param_nav=mm_deploys_grid params=deploy
+											rowset=deploy_env_var_tags
 										></x-grid>
 									</x-tabs>
 									<x-tabs>
 										<x-grid
 											id=mm_deploy_custom_vars_grid
 											label="Custom Env Vars"
-											param_nav_id=mm_deploys_grid params=deploy
-											rowset_name=deploy_custom_env_vars
+											param_nav=mm_deploys_grid params=deploy
+											rowset=deploy_custom_env_vars
 										></x-grid>
 									</x-tabs>
 								</x-split>
@@ -290,8 +290,8 @@ textarea.x-editbox-input[console] {
 									<x-grid
 										id=mm_deploy_vars_grid
 										label="Final Env Vars"
-										param_nav_id=mm_deploys_grid params=deploy
-										rowset_name=deploy_env_vars
+										param_nav=mm_deploys_grid params=deploy
+										rowset=deploy_env_vars
 									></x-grid>
 								</x-tabs>
 							</x-vsplit>
@@ -301,7 +301,7 @@ textarea.x-editbox-input[console] {
 								icon="fa fa-arrow-rotate-left"
 								load_spin="fa-spin fa-spin-reverse"
 								area=restart
-								action_name=deploy_restart
+								action=deploy_restart
 								text="Restart"
 							></x-button>
 
@@ -309,13 +309,13 @@ textarea.x-editbox-input[console] {
 								icon="fa fa-play"
 								load_spin="fa-beat-fade"
 								area=start
-								action_name=deploy_start
+								action=deploy_start
 								text="Start"
 								style="align-self: bootom"
 							></x-button>
 
 							<x-button icon="fa fa-power-off" area=stop danger
-								action_name=deploy_stop
+								action=deploy_stop
 								text="Stop"
 							></x-button>
 
@@ -323,7 +323,7 @@ textarea.x-editbox-input[console] {
 								icon="fa fa-pizza-slice"
 								load_spin="fa-fade"
 								area=dep
-								action_name=deploy_deploy
+								action=deploy_deploy
 								text="Deploy"
 							></x-button>
 						</x-form>
@@ -333,13 +333,13 @@ textarea.x-editbox-input[console] {
 							<x-ct label="CPU & RAM">
 								<x-nav
 									id=mm_deploy_procinfo_log_nav
-									rowset_name=deploy_procinfo_log
-									param_nav_id=mm_deploys_grid params=deploy
+									rowset=deploy_procinfo_log
+									param_nav=mm_deploys_grid params=deploy
 								>
 								</x-nav>
 								<x-form grid
 									id=mm_deploy_procinfo_log_charts
-									nav_id=mm_deploy_procinfo_log_nav
+									nav=mm_deploy_procinfo_log_nav
 									>
 									<x-chart
 										text="CPU" area=cpu
@@ -436,22 +436,22 @@ textarea.x-editbox-input[console] {
 							</x-ct>
 							<x-grid label="Live Objects"
 								id=mm_deploy_livelist_grid
-								rowset_name=deploy_livelist
-								param_nav_id=mm_deploys_grid params=deploy
+								rowset=deploy_livelist
+								param_nav=mm_deploys_grid params=deploy
 							>
 							</x-grid>
 							<x-vsplit fixed_side=second label="Live Log">
 								<x-grid
 									id=mm_deploy_log_grid
-									rowset_name=deploy_log
-									param_nav_id=mm_deploys_grid params=deploy
+									rowset=deploy_log
+									param_nav=mm_deploys_grid params=deploy
 								></x-grid>
-								<x-textarea mono nav_id=mm_deploy_log_grid col=message></x-textarea>
+								<x-textarea mono nav=mm_deploy_log_grid col=message></x-textarea>
 							</x-vsplit>
 							<x-grid label="Env Vars"
 								id=mm_deploy_env_grid
-								param_nav_id=mm_deploys_grid params=deploy
-								rowset_name=deploy_env
+								param_nav=mm_deploys_grid params=deploy
+								rowset=deploy_env
 							></x-grid>
 							<x-vsplit label="Profiler"
 								fixed_side=first fixed_size=null resizeable=false
@@ -462,23 +462,23 @@ textarea.x-editbox-input[console] {
 										bare
 										icon="fa fa-circle"
 										id=mm_deploy_profiler_start_button
-										nav_id=mm_deploys_grid
+										nav=mm_deploys_grid
 										text="{{#profiler_started}}Stop{{/profiler_started}}{{^profiler_started}}Start{{/profiler_started}}"
 									></x-button>
 								</x-ct>
 								<x-ct>
 									<x-nav
 										id=mm_deploy_profiler_output_nav
-										rowset_name=deploy_profiler_output
-										param_nav_id=mm_deploys_grid params=deploy
+										rowset=deploy_profiler_output
+										param_nav=mm_deploys_grid params=deploy
 									></x-nav>
-									<x-textarea col=profiler_output nav_id=mm_deploy_profiler_output_nav></x-textarea>
+									<x-textarea col=profiler_output nav=mm_deploy_profiler_output_nav></x-textarea>
 								</x-ct>
 							</x-vsplit>
 							<x-split label="Scripts" id=mm_scripts_split>
 								<x-grid
 									id=mm_scripts_grid
-									rowset_name=scripts
+									rowset=scripts
 									header_visible=false
 									auto_cols_w=true
 								>
@@ -493,29 +493,29 @@ textarea.x-editbox-input[console] {
 											bare
 											icon="fa fa-play"
 											id=mm_deploy_eval_button
-											nav_id=mm_deploys_grid
+											nav=mm_deploys_grid
 											text="Run"
 										></x-button>
-										<x-mu nav_id=mm_deploys_grid>
+										<x-mu nav=mm_deploys_grid>
 											on {{deploy}}
 										</x-mu>
 									</x-ct>
 									<x-ct>
-										<x-textarea mono nav_id=mm_scripts_grid col=code
+										<x-textarea mono nav=mm_scripts_grid col=code
 											id=mm_deploy_eval_script_textarea></x-textarea>
 										<x-nav
 											id=mm_deploy_eval_result_nav
-											rowset_name=deploy_eval_result
-											param_nav_id=mm_deploys_grid params=deploy
+											rowset=deploy_eval_result
+											param_nav=mm_deploys_grid params=deploy
 										>
 										</x-nav>
-										<x-textarea mono col=eval_result nav_id=mm_deploy_eval_result_nav></x-textarea>
+										<x-textarea mono col=eval_result nav=mm_deploy_eval_result_nav></x-textarea>
 									</x-ct>
 								</x-vsplit>
 							</x-split>
 							<x-grid label="MySQL Stats"
-								rowset_name=deploy_mysql_stats
-								param_nav_id=mm_deploys_grid params=deploy
+								rowset=deploy_mysql_stats
+								param_nav=mm_deploys_grid params=deploy
 							>
 							</x-grid>
 							<x-tabs label="Deploy Backups">
@@ -523,13 +523,13 @@ textarea.x-editbox-input[console] {
 									<x-vsplit fixed_side=second fixed_size=29 resizeable=false>
 										<x-grid
 											id=mm_deploy_backups_grid
-											rowset_name=deploy_backups
-											param_nav_id=mm_deploys_grid params=deploy
+											rowset=deploy_backups
+											param_nav=mm_deploys_grid params=deploy
 										></x-grid>
 										<x-form>
 											<x-button icon="fa fa-compact-disc"
-												action_name=deploy_backup
-												nav_id=mm_deploys_grid
+												action=deploy_backup
+												nav=mm_deploys_grid
 												text="Backup {{deploy}}"
 											></x-button>
 										</x-form>
@@ -537,12 +537,12 @@ textarea.x-editbox-input[console] {
 									<x-tabs>
 										<x-grid label="Backup Copies"
 											id=mm_deploy_backup_copies_grid
-											rowset_name=deploy_backup_copies
-											param_nav_id=mm_deploy_backups_grid params=dbk
+											rowset=deploy_backup_copies
+											param_nav=mm_deploy_backups_grid params=dbk
 										></x-grid>
 									</x-tabs>
 								</x-vsplit>
-								<x-form id=mm_deploy_backups_scheduling_form nav_id=mm_deploys_grid label="Scheduling" grid>
+								<x-form id=mm_deploy_backups_scheduling_form nav=mm_deploys_grid label="Scheduling" grid>
 									<x-input col=backup_active       ></x-input>
 									<x-input col=backup_start_hours  ></x-input>
 									<x-input col=backup_run_every    ></x-input>
@@ -550,8 +550,8 @@ textarea.x-editbox-input[console] {
 								</x-form>
 								<x-grid
 									label="Keeping Copies"
-									rowset_name=deploy_backup_copy_machines
-									param_nav_id=mm_deploys_grid params=deploy
+									rowset=deploy_backup_copy_machines
+									param_nav=mm_deploys_grid params=deploy
 								></x-grid>
 							</x-tabs>
 							<x-split label="Ops" style="max-width: 600px">
@@ -559,7 +559,7 @@ textarea.x-editbox-input[console] {
 									<div action=remove_deploy>Remove deployment</div>
 									<div action=rename_deploy>Rename deployment</div>
 								</x-listbox>
-								<x-switcher nav_id=mm_ops_listbox>
+								<x-switcher nav=mm_ops_listbox>
 									<div action=remove_deploy class="x-container x-form" style="padding: 0 1em 1em 1em">
 										<h2>Remove Deployment</h2>
 										<p>
@@ -570,7 +570,7 @@ textarea.x-editbox-input[console] {
 											You do have a backup, right?
 										</p>
 										<x-button icon="fa fa-trash" area=remdep danger
-											action_name=deploy_remove
+											action=deploy_remove
 											text="Remove Deployment"
 											confirm="Are you sure you want to remove the deployment?"
 										></x-button>
@@ -590,8 +590,8 @@ textarea.x-editbox-input[console] {
 											The good news is, this should only take a few seconds
 											since all the tables and files are moved, not copied.
 										</p>
-										<x-textedit id=deploy_rename_new_name_edit nav_id=mm_deploys_grid col=deploy></x-textedit>
-										<x-button area=rendep danger action_name=deploy_rename
+										<x-textedit id=deploy_rename_new_name_edit nav=mm_deploys_grid col=deploy></x-textedit>
+										<x-button area=rendep danger action=deploy_rename
 											text="Rename Deployment"
 											confirm="Are you sure you want to rename the deployment?"
 										></x-button>
@@ -604,7 +604,7 @@ textarea.x-editbox-input[console] {
 								bare
 								icon="fa-solid fa-gauge-high"
 								id=mm_deploy_jit_onoff_button
-								nav_id=mm_deploys_grid
+								nav=mm_deploys_grid
 								text="{{#jit_on}}JIT off{{/jit_on}}{{^jit_on}}JIT on{{/jit_on}}"
 								title="Turn JIT on and off"
 							></x-button>
@@ -612,7 +612,7 @@ textarea.x-editbox-input[console] {
 								bare
 								icon="fa fa-recycle"
 								id=mm_deploy_collectgarbage_button
-								nav_id=mm_deploys_grid
+								nav=mm_deploys_grid
 								text="GC"
 								title="Do a Full Garbage Collection Sweep"
 							></x-button>
@@ -620,7 +620,7 @@ textarea.x-editbox-input[console] {
 								bare
 								icon="fa fa-0"
 								id=mm_deploy_reset_counts_button
-								nav_id=mm_deploys_grid
+								nav=mm_deploys_grid
 								text="Reset Counts"
 								title="Reset Counts"
 							></x-button>
@@ -630,16 +630,16 @@ textarea.x-editbox-input[console] {
 			</x-split>
 			<x-tabs>
 				<div label="SSH Master Key" action=config class="x-container" style="margin-left: 2em">
-					<x-nav id=mm_config_nav rowset_name=config></x-nav>
-					<x-form nav_id=mm_config_nav id=mm_config_form grid>
+					<x-nav id=mm_config_nav rowset=config></x-nav>
+					<x-form nav=mm_config_nav id=mm_config_form grid>
 						<h2 area=h1>SSH</h2>
 						<x-textarea mono rows=12 col=mm_pubkey infomode=under
 							info="This is the SSH key used to log in as root on all machines.">
 						</x-textarea>
-						<x-button danger action_name=ssh_key_gen style="grid-area: ssh_key_gen_button"
+						<x-button danger action=ssh_key_gen style="grid-area: ssh_key_gen_button"
 							text="Generate new key" icon="fa fa-key">
 						</x-button>
-						<x-button danger action_name=ssh_key_update style="grid-area: ssh_key_update_button"
+						<x-button danger action=ssh_key_update style="grid-area: ssh_key_update_button"
 							text="Upload key to all machines" icon="fa fa-upload">
 						</x-button>
 						<div area=h2><hr><h2>MySQL</h2></div>
@@ -648,25 +648,25 @@ textarea.x-editbox-input[console] {
 								the MySQL root password is updated too."></x-passedit>
 					</x-form>
 				</div>
-				<x-grid label="Languages" rowset_name=lang></x-grid>
+				<x-grid label="Languages" rowset=lang></x-grid>
 			</x-tabs>
 		</x-switcher>
 		<x-tabs>
 			<x-split label="Running Tasks" fixed_side=second fixed_size=900>
-				<x-grid id=mm_running_tasks_grid rowset_name=running_tasks save_on_input action_band_visible=no></x-grid>
+				<x-grid id=mm_running_tasks_grid rowset=running_tasks save_on_input action_band_visible=no></x-grid>
 				<x-tabs>
-					<x-textarea mono console class=x-stretched label="OUT/ERR" id=mm_task_out_textarea nav_id=mm_running_tasks_grid col=out></x-textarea>
-					<x-textarea mono console class=x-stretched label="STDIN" id=mm_task_stdin_textarea nav_id=mm_running_tasks_grid col=stdin></x-textarea>
-					<x-textarea mono console class=x-stretched label="NOTIFICATIONS" id=mm_task_notif_textarea nav_id=mm_running_tasks_grid col=notif></x-textarea>
-					<x-textarea mono console class=x-stretched label="CMD" id=mm_task_notif_textarea nav_id=mm_running_tasks_grid col=cmd></x-textarea>
+					<x-textarea mono console class=x-stretched label="OUT/ERR" id=mm_task_out_textarea nav=mm_running_tasks_grid col=out></x-textarea>
+					<x-textarea mono console class=x-stretched label="STDIN" id=mm_task_stdin_textarea nav=mm_running_tasks_grid col=stdin></x-textarea>
+					<x-textarea mono console class=x-stretched label="NOTIFICATIONS" id=mm_task_notif_textarea nav=mm_running_tasks_grid col=notif></x-textarea>
+					<x-textarea mono console class=x-stretched label="CMD" id=mm_task_notif_textarea nav=mm_running_tasks_grid col=cmd></x-textarea>
 				</x-tabs>
 			</x-split>
-			<x-grid label="Scheduled Tasks" rowset_name=scheduled_tasks></x-grid>
+			<x-grid label="Scheduled Tasks" rowset=scheduled_tasks></x-grid>
 			<x-split label="Task Run Log" fixed_side=second fixed_size=600>
-				<x-grid id=mm_task_runs_grid rowset_name=task_runs></x-grid>
+				<x-grid id=mm_task_runs_grid rowset=task_runs></x-grid>
 				<x-tabs>
-					<x-textarea mono console class=x-stretched label="OUT/ERR" id=mm_task_run_out_textarea nav_id=mm_task_runs_grid col=stdouterr></x-textarea>
-					<x-textarea mono console class=x-stretched label="STDIN" id=mm_task_run_stdin_textarea nav_id=mm_task_runs_grid col=stdin></x-textarea>
+					<x-textarea mono console class=x-stretched label="OUT/ERR" id=mm_task_run_out_textarea nav=mm_task_runs_grid col=stdouterr></x-textarea>
+					<x-textarea mono console class=x-stretched label="STDIN" id=mm_task_run_stdin_textarea nav=mm_task_runs_grid col=stdin></x-textarea>
 				</x-tabs>
 			</x-split>
 		</x-tabs>

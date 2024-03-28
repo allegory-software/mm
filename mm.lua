@@ -1,5 +1,5 @@
+--go@ x:\sdk\bin\windows\luajit x:\mm\mm.lua -vv run
 --go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
---go@ x:\sdk\bin\windows\luajit x:\apps\mm\mm.lua -v run
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --[[
 
@@ -45,13 +45,16 @@ FEATURES
 	- https proxy with automatic SSL certificate issuing and updating.
 
 LIMITATIONS
-	- the machines need to run Linux (Debian 10+) and have a public IP.
+	- the machines need to run Debian 10 and have a public IP.
 	- single shared MySQL server instance for all deployments on a machine.
 	- one MySQL DB per deployment.
 	- one global SSH key for root access on all machines.
-	- one global SSH key for git access.
+	- one SSH key for git access for each git hosting provider.
 
 ]]
+
+require'glue'
+config('www_dirs', 'www;sdk/www;sdk/canvas-ui/www')
 
 --db schema ------------------------------------------------------------------
 
@@ -301,14 +304,12 @@ mm.sshdir   = mm.bindir
 config('page_title_suffix', 'Many Machines')
 config('sign_in_logo', '/sign-in-logo.png')
 config('favicon_href', '/favicon1.ico')
-config('dev_email', 'cosmin.apreutesei@gmail.com')
 
-config('secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
-config('smtp_host', 'mail.bpnpart.com')
-config('smtp_user', 'admin@bpnpart.com')
-config('noreply_email', 'admin@bpnpart.com')
-
+--client config.
 config('mm_host', 'mm.allegory.ro')
+
+--dev server config. you add: dev_email, smtp_{host,user,pass}, noreply_email.
+config('secret', '!xpAi$^!@#)fas!`5@cXiOZ{!9fdsjdkfh7zk')
 
 --logging.filter[''] = true
 --config('http_debug', 'protocol')
@@ -323,7 +324,7 @@ local function NYI(event)
 	error('NYI: '..event)
 end
 
-local function split(sep, s)
+local function split2(sep, s)
 	if not s then return nil, nil end
 	local s1, s2 = s:match('^(.-)'..esc(sep)..'(.*)')
 	return repl(s1, ''), repl(s2, '')
@@ -768,18 +769,53 @@ end
 
 --client rowset API ----------------------------------------------------------
 
+--filter: {k1v1,k1v2,...} or {{k1v1,k1v2},{k1v3,k2v4},...} for composite pks.
 function mm.get_rowset(name, filter)
+	local t
 	if from_server() then
 		local call_opt = filter and {args = {filter = json_encode(filter)}}
 		t = call_json_api(call_opt, 'rowset.json', name)
 	else
 		NYI'get_rowset'
 	end
-	mm.schema:resolve_types(t.fields)
+	mm.schema:resolve_types(t.fields, {translate = true})
 	return t
 end
 
---filter: {k1v1,k1v2,...} or {{k1v1,k1v2},{k1v3,k2v4},...} for composite pks.
+function parse_key_and_vals(row_type, name, key, vals) --col1=val1,...
+	checkarg(name, 'rowset name required')
+	local rowset = checkfound(rowset[name], 'unknown rowset: '..name)
+	local pk_vals = collect(key:gmatch'[^,]+')
+	local t = {}
+	for i,pk_name in ipairs(rowset.pk) do
+		local k = row_type == 'new' and pk_name or pk_name..':old'
+		t[k] = pk_vals[i]
+	end
+	for kv in (vals or ''):gmatch'[^,]+' do
+		local k,v = split2('=', kv)
+		assert(k, 'key1=value1,... expected')
+		t[k] = v
+	end
+	return t
+end
+
+function print_update_result(t)
+	local row = t.rows and t.rows[1]
+	if row.error then
+		print('Error: '..row.error)
+	end
+	if row.field_errors then
+		print'Field errors:'
+		for k,v in sortedpairs(row.field_errors) do
+			print(_('%20s: %s', k, v))
+		end
+	end
+	if row.values then
+		mysql_print_result({rows = {t.rows[1].values}, fields = t.fields})
+	end
+	print'OK'
+end
+
 function mm.print_rowset(opt, name, cols, filter)
 	if opt ~= nil and not istab(opt) then
 		return mm.print_rowset(nil, opt, name, cols, filter)
@@ -787,11 +823,44 @@ function mm.print_rowset(opt, name, cols, filter)
 	local t = mm.get_rowset(name or 'rowsets', filter)
 	mysql_print_result(update({
 		rows = t.rows, fields = t.fields,
-		showcols = cols and cols:gsub(',', ' '),
+		showcols = cols,
 	}, opt))
 end
-cmd('r|rowset [-cols=col1,...] [NAME] [KEY]', 'Show a rowset', function(opt, name, key)
-	mm.print_rowset(name, opt.cols, key and {tonumber(key) or key})
+cmd('r|rowset [-cols=col1,...] [NAME] [FILTER]', 'Show a rowset', function(opt, name, filter)
+	local cols = opt.cols and opt.cols:gsub(',', ' ')
+	mm.print_rowset(name, cols, filter)
+end)
+
+function mm.update_row(row_type, name, vals)
+	local t
+	if from_server() then
+		local rows = {{type = row_type, values = vals}}
+		local changes = {rows = rows}
+		local post = {exec = 'save', changes = changes}
+		t = call_json_api({upload = post}, 'rowset.json', name)
+	else
+		NYI'update_row'
+	end
+	return t
+end
+cmd('add NAME KEY col1=val1,...', 'Insert a row into a rowset', function(opt, name, key, vals)
+	print_update_result(mm.update_row('new', name,
+		parse_key_and_vals('new', name, key, vals)))
+end)
+cmd('set NAME KEY col1=val1,...', 'Update a row from a rowset', function(opt, name, key, vals)
+	print_update_result(mm.update_row('update', name,
+		parse_key_and_vals('update', name, key, vals)))
+end)
+
+function mm.delete_row(name, key)
+	--check if the row exists first
+	local t = mm.get_rowset(name, key)
+	checkfound(#t.rows > 0, cat(rowset[name].pk, ',')..' not found: '..cat(key, ','))
+	--delete the row
+	return mm.update_row('remove', name, key)
+end
+cmd('del NAME KEY', 'Delete a row from a rowset', function(opt, name, key)
+	print_update_result(mm.delete_row(name, parse_key_and_vals('delete', name, key)))
 end)
 
 --client info api ------------------------------------------------------------
@@ -1029,7 +1098,7 @@ function mm.putty_session_remove(machine)
 	if not win then return end
 	local hk = winapi.RegCreateKey('HKEY_CURRENT_USER',
 		[[SimonTatham\PuTTY\Sessions\\]])
-	hk:remve_key(machine)
+	hk:remove_key(machine)
 	hk:close()
 	notify('Putty session removed: %s', machine)
 end
@@ -1386,7 +1455,7 @@ end)
 
 cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
 	function(opt, md_dir)
-		local md, dir = split(':', md_dir)
+		local md, dir = split2(':', md_dir)
 		checkarg(md and dir, 'machine:dir expected')
 		local args = {'ls', dir}
 		for k,v in pairs(opt) do
@@ -1397,7 +1466,7 @@ cmd_files('ls [-l] [-a] MACHINE:DIR', 'Run `ls` on machine',
 
 cmd_files('cat MACHINE:FILE', 'Run `cat` on machine',
 	function(opt, md_file)
-		local md, file = split(':', md_file)
+		local md, file = split2(':', md_file)
 		checkarg(md and file, 'machine:file expected')
 		mm.ssh_cli(md, 'cat', file)
 	end)
@@ -1409,7 +1478,7 @@ cmd_files('mc MACHINE [DIR]', 'Run `mc` on machine',
 
 cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
 	function(opt, md_file)
-		local md, file = split(':', md_file)
+		local md, file = split2(':', md_file)
 		checkarg(md and file, 'machine:file expected')
 		mm.ssh_cli({tty = true}, md, 'mcedit', file)
 	end)
@@ -1421,7 +1490,7 @@ function mm.tunnel(machine, ports, opt, rev)
 	ports = checkarg(ports, 'ports expected')
 	local ts = {}
 	for ports in ports:gmatch'([^,]+)' do
-		local lport, rport = split(':', ports)
+		local lport, rport = split2(':', ports)
 		rport = rport or ports
 		lport = lport or ports
 		local s = _('%s:%s %s %s', machine, rport, rev and '->' or '<-', lport)
@@ -1522,8 +1591,8 @@ function mm.rsync(opt, md1, md2)
 	if isstr(opt) then opt, md1, md2 = empty, opt, md1 end
 	md1 = str_arg(md1)
 	md2 = str_arg(md2)
-	local m1, d1 = split(':', md1)
-	local m2, d2 = split(':', md2)
+	local m1, d1 = split2(':', md1)
+	local m2, d2 = split2(':', md2)
 	if not (m1 or d1) then d1 = md1 end -- [SRC_MACHINE:]DIR
 	if not (m2 or d2) then m2 = md2 end -- DST_MACHINE[:DIR]
 	d2 = d2 or d1
@@ -1621,6 +1690,15 @@ cmd_ssh_mounts('sha MACHINE DIR', 'Compute SHA of dir contents', function(...)
 end)
 
 --machine listing ------------------------------------------------------------
+
+cmd_machines('providers', 'Show the list of providers', function(opt)
+	mm.print_rowset('providers', [[
+		provider
+		website
+		note
+		ctime
+	]])
+end)
 
 cmd_machines('m|machines', 'Show the list of machines', function(opt)
 	mm.print_rowset('machines', [[
@@ -2319,13 +2397,13 @@ rowset.deploy_procinfo_log = virtual_rowset(function(self)
 	self.fields = {
 		{name = 'deploy'         , 'strid'      , },
 		{name = 'at'             , 'duration'   , },
-		{name = 'cpu'            , 'percent_int', text = 'CPU'},
-		{name = 'cpu_sys'        , 'percent_int', text = 'CPU (kernel)'},
-		{name = 'rss'            , 'filesize'   , text = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
-		{name = 'ram_free'       , 'filesize'   , text = 'RAM free (total)', filesize_magnitude = 'M'},
-		{name = 'ram_size'       , 'filesize'   , text = 'RAM size', hidden = true},
+		{name = 'cpu'            , 'percent_int', label = 'CPU'},
+		{name = 'cpu_sys'        , 'percent_int', label = 'CPU (kernel)'},
+		{name = 'rss'            , 'filesize'   , label = 'RSS (Resident Set Size)', filesize_magnitude = 'M'},
+		{name = 'ram_free'       , 'filesize'   , label = 'RAM free (total)', filesize_magnitude = 'M'},
+		{name = 'ram_size'       , 'filesize'   , label = 'RAM size', hidden = true},
 		--debug.counts
-		{name = 'lua_heap'       , 'filesize'   , text = 'Lua Heap Size'},
+		{name = 'lua_heap'       , 'filesize'   , label = 'Lua Heap Size'},
 		{name = 'lua_freed'      , 'filesize'   , },
 		{name = 'lua_allocated'  , 'filesize'   , },
 		{name = 'strings'        , 'bigcount'   , },
@@ -2425,14 +2503,14 @@ rowset.machine_procinfo_log = virtual_rowset(function(self)
 	self.fields = {
 		{name = 'machine'},
 		{name = 'at'           , 'double'     , },
-		{name = 'max_cpu'      , 'percent_int', text = 'Max CPU'},
-		{name = 'max_cpu_sys'  , 'percent_int', text = 'Max CPU (kernel)'},
-		{name = 'avg_cpu'      , 'percent_int', text = 'Avg CPU'},
-		{name = 'avg_cpu_sys'  , 'percent_int', text = 'Avg CPU (kernel)'},
-		{name = 'ram_used'     , 'filesize'   , filesize_magnitude = 'M', text = 'RAM Used'},
-		{name = 'hdd_used'     , 'filesize'   , filesize_magnitude = 'M', text = 'Disk Used'},
-		{name = 'ram_size'     , 'filesize'   , filesize_magnitude = 'M', text = 'RAM Size'},
-		{name = 'hdd_size'     , 'filesize'   , filesize_magnitude = 'M', text = 'Disk Size'},
+		{name = 'max_cpu'      , 'percent_int', label = 'Max CPU'},
+		{name = 'max_cpu_sys'  , 'percent_int', label = 'Max CPU (kernel)'},
+		{name = 'avg_cpu'      , 'percent_int', label = 'Avg CPU'},
+		{name = 'avg_cpu_sys'  , 'percent_int', label = 'Avg CPU (kernel)'},
+		{name = 'ram_used'     , 'filesize'   , filesize_magnitude = 'M', label = 'RAM Used'},
+		{name = 'hdd_used'     , 'filesize'   , filesize_magnitude = 'M', label = 'Disk Used'},
+		{name = 'ram_size'     , 'filesize'   , filesize_magnitude = 'M', label = 'RAM Size'},
+		{name = 'hdd_size'     , 'filesize'   , filesize_magnitude = 'M', label = 'Disk Size'},
 	}
 	self.pk = 'machine clock'
 	function self:load_rows(rs, params)
@@ -3051,7 +3129,7 @@ end
 cmd_mbk('mbk-remove COPY1[-COPY2],...', 'Remove machine backup copies', function(copies)
 	checkarg(copies, 'backup copy required')
 	for s in words(copies:gsub(',', ' ')) do
-		local mbk_copy1, mbk_copy2 = split(s:find'%-' and '-' or '..', s)
+		local mbk_copy1, mbk_copy2 = split2(s:find'%-' and '-' or '..', s)
 		mbk_copy1 = checkarg(id_arg(mbk_copy1 or s), 'invalid backup copy')
 		mbk_copy2 = checkarg(id_arg(mbk_copy2 or s), 'invalid backup copy')
 		for mbk_copy = min(mbk_copy1, mbk_copy2), max(mbk_copy1, mbk_copy2), 1 do
@@ -3393,7 +3471,7 @@ end
 cmd_dbk('dbk-remove COPY1[-COPY2],...', 'Remove deploy backup copies', function(copies)
 	checkarg(copies, 'copies required')
 	for s in words(copies:gsub(',', ' ')) do
-		local dbk_copy1, dbk_copy2 = split(s:find'%-' and '-' or '..', s)
+		local dbk_copy1, dbk_copy2 = split2(s:find'%-' and '-' or '..', s)
 		dbk_copy1 = checkarg(id_arg(dbk_copy1 or s), 'invalid backup copy')
 		dbk_copy2 = checkarg(id_arg(dbk_copy2 or s), 'invalid backup copy')
 		for dbk_copy = min(dbk_copy1, dbk_copy2), max(dbk_copy1, dbk_copy2), 1 do
@@ -3684,23 +3762,24 @@ rowset.machines = sql_rowset{
 			machine
 	]],
 	pk = 'machine',
+	where_all = ':param:filter is null or machine in (:param:filter)',
 	order_by = 'pos, ctime',
 	field_attrs = {
 		refresh     = {hidden = true},
-		cpu_max     = {readonly = true, w = 60, 'percent_int', align = 'right', text = 'CPU Max %', compute = compute_cpu_max},
-		ram_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, text = 'Free RAM', compute = compute_ram_free},
-		hdd_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, text = 'Free Disk', compute = compute_hdd_free},
-		public_ip   = {text = 'Public IP Address'},
-		local_ip    = {text = 'Local IP Address', hidden = true},
-		admin_page  = {text = 'VPS admin page of this machine'},
-		ssh_key_ok  = {readonly = true, text = 'SSH key is up-to-date'},
-		cpu         = {readonly = true, text = 'CPU'},
+		cpu_max     = {readonly = true, w = 60, 'percent_int', align = 'right', label = 'CPU Max %', compute = compute_cpu_max},
+		ram_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, label = 'Free RAM', compute = compute_ram_free},
+		hdd_free    = {readonly = true, w = 60, 'filesize'   , filesize_decimals = 1, label = 'Free Disk', compute = compute_hdd_free},
+		public_ip   = {label = 'Public IP Address'},
+		local_ip    = {label = 'Local IP Address', hidden = true},
+		admin_page  = {label = 'VPS admin page of this machine'},
+		ssh_key_ok  = {readonly = true, label = 'SSH key is up-to-date'},
+		cpu         = {readonly = true, label = 'CPU'},
 		cores       = {readonly = true, w = 20},
-		ram         = {readonly = true, w = 60, filesize_decimals = 1, text = 'RAM Size', compute = compute_ram},
-		hdd         = {readonly = true, w = 60, filesize_decimals = 1, text = 'Root Disk Size', compute = compute_hdd},
-		os_ver      = {readonly = true, text = 'Operating System'},
-		mysql_ver   = {readonly = true, text = 'MySQL Version'},
-		uptime      = {readonly = true, text = 'Uptime', 'duration', compute = compute_uptime},
+		ram         = {readonly = true, w = 60, filesize_decimals = 1, label = 'RAM Size', compute = compute_ram},
+		hdd         = {readonly = true, w = 60, filesize_decimals = 1, label = 'Root Disk Size', compute = compute_hdd},
+		os_ver      = {readonly = true, label = 'Operating System'},
+		mysql_ver   = {readonly = true, label = 'MySQL Version'},
+		uptime      = {readonly = true, label = 'Uptime', 'duration', compute = compute_uptime},
 	},
 	compute_row_vals = function(self, vals)
 		vals.t1 = nil
@@ -3868,11 +3947,11 @@ rowset.deploys = sql_rowset{
 				return vars and vars.live_now and 'live' or null
 			end,
 		},
-		cpu_max  = {'percent_int', text = 'CPU Max %'               , compute = compute_cpu_max  , w = 60, align = 'right', },
-		rss      = {'filesize'   , text = 'RSS (Resident Set Size)' , compute = compute_rss      , filesize_magnitude = 'M'},
-		lua_heap = {'filesize'   , text = 'Lua Heap Size'           , compute = compute_lua_heap , filesize_magnitude = 'M'},
-		ram_free = {'filesize'   , text = 'RAM free (total)'        , compute = compute_ram_free , filesize_magnitude = 'M'},
-		ram      = {'filesize'   , text = 'RAM size'                , compute = compute_ram      , filesize_magnitude = 'M'},
+		cpu_max  = {'percent_int', label = 'CPU Max %'               , compute = compute_cpu_max  , w = 60, align = 'right', },
+		rss      = {'filesize'   , label = 'RSS (Resident Set Size)' , compute = compute_rss      , filesize_magnitude = 'M'},
+		lua_heap = {'filesize'   , label = 'Lua Heap Size'           , compute = compute_lua_heap , filesize_magnitude = 'M'},
+		ram_free = {'filesize'   , label = 'RAM free (total)'        , compute = compute_ram_free , filesize_magnitude = 'M'},
+		ram      = {'filesize'   , label = 'RAM size'                , compute = compute_ram      , filesize_magnitude = 'M'},
 		profiler_started = {'bool',
 			compute = deploy_state_var_compute_func'profiler_started',
 		},
@@ -4089,8 +4168,8 @@ rowset.config = virtual_rowset(function(self, ...)
 	self.allow = 'admin'
 	self.fields = {
 		{name = 'config_id', 'double'},
-		{name = 'mm_pubkey', text = 'MM\'s Public Key', maxlen = 8192},
-		{name = 'mysql_root_pass', text = 'MySQL Root Password'},
+		{name = 'mm_pubkey', label = 'MM\'s Public Key', maxlen = 8192},
+		{name = 'mysql_root_pass', label = 'MySQL Root Password'},
 	}
 	self.pk = 'config_id'
 

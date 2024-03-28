@@ -1,8 +1,11 @@
+BUGS
 ------------------------------------------------------------------------------
+- threads leak
+
+
 MILESTONES
-
+------------------------------------------------------------------------------
 - incremental file backups with rsync to complement xbkps
-
 - restore:
 	- stop all deploys
 	- restore db
@@ -10,21 +13,35 @@ MILESTONES
 	- update deploy db
 	- start all deploys
 
-
 - deploy backup & restore via mysqldump (with app stop for restore)
 
+
+MONITORING
 ------------------------------------------------------------------------------
-BUGS
+- disk per app
+- app process list
+- remote set logging.filter
+- separate filters for file log vs server log
+- set logging.debug automatically when directly monitoring
+- global process list (requires root mm agent)
 
-- http: http_gzip_encode thread is gc'ed but does not explicitly terminates.
-- mysql connpool: retry
 
-
+ADMIN
 ------------------------------------------------------------------------------
+- app tenants
+- app users
+-
+
+
+MYSQL
+------------------------------------------------------------------------------
+- start/stop/restart mysql server
+-
+
+
 TODO
-
-- mysql connpool: retry
-- mm: mysql start/stop/restart server
+------------------------------------------------------------------------------
+- stop server without killing it
 
 - let sqlpp tell xrowset when tables change, with control for when to
 push changelists i.e. begin|end_rowset_changed().
@@ -36,25 +53,26 @@ push changelists i.e. begin|end_rowset_changed().
 - xrowset: gen col_map for self:insert_into() etc. from all non-r/o cols.
 	- remove all colmaps.
 
-- mm: save logs (excluding debug lines) in partitioned tables.
+- save logs (excluding debug lines) in partitioned tables.
 
-- mm: alerts:
-	events:
-		- the app stopped sending procinfo
-		- max proc on machine is > X % for Y s in a row
-		- free ram on machine is < X MB
-		- app rss is > X MB
-	actions:
-		- log alert
-		- send email describing the situation
-	complications:
-		- prevent repeat email for the same alert type at intervals < X hours
-
-- mm: auto-restart when lost contact (restart -f ?).
+- auto-restart when lost contact (restart -f ?).
 
 
 ------------------------------------------------------------------------------
 THINK
 - kbytes() with variable magnitude or max decimals?
-- x-chart: sub-unit log-1024-based steps
+
+
+ALERTS
+------------------------------------------------------------------------------
+events:
+	- the app stopped sending procinfo
+	- max proc on machine is > X % for Y s in a row
+	- free ram on machine is < X MB
+	- app rss is > X MB
+actions:
+	- log alert
+	- send email describing the situation
+complications:
+	- prevent repeat email for the same alert type at intervals < X hours
 
