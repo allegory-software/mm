@@ -1,6 +1,16 @@
 BUGS
 ------------------------------------------------------------------------------
 - threads leak
+- windows:
+	x:\sdk\bin\windows\..\..\lua\sock.lua:1361:
+	attempt to perform arithmetic on local 'n' (a string value)
+
+
+FRICTION
+------------------------------------------------------------------------------
+- xrowset: must call update_client_fields() every time client_fields are needed.
+- xrowset: manual_init_fields=true hack because we need to delay init_fields().
+- xrowset: must call schema:resolve_types() on client-side because unserializable functions.
 
 
 MILESTONES
@@ -75,4 +85,10 @@ actions:
 	- send email describing the situation
 complications:
 	- prevent repeat email for the same alert type at intervals < X hours
+
+
+
+LATER
+------------------------------------------------------------------------------
+- feature: generate/update list of putty sessions on mm windows client
 
