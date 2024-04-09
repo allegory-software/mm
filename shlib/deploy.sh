@@ -40,7 +40,7 @@ machine_prepare() {
 	checkvars MACHINE MYSQL_ROOT_PASS DHPARAM-
 
 	# disable clound-init because it resets our changes on reboot.
-	sudo touch /etc/cloud/cloud-init.disabled
+	touch /etc/cloud/cloud-init.disabled
 
 	machine_set_hostname $MACHINE
 	machine_set_timezone UTC
@@ -230,10 +230,13 @@ deploy_issue_cert() { # DOMAIN
 }
 
 deploy_setup() {
-	checkvars DEPLOY MYSQL_PASS GIT_HOSTS-
+	checkvars DEPLOY MYSQL_PASS GIT_HOSTS- PUBKEY-
 
 	user_create    $DEPLOY
 	user_lock_pass $DEPLOY
+
+	ssh_pubkey_update_for_user $DEPLOY mm "$PUBKEY"
+	ssh_pubkey_for_user $DEPLOY mm  # print it so we can check it
 
 	ssh_git_keys_update_for_user $DEPLOY
 	git_config_user "mm@allegory.ro" "Many Machines"
@@ -283,6 +286,9 @@ deploy() {
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk \
 		/home/$DEPLOY/$APP/sdk "$SDK_VERSION" sdk
+
+	must cd /home/$DEPLOY/$APP/sdk
+	run_as $DEPLOY git submodule update --init canvas-ui
 
 	git_clone_for $DEPLOY \
 		git@github.com:allegory-software/allegory-sdk-bin-debian10 \

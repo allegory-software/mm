@@ -36,6 +36,7 @@ git_clone_for() { # USER REPO DIR VERSION LABEL
 	say "Pulling $DIR $VERSION ..."
 	(
 	must mkdir -p $DIR
+	must chown -R root:root $DIR
 	must cd $DIR
 	[ -d .git ] || must git init -q
 	git ls-remote --exit-code origin 2>/dev/null && must git remote remove origin
@@ -45,8 +46,10 @@ git_clone_for() { # USER REPO DIR VERSION LABEL
 	must git -c advice.detachedHead=false checkout -q -B "$VERSION" "origin/$VERSION"
 	[ "$LABEL" ] && echo "${LABEL}_commit=$(git rev-parse --short HEAD)"
 	exit 0
-	) || exit
+	)
+	local ret=$?
 	must chown -R $USER:$USER $DIR
+	[ $ret != 0 ] && exit
 }
 
 mgit_install() {

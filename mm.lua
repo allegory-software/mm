@@ -1,5 +1,5 @@
---go@ x:\sdk\bin\windows\luajit x:\mm\mm.lua -vv run
---go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
+--go@ plink d10 -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -v run
+--go@ x:\sdk\bin\windows\luajit x:\mm\mm.lua -v run
 --go@ plink mm-prod -t -batch mm/sdk/bin/linux/luajit mm/mm.lua -vv run
 --[[
 
@@ -52,9 +52,6 @@ LIMITATIONS
 	- one SSH key for git access for each git hosting provider.
 
 ]]
-
-require'glue'
-config('www_dirs', 'www;sdk/www;sdk/canvas-ui/www')
 
 --db schema ------------------------------------------------------------------
 
@@ -329,6 +326,8 @@ local function split2(sep, s)
 	local s1, s2 = s:match('^(.-)'..esc(sep)..'(.*)')
 	return repl(s1, ''), repl(s2, '')
 end
+
+mm.print_rowset_cols = {}
 
 --web api / server -----------------------------------------------------------
 
@@ -629,19 +628,20 @@ rowset.running_tasks = virtual_rowset(function(self)
 
 end)
 
+mm.print_rowset_cols.running_tasks = [[
+	id
+	type
+	name
+	machine
+	deploy
+	status
+	start_time
+	duration
+	exit_code
+	errors
+]]
 function mm.print_running_tasks()
-	mm.print_rowset('running_tasks', [[
-		id
-		type
-		name
-		machine
-		deploy
-		status
-		start_time
-		duration
-		exit_code
-		errors
-	]])
+	mm.print_rowset('running_tasks')
 end
 
 function api.tail_running_task(opt, task_id)
@@ -778,7 +778,8 @@ function mm.get_rowset(name, filter)
 	else
 		NYI'get_rowset'
 	end
-	mm.schema:resolve_types(t.fields, {translate = true})
+	--add unserializable field attrs (eg. to_text) back on the client-side.
+	mm.schema:resolve_types(t.fields)
 	return t
 end
 
@@ -794,12 +795,12 @@ function parse_key_and_vals(row_type, name, key, vals) --col1=val1,...
 	for kv in (vals or ''):gmatch'[^,]+' do
 		local k,v = split2('=', kv)
 		assert(k, 'key1=value1,... expected')
-		t[k] = v
+		t[k] = repl(v, nil, null)
 	end
 	return t
 end
 
-function print_update_result(t)
+function print_update_result(rowset_name, t)
 	local row = t.rows and t.rows[1]
 	if row.error then
 		print('Error: '..row.error)
@@ -811,10 +812,17 @@ function print_update_result(t)
 		end
 	end
 	if row.values then
-		mysql_print_result({rows = {t.rows[1].values}, fields = t.fields})
+		--add unserializable field attrs (eg. to_text) back on the client-side.
+		mm.schema:resolve_types(t.fields)
+		mysql_print_result({
+			rows = {t.rows[1].values},
+			fields = t.fields,
+			showcols = mm.print_rowset_cols[rowset_name],
+		})
 	end
-	print'OK'
 end
+
+mm.print_rowset_cols = {} --{rowset->'col1 '}
 
 function mm.print_rowset(opt, name, cols, filter)
 	if opt ~= nil and not istab(opt) then
@@ -823,7 +831,7 @@ function mm.print_rowset(opt, name, cols, filter)
 	local t = mm.get_rowset(name or 'rowsets', filter)
 	mysql_print_result(update({
 		rows = t.rows, fields = t.fields,
-		showcols = cols,
+		showcols = cols or mm.print_rowset_cols[name],
 	}, opt))
 end
 cmd('r|rowset [-cols=col1,...] [NAME] [FILTER]', 'Show a rowset', function(opt, name, filter)
@@ -844,11 +852,11 @@ function mm.update_row(row_type, name, vals)
 	return t
 end
 cmd('add NAME KEY col1=val1,...', 'Insert a row into a rowset', function(opt, name, key, vals)
-	print_update_result(mm.update_row('new', name,
+	print_update_result(name, mm.update_row('new', name,
 		parse_key_and_vals('new', name, key, vals)))
 end)
 cmd('set NAME KEY col1=val1,...', 'Update a row from a rowset', function(opt, name, key, vals)
-	print_update_result(mm.update_row('update', name,
+	print_update_result(name, mm.update_row('update', name,
 		parse_key_and_vals('update', name, key, vals)))
 end)
 
@@ -860,7 +868,7 @@ function mm.delete_row(name, key)
 	return mm.update_row('remove', name, key)
 end
 cmd('del NAME KEY', 'Delete a row from a rowset', function(opt, name, key)
-	print_update_result(mm.delete_row(name, parse_key_and_vals('delete', name, key)))
+	print_update_result(name, mm.delete_row(name, parse_key_and_vals('delete', name, key)))
 end)
 
 --client info api ------------------------------------------------------------
@@ -1033,7 +1041,7 @@ function mm.ssh_key_fix_perms(opt, machine)
 	else
 		chmod(s, '0600')
 	end
-	say'Perms fixed.'
+	notify('Perms fixed for: %s', s)
 end
 cmd_ssh_keys('ssh-key-fix-perms [MACHINE]', 'Fix SSH key perms for VBOX',
 	mm.ssh_key_fix_perms)
@@ -1052,6 +1060,15 @@ function mm.ssh_key_gen_ppk(machine)
 	notify('PPK file generated: %s', ppk)
 end
 
+function mm.putty_session_exists(name)
+	if not win then return false end
+	local k, err = winapi.RegOpenKey('HKEY_CURRENT_USER',
+		[[SimonTatham\PuTTY\Sessions\\]]..name)
+	if k then k:close(); return true end
+	assert(err == 'not_found')
+	return false
+end
+
 function mm.putty_session_update(md)
 	if not win then return end
 	local ip, m = mm.ip(md)
@@ -1063,25 +1080,6 @@ function mm.putty_session_update(md)
 	hk:set('PublicKeyFile', ppk)
 	hk:close()
 	notify('Putty session %s: %s', created and 'created' or 'updated', md)
-end
-
-function mm.putty_session_deploy_update(deploy)
-	if not win then return end
-	local hk = winapi.RegCreateKey('HKEY_CURRENT_USER',
-		[[SimonTatham\PuTTY\Sessions\\]]..deploy)
-	hk:set('HostName', deploy..'@'..ip)
-	hk:set('PublicKeyFile', ppk)
-	hk:close()
-	notify('Putty session updated: %s', machine)
-end
-
-function mm.putty_session_exists(name)
-	if not win then return false end
-	local k, err = winapi.RegOpenKey('HKEY_CURRENT_USER',
-		[[SimonTatham\PuTTY\Sessions\\]]..name)
-	if k then k:close(); return true end
-	assert(err == 'not_found')
-	return false
 end
 
 function mm.putty_session_rename(old_name, new_name)
@@ -1402,7 +1400,7 @@ end)
 local deploy_vars --fw. decl.
 
 --TIP: make a putty session called `mm` where you set the window size,
---uncheck "warn on close" and whatever else you need to make worrking
+--uncheck "warn on close" and whatever else you need to make working
 --with putty comfortable for you.
 cmd_ssh(Windows, 'putty [-shlib] MACHINE|DEPLOY', 'SSH into machine with putty',
 function(opt, md)
@@ -1412,7 +1410,7 @@ function(opt, md)
 		indir(mm.bindir, 'putty'),
 		mm.putty_session_exists(md) and md or 'mm',
 		mm.ppkfile(m),
-		deploy and md or 'root',
+		'root',
 		ip
 	)
 	if opt.shlib or deploy then
@@ -1436,7 +1434,7 @@ function(opt, md)
 			)
 		end
 		local s = catany('\n',
-			'export MM_TMP_SH=/root/.mm.$$.sh',
+			'export MM_TMP_SH=~/.mm.$$.sh',
 			'cat << \'EOFFF\' > $MM_TMP_SH',
 			'rm -f $MM_TMP_SH',
 			script,
@@ -1691,31 +1689,33 @@ end)
 
 --machine listing ------------------------------------------------------------
 
+mm.print_rowset_cols.providers = [[
+	provider
+	website
+	note
+	ctime
+]]
 cmd_machines('providers', 'Show the list of providers', function(opt)
-	mm.print_rowset('providers', [[
-		provider
-		website
-		note
-		ctime
-	]])
+	mm.print_rowset('providers')
 end)
 
+mm.print_rowset_cols.machines = [[
+	machine
+	active
+	public_ip
+	cpu_max
+	ram_free
+	hdd_free
+	cores
+	ram
+	hdd
+	cpu
+	os_ver
+	mysql_ver
+	ctime
+]]
 cmd_machines('m|machines', 'Show the list of machines', function(opt)
-	mm.print_rowset('machines', [[
-		machine
-		active
-		public_ip
-		cpu_max
-		ram_free
-		hdd_free
-		cores
-		ram
-		hdd
-		cpu
-		os_ver
-		mysql_ver
-		ctime
-	]])
+	mm.print_rowset('machines')
 end)
 
 --machine rename -------------------------------------------------------------
@@ -1869,23 +1869,24 @@ cmd_deploys('issue-ssl-cert DEPLOY',
 
 --deploy listing -------------------------------------------------------------
 
+mm.print_rowset_cols.deploys = [[
+	deploy
+	active
+	status
+	machine
+	cpu_max
+	rss
+	lua_heap
+	active
+	app
+	env
+	deployed_at
+	started_at
+	wanted_app_version=app_want deployed_app_version=app_depv deployed_app_commit=app_depc
+	wanted_sdk_version=sdk_want deployed_sdk_version=sdk_depv deployed_sdk_commit=sdk_depc
+]]
 cmd_deploys('d|deploys', 'Show the list of deployments', function()
-	mm.print_rowset('deploys', [[
-		deploy
-		active
-		status
-		machine
-		cpu_max
-		rss
-		lua_heap
-		active
-		app
-		env
-		deployed_at
-		started_at
-		wanted_app_version=app_want deployed_app_version=app_depv deployed_app_commit=app_depc
-		wanted_sdk_version=sdk_want deployed_sdk_version=sdk_depv deployed_sdk_commit=sdk_depc
-	]])
+	mm.print_rowset('deploys')
 end)
 
 --deploy deploy --------------------------------------------------------------
@@ -1977,6 +1978,8 @@ function api.deploy(opt, deploy, app_ver, sdk_ver)
 
 	local vars = deploy_vars(deploy)
 	update(vars, git_hosting_vars())
+
+	vars.PUBKEY = mm.ssh_pubkey()
 
 	if vars.DOMAIN then
 		local cert_dir = varpath('.acme.sh.etc', vars.DOMAIN)
@@ -3352,13 +3355,6 @@ local function deploy_arg(s, required)
 	return t
 end
 
-local function machine_arg(s, required)
-	local machine = str_arg(s)
-	local t = machine and first_row('select * from machine where machine = ?', machine)
-	checkfound(t or not required, 'machine not found: %s', s)
-	return t
-end
-
 local function dbk_copy_arg(s, required)
 	local dbk_copy = id_arg(s)
 	local t = dbk_copy and first_row('select * from dbk_copy where dbk_copy = ?', dbk_copy)
@@ -3607,6 +3603,7 @@ end
 
 function deploy_update(deploy, delete)
 	deploy_set_scheduled_backup_tasks(deploy, not delete)
+	--TODO: update putty session
 end
 
 function machine_schedule_backup_tasks()
@@ -3990,7 +3987,7 @@ rowset.deploys = sql_rowset{
 	update_row = function(self, row)
 		local d0 = row['deploy:old']
 		local d1 = row.deploy
-		if row.machine then
+		if repl(row.machine, null, nil) then
 			local m0 = first_row([[
 				select machine from deploy where deploy = ?
 				and deployed_app_commit is not null
