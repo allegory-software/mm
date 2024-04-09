@@ -4257,4 +4257,4 @@ cmd_tasks('tt MACHINE', 'Test task', function(opt, machine)
 	mm.test(opt, machine)
 end)
 
-return mm:run()
+exit(mm:run())
