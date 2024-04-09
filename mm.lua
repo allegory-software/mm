@@ -1474,7 +1474,7 @@ cmd_files('mc MACHINE [DIR]', 'Run `mc` on machine',
 		mm.ssh_cli({tty = true}, md, 'mc', dir)
 	end)
 
-cmd_files('mcedit MACHINE:DIR', 'Run `mcedit` on machine',
+cmd_files('mcedit MACHINE:FILE', 'Run `mcedit` on machine',
 	function(opt, md_file)
 		local md, file = split2(':', md_file)
 		checkarg(md and file, 'machine:file expected')
